@@ -611,48 +611,291 @@ with tab4:
     st.header("Step 4: Generate Publication-Ready Graphs")
     
     if st.session_state.processed_data is not None:
-        # Graph customization
-        col1, col2 = st.columns(2)
-        with col1:
-            graph_type = st.selectbox("Graph Type", ['Bar Chart', 'Heatmap', 'Both'])
-            title = st.text_input("Graph Title", "Relative Gene Expression")
+        # Initialize graph settings in session state
+        if 'graph_settings' not in st.session_state:
+            st.session_state.graph_settings = {
+                'title': 'Relative Gene Expression',
+                'ylabel': 'Fold Change (Relative to Control)',
+                'xlabel': 'Sample',
+                'show_error': True,
+                'font_size': 14,
+                'title_size': 20,
+                'bar_width': 0.8,
+                'color_scheme': 'plotly_white',
+                'show_legend': True,
+                'legend_position': 'top right',
+                'show_grid': True,
+                'bar_colors': None,
+                'figure_width': 1000,
+                'figure_height': 600,
+                'show_significance': True,
+                'sig_font_size': 16
+            }
         
-        with col2:
-            ylabel = st.text_input("Y-axis Label", "Fold Change (Relative to Control)")
-            show_error = st.checkbox("Show Error Bars", value=True)
+        # Graph type selection
+        st.subheader("🎨 Graph Customization")
         
-        # Generate graph
+        tab_type, tab_style, tab_colors, tab_labels = st.tabs([
+            "📊 Graph Type", "🎨 Style", "🌈 Colors", "📝 Labels"
+        ])
+        
+        # TAB: Graph Type
+        with tab_type:
+            col1, col2 = st.columns(2)
+            with col1:
+                graph_type = st.selectbox("Graph Type", ['Bar Chart', 'Heatmap', 'Both'])
+            with col2:
+                if graph_type in ['Bar Chart', 'Both']:
+                    chart_orientation = st.radio("Orientation", ['Vertical', 'Horizontal'])
+        
+        # TAB: Style Settings
+        with tab_style:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.session_state.graph_settings['font_size'] = st.slider(
+                    "Axis Font Size", 10, 24, st.session_state.graph_settings['font_size']
+                )
+                st.session_state.graph_settings['title_size'] = st.slider(
+                    "Title Font Size", 14, 32, st.session_state.graph_settings['title_size']
+                )
+                st.session_state.graph_settings['sig_font_size'] = st.slider(
+                    "Significance Star Size", 10, 24, st.session_state.graph_settings['sig_font_size']
+                )
+            
+            with col2:
+                st.session_state.graph_settings['bar_width'] = st.slider(
+                    "Bar Width", 0.1, 1.0, st.session_state.graph_settings['bar_width']
+                )
+                st.session_state.graph_settings['figure_width'] = st.slider(
+                    "Figure Width (px)", 600, 1600, st.session_state.graph_settings['figure_width']
+                )
+                st.session_state.graph_settings['figure_height'] = st.slider(
+                    "Figure Height (px)", 400, 1200, st.session_state.graph_settings['figure_height']
+                )
+            
+            with col3:
+                st.session_state.graph_settings['color_scheme'] = st.selectbox(
+                    "Color Theme",
+                    ['plotly_white', 'plotly', 'plotly_dark', 'ggplot2', 'seaborn', 
+                     'simple_white', 'presentation', 'none'],
+                    index=['plotly_white', 'plotly', 'plotly_dark', 'ggplot2', 'seaborn', 
+                           'simple_white', 'presentation', 'none'].index(
+                        st.session_state.graph_settings['color_scheme']
+                    )
+                )
+                st.session_state.graph_settings['show_legend'] = st.checkbox(
+                    "Show Legend", st.session_state.graph_settings['show_legend']
+                )
+                st.session_state.graph_settings['show_grid'] = st.checkbox(
+                    "Show Grid", st.session_state.graph_settings['show_grid']
+                )
+                st.session_state.graph_settings['show_error'] = st.checkbox(
+                    "Show Error Bars", st.session_state.graph_settings['show_error']
+                )
+                st.session_state.graph_settings['show_significance'] = st.checkbox(
+                    "Show Significance Stars", st.session_state.graph_settings['show_significance']
+                )
+        
+        # TAB: Color Customization
+        with tab_colors:
+            st.markdown("**Custom Colors for Each Gene/Target**")
+            
+            targets = st.session_state.processed_data['Target'].unique()
+            if st.session_state.graph_settings['bar_colors'] is None:
+                # Initialize default colors
+                default_colors = px.colors.qualitative.Plotly
+                st.session_state.graph_settings['bar_colors'] = {
+                    target: default_colors[i % len(default_colors)] 
+                    for i, target in enumerate(targets)
+                }
+            
+            cols = st.columns(min(3, len(targets)))
+            for i, target in enumerate(targets):
+                with cols[i % 3]:
+                    st.session_state.graph_settings['bar_colors'][target] = st.color_picker(
+                        f"{target}",
+                        st.session_state.graph_settings['bar_colors'].get(target, '#636EFA')
+                    )
+            
+            if st.button("🎨 Reset to Default Colors"):
+                default_colors = px.colors.qualitative.Plotly
+                st.session_state.graph_settings['bar_colors'] = {
+                    target: default_colors[i % len(default_colors)] 
+                    for i, target in enumerate(targets)
+                }
+                st.rerun()
+        
+        # TAB: Labels
+        with tab_labels:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.session_state.graph_settings['title'] = st.text_input(
+                    "Graph Title",
+                    st.session_state.graph_settings['title']
+                )
+                st.session_state.graph_settings['xlabel'] = st.text_input(
+                    "X-axis Label",
+                    st.session_state.graph_settings['xlabel']
+                )
+                st.session_state.graph_settings['ylabel'] = st.text_input(
+                    "Y-axis Label",
+                    st.session_state.graph_settings['ylabel']
+                )
+            
+            with col2:
+                if st.session_state.graph_settings['show_legend']:
+                    st.session_state.graph_settings['legend_position'] = st.selectbox(
+                        "Legend Position",
+                        ['top right', 'top left', 'bottom right', 'bottom left', 
+                         'center right', 'center left'],
+                        index=['top right', 'top left', 'bottom right', 'bottom left',
+                               'center right', 'center left'].index(
+                            st.session_state.graph_settings['legend_position']
+                        )
+                    )
+        
+        # Generate graph with all settings
+        st.markdown("---")
+        st.subheader("📊 Live Preview")
+        
         if graph_type in ['Bar Chart', 'Both']:
-            st.subheader("Bar Chart")
-            fig_bar = GraphGenerator.create_bar_chart(
-                st.session_state.processed_data,
-                title,
-                ylabel,
-                show_error
+            # Create bar chart with custom settings
+            fig_bar = go.Figure()
+            
+            settings = st.session_state.graph_settings
+            data = st.session_state.processed_data
+            samples = data['Sample'].unique()
+            targets = data['Target'].unique()
+            
+            for target in targets:
+                target_data = data[data['Target'] == target]
+                
+                fig_bar.add_trace(go.Bar(
+                    name=target,
+                    x=target_data['Sample'] if chart_orientation == 'Vertical' else target_data['Relative_Expression'],
+                    y=target_data['Relative_Expression'] if chart_orientation == 'Vertical' else target_data['Sample'],
+                    orientation='v' if chart_orientation == 'Vertical' else 'h',
+                    error_y=dict(
+                        type='data',
+                        array=target_data['SEM'] * 1.96 if settings['show_error'] and chart_orientation == 'Vertical' else None,
+                        visible=settings['show_error'] and chart_orientation == 'Vertical'
+                    ) if chart_orientation == 'Vertical' else None,
+                    error_x=dict(
+                        type='data',
+                        array=target_data['SEM'] * 1.96 if settings['show_error'] and chart_orientation == 'Horizontal' else None,
+                        visible=settings['show_error'] and chart_orientation == 'Horizontal'
+                    ) if chart_orientation == 'Horizontal' else None,
+                    text=target_data['significance'] if settings['show_significance'] else None,
+                    textposition='outside',
+                    textfont=dict(size=settings['sig_font_size']),
+                    marker=dict(color=settings['bar_colors'].get(target, '#636EFA')),
+                    width=settings['bar_width'] if chart_orientation == 'Vertical' else None
+                ))
+            
+            # Legend position mapping
+            legend_positions = {
+                'top right': dict(x=1, y=1, xanchor='right', yanchor='top'),
+                'top left': dict(x=0, y=1, xanchor='left', yanchor='top'),
+                'bottom right': dict(x=1, y=0, xanchor='right', yanchor='bottom'),
+                'bottom left': dict(x=0, y=0, xanchor='left', yanchor='bottom'),
+                'center right': dict(x=1, y=0.5, xanchor='right', yanchor='middle'),
+                'center left': dict(x=0, y=0.5, xanchor='left', yanchor='middle'),
+            }
+            
+            fig_bar.update_layout(
+                title=dict(text=settings['title'], font=dict(size=settings['title_size'])),
+                xaxis_title=settings['xlabel'] if chart_orientation == 'Vertical' else settings['ylabel'],
+                yaxis_title=settings['ylabel'] if chart_orientation == 'Vertical' else settings['xlabel'],
+                barmode='group',
+                template=settings['color_scheme'],
+                font=dict(size=settings['font_size']),
+                height=settings['figure_height'],
+                width=settings['figure_width'],
+                showlegend=settings['show_legend'],
+                legend=legend_positions[settings['legend_position']] if settings['show_legend'] else dict(),
+                xaxis=dict(showgrid=settings['show_grid']),
+                yaxis=dict(showgrid=settings['show_grid'])
             )
+            
             st.plotly_chart(fig_bar, use_container_width=True)
             st.session_state.current_graph = fig_bar
         
         if graph_type in ['Heatmap', 'Both']:
             st.subheader("Heatmap")
-            fig_heat = GraphGenerator.create_heatmap(st.session_state.processed_data)
+            
+            # Create customizable heatmap
+            pivot = st.session_state.processed_data.pivot(
+                index='Target', columns='Sample', values='Relative_Expression'
+            )
+            
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=pivot.values,
+                x=pivot.columns,
+                y=pivot.index,
+                colorscale='RdYlGn',
+                text=np.round(pivot.values, 2),
+                texttemplate='%{text}',
+                textfont={"size": st.session_state.graph_settings['font_size']},
+                colorbar=dict(title="Fold Change", titlefont=dict(size=st.session_state.graph_settings['font_size']))
+            ))
+            
+            fig_heat.update_layout(
+                title=st.session_state.graph_settings['title'] + " (Heatmap)",
+                xaxis_title=st.session_state.graph_settings['xlabel'],
+                yaxis_title="Gene",
+                height=400 + len(pivot.index) * 30,
+                width=st.session_state.graph_settings['figure_width'],
+                font=dict(size=st.session_state.graph_settings['font_size'])
+            )
+            
             st.plotly_chart(fig_heat, use_container_width=True)
         
-        # Interactive editing
-        st.subheader("🎨 Interactive Graph Editor")
-        with st.expander("Customize appearance"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                font_size = st.slider("Font Size", 10, 24, 14)
-            with col2:
-                bar_width = st.slider("Bar Width", 0.3, 1.0, 0.8)
-            with col3:
-                color_scheme = st.selectbox("Color Scheme", 
-                    ['plotly', 'ggplot2', 'seaborn', 'simple_white'])
-            
-            if st.button("Apply Changes"):
-                fig_bar.update_layout(font=dict(size=font_size), template=color_scheme)
-                st.plotly_chart(fig_bar, use_container_width=True)
+        # Quick presets
+        st.markdown("---")
+        st.subheader("⚡ Quick Presets")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("📄 Publication Style"):
+                st.session_state.graph_settings.update({
+                    'color_scheme': 'simple_white',
+                    'font_size': 14,
+                    'title_size': 18,
+                    'show_grid': True,
+                    'figure_width': 1000,
+                    'figure_height': 600
+                })
+                st.rerun()
+        
+        with col2:
+            if st.button("🎨 Presentation Style"):
+                st.session_state.graph_settings.update({
+                    'color_scheme': 'presentation',
+                    'font_size': 18,
+                    'title_size': 24,
+                    'show_grid': False,
+                    'figure_width': 1200,
+                    'figure_height': 700
+                })
+                st.rerun()
+        
+        with col3:
+            if st.button("🌙 Dark Mode"):
+                st.session_state.graph_settings.update({
+                    'color_scheme': 'plotly_dark',
+                    'font_size': 14,
+                    'title_size': 20,
+                    'show_grid': True
+                })
+                st.rerun()
+        
+        with col4:
+            if st.button("🔄 Reset All"):
+                del st.session_state.graph_settings
+                st.rerun()
+    
     else:
         st.warning("⚠️ Run analysis first")
 
@@ -689,42 +932,146 @@ with tab5:
             )
         
         with col2:
-            # Graph export
-            st.markdown("### 📈 Graph (PNG/SVG)")
+            # Graph export using Plotly's built-in HTML export (no Kaleido needed)
+            st.markdown("### 📈 Graph Export")
+            
             if st.session_state.current_graph:
-                img_format = st.radio("Format", ['PNG', 'SVG'])
-                
-                img_bytes = st.session_state.current_graph.to_image(
-                    format=img_format.lower(),
-                    width=1200,
-                    height=800,
-                    scale=2
+                # Export format selection
+                export_format = st.radio(
+                    "Export Format",
+                    ['Interactive HTML', 'Static Image (PNG)', 'Vector (SVG)'],
+                    help="HTML is recommended - works in browsers and presentations"
                 )
                 
-                st.download_button(
-                    label=f"📥 Download {img_format}",
-                    data=img_bytes,
-                    file_name=f"qPCR_graph_{datetime.now().strftime('%Y%m%d_%H%M')}.{img_format.lower()}",
-                    mime=f"image/{img_format.lower()}"
-                )
+                if export_format == 'Interactive HTML':
+                    # Export as interactive HTML (no Kaleido needed!)
+                    html_buffer = io.StringIO()
+                    st.session_state.current_graph.write_html(html_buffer)
+                    html_data = html_buffer.getvalue()
+                    
+                    st.download_button(
+                        label="📥 Download Interactive HTML",
+                        data=html_data,
+                        file_name=f"qPCR_graph_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                        mime="text/html",
+                        help="Open in any browser - fully interactive and zoomable!"
+                    )
+                    
+                    st.info("💡 HTML graphs work in PowerPoint, Google Slides, and all browsers!")
+                
+                elif export_format in ['Static Image (PNG)', 'Vector (SVG)']:
+                    # Try to export as image (requires Kaleido)
+                    try:
+                        img_format = 'png' if export_format == 'Static Image (PNG)' else 'svg'
+                        
+                        img_bytes = st.session_state.current_graph.to_image(
+                            format=img_format,
+                            width=st.session_state.graph_settings['figure_width'],
+                            height=st.session_state.graph_settings['figure_height'],
+                            scale=2
+                        )
+                        
+                        st.download_button(
+                            label=f"📥 Download {img_format.upper()}",
+                            data=img_bytes,
+                            file_name=f"qPCR_graph_{datetime.now().strftime('%Y%m%d_%H%M')}.{img_format}",
+                            mime=f"image/{img_format}"
+                        )
+                        
+                    except Exception as e:
+                        st.error("⚠️ Image export requires Kaleido (not available in cloud)")
+                        st.info("**Workaround:** Download as HTML, then:")
+                        st.markdown("""
+                        1. **For PNG/JPG**: Open HTML in browser → Right-click graph → 'Save as image'
+                        2. **For SVG**: Open HTML in browser → Click camera icon → Select 'svg' format
+                        3. **Alternative**: Use screenshot tool for quick captures
+                        """)
+                        
+                        # Fallback: Show JSON data for offline rendering
+                        with st.expander("🔧 Advanced: Export as JSON (for offline rendering)"):
+                            json_data = st.session_state.current_graph.to_json()
+                            st.download_button(
+                                label="📥 Download Graph JSON",
+                                data=json_data,
+                                file_name=f"qPCR_graph_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                                mime="application/json"
+                            )
+                            st.caption("Use this JSON with Plotly offline to render images locally")
         
-        # JSON export for reproducibility
-        st.subheader("🔄 Reproducibility Package")
-        repro_data = {
-            'analysis_date': datetime.now().isoformat(),
-            'sample_mapping': st.session_state.sample_mapping,
-            'excluded_wells': list(st.session_state.excluded_wells),
-            'parameters': analysis_params if 'analysis_params' in locals() else {}
-        }
+        # CSV export for raw calculations
+        st.markdown("---")
+        st.subheader("📋 Additional Exports")
         
-        st.download_button(
-            label="📥 Download Analysis Config (JSON)",
-            data=json.dumps(repro_data, indent=2),
-            file_name=f"qPCR_config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-            mime="application/json"
-        )
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Export processed data as CSV
+            csv_buffer = io.StringIO()
+            st.session_state.processed_data.to_csv(csv_buffer, index=False)
+            
+            st.download_button(
+                label="📥 Download Calculations (CSV)",
+                data=csv_buffer.getvalue(),
+                file_name=f"qPCR_calculations_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv"
+            )
+        
+        with col2:
+            # JSON export for reproducibility
+            repro_data = {
+                'analysis_date': datetime.now().isoformat(),
+                'sample_mapping': st.session_state.sample_mapping,
+                'excluded_wells': list(st.session_state.excluded_wells),
+                'graph_settings': st.session_state.graph_settings,
+                'parameters': analysis_params if 'analysis_params' in locals() else {}
+            }
+            
+            st.download_button(
+                label="📥 Download Config (JSON)",
+                data=json.dumps(repro_data, indent=2),
+                file_name=f"qPCR_config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json"
+            )
+        
+        with col3:
+            # Export graph settings preset
+            if st.button("💾 Save Graph Preset"):
+                preset_name = st.text_input("Preset Name", "my_preset")
+                if preset_name:
+                    preset_data = json.dumps(st.session_state.graph_settings, indent=2)
+                    st.download_button(
+                        label=f"📥 Download '{preset_name}'",
+                        data=preset_data,
+                        file_name=f"graph_preset_{preset_name}.json",
+                        mime="application/json"
+                    )
         
         st.success("✅ All export options ready!")
+        
+        # Export tips
+        with st.expander("💡 Export Tips & Best Practices"):
+            st.markdown("""
+            ### For Publications
+            - Download **Excel** for peer review (shows all calculations)
+            - Use **HTML** for interactive figures in supplementary materials
+            - Convert HTML to PNG/SVG in browser for print journals
+            
+            ### For Presentations
+            - **HTML** works directly in PowerPoint/Google Slides (drag & drop)
+            - Interactive graphs impress audiences!
+            - Or screenshot from browser for static slides
+            
+            ### For Patents/IP
+            - Download **Excel** (complete audit trail)
+            - Download **Config JSON** (reproducibility proof)
+            - Save **HTML** (timestamped visual evidence)
+            
+            ### Browser Screenshot Method
+            1. Download and open HTML file
+            2. **Chrome/Edge**: Right-click graph → "Save image as..."
+            3. **Firefox**: Right-click → "Take Screenshot" → Save
+            4. **Safari**: Right-click → "Export as Image..."
+            """)
     else:
         st.warning("⚠️ Complete analysis first")
 
