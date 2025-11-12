@@ -433,121 +433,160 @@ class GraphGenerator:
         sample_order: list = None,
         per_sample_overrides: dict = None
     ) -> go.Figure:
-        """
-        Create an interactive Plotly bar graph for the given gene, using user-defined settings.
-        Handles empty data safely and supports sample ordering + per-sample overrides.
-        """
-
+        """Create individual graph for each gene with proper data handling"""
+        
         # Guard against empty data
         if data is None or data.empty:
             fig = go.Figure()
-            fig.add_annotation(text="No data available for plotting", showarrow=False)
+            fig.add_annotation(text="No data available", showarrow=False)
             return fig
-
-        # Filter for this gene
-        if "Target" in data.columns:
-            gene_data = data[data["Target"] == gene].copy()
-        elif "Gene" in data.columns:
-            gene_data = data[data["Gene"] == gene].copy()
-        else:
-            gene_data = data.copy()
-
-        if gene_data.empty:
-            fig = go.Figure()
-            fig.add_annotation(text=f"No data found for {gene}", showarrow=False)
-            return fig
-
-        # Maintain custom sample order
+        
+        # Work with the gene data directly (it's already filtered by gene)
+        gene_data = data.copy()
+        
+        # Ensure we have required columns
+        required_cols = ['Condition', 'Relative_Expression', 'SEM']
+        missing = [col for col in required_cols if col not in gene_data.columns]
+        
+        # Try alternative column names
+        if 'Relative_Expression' not in gene_data.columns:
+            if 'Fold_Change' in gene_data.columns:
+                gene_data['Relative_Expression'] = gene_data['Fold_Change']
+            else:
+                st.error(f"Missing Relative_Expression or Fold_Change column for {gene}")
+                fig = go.Figure()
+                fig.add_annotation(text=f"Missing data columns for {gene}", showarrow=False)
+                return fig
+        
+        if 'SEM' not in gene_data.columns:
+            gene_data['SEM'] = 0
+        
+        # Apply sample ordering if provided
         if sample_order:
-            gene_data["Condition"] = pd.Categorical(
-                gene_data["Condition"], categories=sample_order, ordered=True
-            )
-            gene_data = gene_data.sort_values("Condition")
-
-        # Apply per-sample visibility overrides
-        if per_sample_overrides:
-            keep_rows = []
-            for _, row in gene_data.iterrows():
-                key = str((gene, row["Condition"]))
-                include = per_sample_overrides.get(key, {}).get("include", True)
-                keep_rows.append(include)
-            gene_data = gene_data[np.array(keep_rows)]
-
-        # Apply bar colors
-        default_color = settings.get("bar_colors", {}).get(
-            gene, "#4ECDC4"
-        )
-        bar_colors = []
-        for _, row in gene_data.iterrows():
-            key = str((gene, row["Condition"]))
-            color = (
-                per_sample_overrides.get(key, {}).get("color")
-                if per_sample_overrides
-                else None
-            )
-            bar_colors.append(color or default_color)
-
-        # Ensure numeric values
-        y_vals = pd.to_numeric(gene_data["Relative_Expression"], errors="coerce")
-        err_vals = pd.to_numeric(gene_data.get("SEM", 0), errors="coerce")
-
-        # Build figure
-        fig = go.Figure(
-            data=[
-                go.Bar(
-                    x=gene_data["Condition"],
-                    y=y_vals,
-                    error_y=dict(
-                        type="data",
-                        array=err_vals,
-                        visible=settings.get("show_error", True),
-                    ),
-                    text=gene_data.get("significance", ""),
-                    textposition="outside",
-                    marker=dict(
-                        color=bar_colors,
-                        line=dict(width=1, color="black"),
-                    ),
+            ordered = [c for c in sample_order if c in gene_data['Condition'].unique()]
+            other = [c for c in gene_data['Condition'].unique() if c not in ordered]
+            final_order = ordered + other
+            gene_data['Condition'] = pd.Categorical(gene_data['Condition'], categories=final_order, ordered=True)
+            gene_data = gene_data.sort_values('Condition')
+        else:
+            # Sort by group if available
+            if 'Group' in gene_data.columns:
+                group_order = ['Baseline', 'Negative Control', 'Positive Control', 'Treatment']
+                gene_data['group_sort'] = gene_data['Group'].apply(
+                    lambda x: group_order.index(x) if x in group_order else 999
                 )
-            ]
-        )
-
-        # Annotate expected direction if configured
-        if efficacy_config and "expected_direction" in efficacy_config:
-            direction = efficacy_config["expected_direction"].get(gene)
-            if direction == "up":
-                fig.add_annotation(
-                    text="↑ Expected Increase",
-                    xref="paper", yref="paper",
-                    x=0.02, y=0.95,
-                    showarrow=False, font=dict(color="red", size=12)
-                )
-            elif direction == "down":
-                fig.add_annotation(
-                    text="↓ Expected Decrease",
-                    xref="paper", yref="paper",
-                    x=0.02, y=0.95,
-                    showarrow=False, font=dict(color="blue", size=12)
-                )
-
-        # Layout settings
-        fig.update_layout(
-            title=f"{gene} Expression",
-            xaxis_title=settings.get("xlabel", "Condition"),
-            yaxis_title=settings.get("ylabel", "Fold Change"),
-            template=settings.get("color_scheme", "plotly_white"),
-            font=dict(size=settings.get("font_size", 14)),
-            height=settings.get("figure_height", 600),
-            width=settings.get("figure_width", 1000),
-            yaxis=dict(
-                type="log" if settings.get("y_log_scale", False) else "linear",
-                range=[
-                    settings.get("y_min", None),
-                    settings.get("y_max", None),
-                ],
+                gene_data = gene_data.sort_values(['group_sort', 'Condition'])
+        
+        # Get colors
+        if 'Group' in gene_data.columns:
+            default_color = settings.get('bar_colors', {}).get(gene, '#4ECDC4')
+            color_map = {
+                'Baseline': '#808080',
+                'Negative Control': '#FF6B6B',
+                'Positive Control': '#4ECDC4',
+                'Treatment': default_color
+            }
+            bar_colors = [color_map.get(g, default_color) for g in gene_data['Group']]
+        else:
+            default_color = settings.get('bar_colors', {}).get(gene, '#4ECDC4')
+            bar_colors = [default_color] * len(gene_data)
+        
+        # Get significance text
+        sig_text = gene_data.get('significance', [''] * len(gene_data))
+        
+        # Create figure
+        fig = go.Figure()
+        
+        # Error bars
+        error_array = gene_data['SEM'] * settings.get('error_multiplier', 1.96)
+        
+        # Add bar trace
+        fig.add_trace(go.Bar(
+            x=gene_data['Condition'],
+            y=gene_data['Relative_Expression'],
+            error_y=dict(
+                type='data',
+                array=error_array,
+                visible=settings.get('show_error', True),
+                thickness=2,
+                width=4,
+                color='rgba(0,0,0,0.5)'
             ),
+            text=sig_text if settings.get('show_significance', True) else None,
+            textposition='outside',
+            textfont=dict(size=settings.get('sig_font_size', 16), color='black'),
+            marker=dict(
+                color=bar_colors,
+                line=dict(
+                    width=settings.get('marker_line_width', 1),
+                    color='black'
+                ),
+                opacity=settings.get('bar_opacity', 0.95)
+            ),
+            showlegend=False
+        ))
+        
+        # Add expected direction annotation
+        if efficacy_config and 'expected_direction' in efficacy_config:
+            direction = efficacy_config.get('expected_direction', {}).get(gene, '')
+            if direction == 'up':
+                fig.add_annotation(
+                    text='↑ Expected Increase',
+                    xref='paper', yref='paper',
+                    x=0.02, y=0.98,
+                    showarrow=False,
+                    font=dict(size=12, color='red'),
+                    align='left'
+                )
+            elif direction == 'down':
+                fig.add_annotation(
+                    text='↓ Expected Decrease',
+                    xref='paper', yref='paper',
+                    x=0.02, y=0.98,
+                    showarrow=False,
+                    font=dict(size=12, color='blue'),
+                    align='left'
+                )
+        
+        # Update layout
+        y_axis_config = dict(
+            title=settings.get('ylabel', 'Fold Change'),
+            showgrid=settings.get('show_grid', True),
+            gridcolor='lightgray'
         )
-
+        
+        if settings.get('y_log_scale'):
+            y_axis_config['type'] = 'log'
+        
+        if settings.get('y_min') is not None or settings.get('y_max') is not None:
+            y_range = []
+            if settings.get('y_min') is not None:
+                y_range.append(settings['y_min'])
+            if settings.get('y_max') is not None:
+                y_range.append(settings['y_max'])
+            if len(y_range) == 2:
+                y_axis_config['range'] = y_range
+        
+        fig.update_layout(
+            title=dict(
+                text=f"{gene} Expression",
+                font=dict(size=settings.get('title_size', 20))
+            ),
+            xaxis=dict(
+                title=settings.get('xlabel', 'Condition'),
+                showgrid=settings.get('show_grid', True),
+                gridcolor='lightgray',
+                tickangle=-45
+            ),
+            yaxis=y_axis_config,
+            template=settings.get('color_scheme', 'plotly_white'),
+            font=dict(size=settings.get('font_size', 14)),
+            height=settings.get('figure_height', 600),
+            width=settings.get('figure_width', 1000),
+            bargap=settings.get('bar_gap', 0.15),
+            showlegend=settings.get('show_legend', False)
+        )
+        
         return fig
     
 # ==================== EXPORT FUNCTIONS ====================
