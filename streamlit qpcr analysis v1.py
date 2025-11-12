@@ -361,100 +361,130 @@ class AnalysisEngine:
 # ==================== GRAPH GENERATOR ====================
 class GraphGenerator:
     @staticmethod
-    def create_gene_graph(data: pd.DataFrame, gene: str, settings: dict, efficacy_config: dict = None) -> go.Figure:
-        """Create individual graph for each gene with extended interactive settings"""
-        gene_data = data[data['Target'] == gene].copy()
-        
-        # Sort by group order: baseline → negative → positive → treatments
-        group_order = ['Baseline', 'Negative Control', 'Positive Control', 'Treatment']
-        gene_data['group_sort'] = gene_data['Group'].apply(
-            lambda x: group_order.index(x) if x in group_order else 999
-        )
-        gene_data = gene_data.sort_values(['group_sort', 'Condition'])
-        
-        # figure
-        fig = go.Figure()
-        
-        # Color mapping by group (fall back to user-specified gene color)
-        color_map = {
-            'Baseline': '#808080',
-            'Negative Control': '#FF6B6B',
-            'Positive Control': '#4ECDC4',
-            'Treatment': settings.get('bar_colors', {}).get(gene, '#95E1D3')
-        }
-        
-        # error bars (apply multiplier)
-        err_array = (gene_data['SEM'] * settings.get('error_multiplier', 1.96)).fillna(0).values
-        
-        # marker settings
-        marker = dict(
-            color=[color_map.get(g, settings.get('bar_colors', {}).get(gene, '#95E1D3')) for g in gene_data['Group']],
-            opacity=settings.get('bar_opacity', 0.95),
-            line=dict(width=settings.get('marker_line_width', 1), color='black')
-        )
-        
-        orientation = settings.get('orientation', 'v')
-        x_field = 'Condition' if orientation == 'v' else 'Relative_Expression'
-        y_field = 'Relative_Expression' if orientation == 'v' else 'Condition'
-        
-        # add trace as bar with orientation
-        fig.add_trace(go.Bar(
-            x=gene_data[x_field] if orientation == 'v' else gene_data[y_field],
-            y=gene_data[y_field] if orientation == 'v' else gene_data[x_field],
-            error_y=dict(type='data', array=err_array, visible=settings.get('show_error', True)) if orientation == 'v' else None,
-            error_x=dict(type='data', array=err_array, visible=settings.get('show_error', True)) if orientation == 'h' else None,
-            text=gene_data['significance'] if settings.get('show_significance', True) else None,
-            textposition='outside',
-            textfont=dict(size=settings.get('sig_font_size', 16)),
-            marker=marker,
-            orientation=orientation,
-            showlegend=settings.get('show_legend', False),
-            hovertemplate="%{x}<br>%{y}<extra></extra>"
-        ))
-        
-        # Add expected direction indicator
-        if efficacy_config and 'expected_direction' in efficacy_config:
-            direction = efficacy_config.get('expected_direction', {}).get(gene, '')
-            direction_text = '↑ Expected increase' if direction == 'up' else '↓ Expected decrease' if direction == 'down' else ''
-            if direction_text:
-                fig.add_annotation(
-                    text=direction_text,
-                    xref='paper', yref='paper',
-                    x=0.02, y=0.98,
-                    showarrow=False,
-                    font=dict(size=12, color='red'),
-                    align='left'
-                )
-        
-        # layout
-        layout = dict(
-            title=dict(text=f"{gene} Expression", font=dict(size=settings.get('title_size', 20))),
-            xaxis_title=settings.get('xlabel', 'Condition') if orientation == 'v' else settings.get('ylabel', 'Fold Change (Relative to Control)'),
-            yaxis_title=settings.get('ylabel', 'Fold Change (Relative to Control)') if orientation == 'v' else settings.get('xlabel', 'Condition'),
-            template=settings.get('color_scheme', 'plotly_white'),
-            font=dict(size=settings.get('font_size', 14)),
-            height=settings.get('figure_height', 600),
-            width=settings.get('figure_width', 1000),
-            xaxis=dict(showgrid=settings.get('show_grid', True)),
-            yaxis=dict(showgrid=settings.get('show_grid', True))
-        )
-        
-        # apply y-axis log scale and manual ranges if requested
-        if settings.get('y_log_scale'):
-            layout['yaxis']['type'] = 'log'
-        if settings.get('y_min') is not None or settings.get('y_max') is not None:
-            layout['yaxis']['range'] = [
-                settings.get('y_min') if settings.get('y_min') is not None else None,
-                settings.get('y_max') if settings.get('y_max') is not None else None
-            ]
-        
-        # bar gap control (Plotly uses bargap for category gap)
-        layout['bargap'] = settings.get('bar_gap', 0.15)
-        
-        fig.update_layout(**layout)
-        
-        return fig
+    def create_gene_graph(
+        data: pd.DataFrame,
+        gene: str,
+        settings: dict,
+        efficacy_config: dict = None,
+        sample_order: list = None,
+        per_sample_overrides: dict = None
+    ) -> go.Figure:
+        """
+        Create an interactive Plotly bar graph for the given gene, using user-defined settings.
+        Handles empty data safely and supports sample ordering + per-sample overrides.
+        """
 
+        # Guard against empty data
+        if data is None or data.empty:
+            fig = go.Figure()
+            fig.add_annotation(text="No data available for plotting", showarrow=False)
+            return fig
+
+        # Filter for this gene
+        if "Target" in data.columns:
+            gene_data = data[data["Target"] == gene].copy()
+        elif "Gene" in data.columns:
+            gene_data = data[data["Gene"] == gene].copy()
+        else:
+            gene_data = data.copy()
+
+        if gene_data.empty:
+            fig = go.Figure()
+            fig.add_annotation(text=f"No data found for {gene}", showarrow=False)
+            return fig
+
+        # Maintain custom sample order
+        if sample_order:
+            gene_data["Condition"] = pd.Categorical(
+                gene_data["Condition"], categories=sample_order, ordered=True
+            )
+            gene_data = gene_data.sort_values("Condition")
+
+        # Apply per-sample visibility overrides
+        if per_sample_overrides:
+            keep_rows = []
+            for _, row in gene_data.iterrows():
+                key = str((gene, row["Condition"]))
+                include = per_sample_overrides.get(key, {}).get("include", True)
+                keep_rows.append(include)
+            gene_data = gene_data[np.array(keep_rows)]
+
+        # Apply bar colors
+        default_color = settings.get("bar_colors", {}).get(
+            gene, "#4ECDC4"
+        )
+        bar_colors = []
+        for _, row in gene_data.iterrows():
+            key = str((gene, row["Condition"]))
+            color = (
+                per_sample_overrides.get(key, {}).get("color")
+                if per_sample_overrides
+                else None
+            )
+            bar_colors.append(color or default_color)
+
+        # Ensure numeric values
+        y_vals = pd.to_numeric(gene_data["Relative_Expression"], errors="coerce")
+        err_vals = pd.to_numeric(gene_data.get("SEM", 0), errors="coerce")
+
+        # Build figure
+        fig = go.Figure(
+            data=[
+                go.Bar(
+                    x=gene_data["Condition"],
+                    y=y_vals,
+                    error_y=dict(
+                        type="data",
+                        array=err_vals,
+                        visible=settings.get("show_error", True),
+                    ),
+                    text=gene_data.get("significance", ""),
+                    textposition="outside",
+                    marker=dict(
+                        color=bar_colors,
+                        line=dict(width=1, color="black"),
+                    ),
+                )
+            ]
+        )
+
+        # Annotate expected direction if configured
+        if efficacy_config and "expected_direction" in efficacy_config:
+            direction = efficacy_config["expected_direction"].get(gene)
+            if direction == "up":
+                fig.add_annotation(
+                    text="↑ Expected Increase",
+                    xref="paper", yref="paper",
+                    x=0.02, y=0.95,
+                    showarrow=False, font=dict(color="red", size=12)
+                )
+            elif direction == "down":
+                fig.add_annotation(
+                    text="↓ Expected Decrease",
+                    xref="paper", yref="paper",
+                    x=0.02, y=0.95,
+                    showarrow=False, font=dict(color="blue", size=12)
+                )
+
+        # Layout settings
+        fig.update_layout(
+            title=f"{gene} Expression",
+            xaxis_title=settings.get("xlabel", "Condition"),
+            yaxis_title=settings.get("ylabel", "Fold Change"),
+            template=settings.get("color_scheme", "plotly_white"),
+            font=dict(size=settings.get("font_size", 14)),
+            height=settings.get("figure_height", 600),
+            width=settings.get("figure_width", 1000),
+            yaxis=dict(
+                type="log" if settings.get("y_log_scale", False) else "linear",
+                range=[
+                    settings.get("y_min", None),
+                    settings.get("y_max", None),
+                ],
+            ),
+        )
+
+        return fig
 
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
