@@ -359,14 +359,8 @@ class AnalysisEngine:
         return results
 
     def run_full_analysis(ref_sample_key: str, compare_sample_key: str):
-        """
-        Run a full ΔΔCt + statistics pipeline and store results in
-        st.session_state.processed_data as a dict: {gene: DataFrame}.
-        - ref_sample_key / compare_sample_key are the ORIGINAL sample keys
-        (i.e. keys of st.session_state.sample_mapping), not the mapped condition names.
-        """
+        """full ΔΔCt + statistics pipeline"""
         try:
-            # basic safety checks
             if st.session_state.get('data') is None:
                 st.error("No raw data loaded.")
                 return False
@@ -377,12 +371,10 @@ class AnalysisEngine:
                 st.error("No housekeeping gene selected.")
                 return False
 
-            # Resolve mapped condition names (what calculate_ddct expects in your current file)
             mapping = st.session_state.sample_mapping
             ref_condition = mapping.get(ref_sample_key, {}).get('condition', ref_sample_key)
             compare_condition = mapping.get(compare_sample_key, {}).get('condition', compare_sample_key)
 
-            # Call ΔΔCt calculation (signature in your file: data, hk_gene, ref_sample, compare_sample, excluded_wells, excluded_samples, sample_mapping)
             processed_df = AnalysisEngine.calculate_ddct(
                 st.session_state.data,
                 st.session_state.hk_gene,
@@ -397,7 +389,6 @@ class AnalysisEngine:
                 st.warning("No processed results (ΔΔCt) — please check inputs.")
                 return False
 
-            # Calculate statistics. Try to call the robust signature but fall back safely.
             try:
                 processed_with_stats = AnalysisEngine.calculate_statistics(
                     processed_df,
@@ -407,22 +398,15 @@ class AnalysisEngine:
                     sample_mapping=mapping
                 )
             except TypeError:
-                # older signature: calculate_statistics(processed, compare_condition)
                 processed_with_stats = AnalysisEngine.calculate_statistics(processed_df, compare_condition)
 
-            # Convert to dict of dataframes keyed by gene (this is what the graphs tab expects)
             gene_dict = {}
             if 'Target' in processed_with_stats.columns:
                 for g in processed_with_stats['Target'].unique():
                     gene_df = processed_with_stats[processed_with_stats['Target'] == g].copy()
                     gene_dict[g] = gene_df.reset_index(drop=True)
             else:
-                # If output already a dict-like, try to use it directly (defensive)
-                if isinstance(processed_with_stats, dict):
-                    gene_dict = processed_with_stats
-                else:
-                    # fallback: single table under a generic key
-                    gene_dict = {'results': processed_with_stats.reset_index(drop=True)}
+                gene_dict = {'results': processed_with_stats.reset_index(drop=True)}
 
             st.session_state.processed_data = gene_dict
             return True
@@ -560,6 +544,66 @@ class GraphGenerator:
 
         return fig
 
+    def run_full_analysis(ref_sample_key: str, compare_sample_key: str):
+        """
+        Run a full ΔΔCt + statistics pipeline and store results in
+        st.session_state.processed_data as a dict: {gene: DataFrame}.
+        """
+        try:
+            if st.session_state.get('data') is None:
+                st.error("No raw data loaded.")
+                return False
+            if not st.session_state.get('sample_mapping'):
+                st.error("No sample mapping available.")
+                return False
+            if not st.session_state.get('hk_gene'):
+                st.error("No housekeeping gene selected.")
+                return False
+
+            mapping = st.session_state.sample_mapping
+            ref_condition = mapping.get(ref_sample_key, {}).get('condition', ref_sample_key)
+            compare_condition = mapping.get(compare_sample_key, {}).get('condition', compare_sample_key)
+
+            processed_df = AnalysisEngine.calculate_ddct(
+                st.session_state.data,
+                st.session_state.hk_gene,
+                ref_condition,
+                compare_condition,
+                st.session_state.get('excluded_wells', set()),
+                st.session_state.get('excluded_samples', set()),
+                mapping
+            )
+
+            if processed_df is None or processed_df.empty:
+                st.warning("No processed results (ΔΔCt) — please check inputs.")
+                return False
+
+            try:
+                processed_with_stats = AnalysisEngine.calculate_statistics(
+                    processed_df,
+                    compare_condition,
+                    raw_data=st.session_state.data,
+                    hk_gene=st.session_state.hk_gene,
+                    sample_mapping=mapping
+                )
+            except TypeError:
+                processed_with_stats = AnalysisEngine.calculate_statistics(processed_df, compare_condition)
+
+            # Split into dict of gene DataFrames for graphs
+            gene_dict = {}
+            if 'Target' in processed_with_stats.columns:
+                for g in processed_with_stats['Target'].unique():
+                    gene_df = processed_with_stats[processed_with_stats['Target'] == g].copy()
+                    gene_dict[g] = gene_df.reset_index(drop=True)
+            else:
+                gene_dict = {'results': processed_with_stats.reset_index(drop=True)}
+
+            st.session_state.processed_data = gene_dict
+            return True
+
+        except Exception as e:
+            st.error(f"Analysis failed: {e}")
+            return False
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
                    params: dict, mapping: dict) -> bytes:
@@ -865,19 +909,25 @@ with tab2:
 
         run_col1, run_col2 = st.columns([1, 3])
         with run_col1:
-            if st.button("🔬 Run Full Analysis Now", type="primary"):
-                ok = 'run_full_analysis'(ref_choice, cmp_choice)
+            if st.button("🔬 Run Full Analysis Now", type="primary", use_container_width=True):
+                # ✅ Correct function call (no quotes)
+                ok = run_full_analysis(ref_choice, cmp_choice)
+
                 if ok:
-                    st.success("Analysis finished — go to the Graphs tab to visualize results.")
+                    st.success("✅ Analysis finished — go to the Graphs tab to visualize results.")
                     st.rerun()
                 else:
-                    st.error("Analysis did not complete successfully. Check logs above.")
+                    st.error("❌ Analysis did not complete successfully. Check messages above for details.")
+
         with run_col2:
             st.markdown(
-                "Tip: After mapping is done, use 'Run Full Analysis Now' to compute ΔΔCt & p-values. "
-                "Results will appear in the Graphs and Export tabs."
+                """
+                💡 **Tip:**  
+                After sample mapping, click **Run Full Analysis Now**  
+                to automatically calculate ΔΔCt values, perform t-tests,  
+                and prepare all results for graph visualization and export.
+                """
             )
-
 
 # ==================== TAB 3: ANALYSIS ====================
 with tab3:
