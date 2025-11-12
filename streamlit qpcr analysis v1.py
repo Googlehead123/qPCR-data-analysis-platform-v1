@@ -430,7 +430,18 @@ class GraphGenerator:
     def create_gene_graph(data: pd.DataFrame, gene: str, settings: Dict, efficacy_config: Dict, sample_order: List[str]):
         """Creates a professional, customized bar chart for a single gene."""
         
-        # 1. Apply Settings and Prepare Data
+        # 1. CRITICAL CHECK: Ensure required columns are present after analysis
+        required_cols = ['Fold Change', 'SEM', 'P-value', 'Sig Star', 'Condition']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        
+        if missing_cols:
+            st.error(f"❌ Cannot generate graph for gene **{gene}**.")
+            st.error(f"Missing required data columns: {', '.join(missing_cols)}.")
+            st.error("Please ensure the analysis in **Step 3: Analysis** was run successfully.")
+            # Return a blank figure to prevent the script from crashing Plotly
+            return go.Figure().update_layout(title=f"Error: Data Missing for {gene}", yaxis_visible=False, xaxis_visible=False)
+        
+        # 2. Apply Settings and Prepare Data
         bar_gap = settings.get('bar_gap', 0.1)
         show_error = settings.get('show_error', True)
         show_significance = settings.get('show_significance', True)
@@ -443,6 +454,13 @@ class GraphGenerator:
         colors = []
         for condition in data['Condition']:
             custom_key = f"{gene}_{condition}"
+            
+            # --- Per-Bar Error Bar and Sig Toggle Check ---
+            # These are stored in final_settings/st.session_state.graph_settings by the main loop
+            per_bar_show_error = settings.get(f"show_error_{gene}_{condition}", True)
+            per_bar_show_sig = settings.get(f"show_sig_{gene}_{condition}", True)
+            
+            # Color logic
             if custom_key in settings['bar_colors_per_sample']:
                 colors.append(settings['bar_colors_per_sample'][custom_key])
             elif condition == efficacy_config.get('controls', {}).get('negative'):
@@ -450,36 +468,52 @@ class GraphGenerator:
             elif condition == efficacy_config.get('controls', {}).get('positive'):
                 colors.append('#C0C0C0')  # Medium Grey for Positive Control
             else:
-                colors.append('#FFFFFF')  # White/Light Grey for Treatments (as required)
+                # Default treatment color (which is set in session state initialization)
+                colors.append(settings['bar_colors'].get(gene, '#A9A9A9'))
 
-        # 2. Base Bar Chart Figure
-        fig = go.Figure(data=[
-            go.Bar(
-                x=data['Condition'],
-                y=data['Fold Change'],
-                error_y={
-                    'type': 'data',
-                    'array': data['SEM'] * settings.get('error_multiplier', 1.96),
-                    'visible': show_error
-                },
-                marker_color=colors,
-                marker_line_color='#333333',
-                marker_line_width=settings.get('marker_line_width', 1.5), # Slightly thicker border for white/grey bars
-                opacity=settings.get('bar_opacity', 0.95),
-                name='Fold Change',
-                hovertemplate="Condition: %{x}<br>Fold Change: %{y:.2f}<br>P-value: %{customdata[0]:.4f}<extra></extra>",
-                customdata=data[['P-value', 'Sig Star']]
+        # 3. Base Bar Chart Figure
+        # Create a list of bar traces, one for each condition, to handle individual error bar visibility
+        bar_traces = []
+        for i, condition in enumerate(data['Condition']):
+            row = data[data['Condition'] == condition].iloc[0]
+            per_bar_show_error = settings.get(f"show_error_{gene}_{condition}", True)
+
+            bar_traces.append(
+                go.Bar(
+                    x=[row['Condition']],
+                    y=[row['Fold Change']],
+                    error_y={
+                        'type': 'data',
+                        'array': [row['SEM'] * settings.get('error_multiplier', 1.96)],
+                        'visible': per_bar_show_error
+                    },
+                    marker_color=colors[i],
+                    marker_line_color='#333333',
+                    marker_line_width=settings.get('marker_line_width', 1.5),
+                    opacity=settings.get('bar_opacity', 0.95),
+                    name=condition,
+                    hovertemplate=f"Condition: {row['Condition']}<br>Fold Change: {row['Fold Change']:.2f}<br>P-value: {row['P-value']:.4f}<extra></extra>",
+                    customdata=[[row['P-value'], row['Sig Star']]]
+                )
             )
-        ])
+
+        fig = go.Figure(data=bar_traces)
         
-        # 3. Add Significance Stars (as annotations)
+        # 4. Add Significance Stars (as annotations)
         if show_significance:
             for _, row in data.iterrows():
                 # Check the per-bar significance toggle state
                 sig_key = f"show_sig_{gene}_{row['Condition']}"
                 if settings.get(sig_key, True) and row['Sig Star']:
                     # Calculate position slightly above the error bar end
-                    y_pos = row['Fold Change'] + (row['SEM'] * settings.get('error_multiplier', 1.96) * 1.05) if show_error else row['Fold Change'] * 1.05
+                    # Use the per-bar show_error setting to calculate y_pos correctly
+                    per_bar_show_error = settings.get(f"show_error_{gene}_{row['Condition']}", True)
+                    
+                    if per_bar_show_error:
+                        y_pos = row['Fold Change'] + (row['SEM'] * settings.get('error_multiplier', 1.96) * 1.05)
+                    else:
+                        # If no error bar, place slightly above the bar itself
+                        y_pos = row['Fold Change'] * 1.05
                     
                     fig.add_annotation(
                         x=row['Condition'],
@@ -490,7 +524,19 @@ class GraphGenerator:
                         yanchor='bottom'
                     )
 
-        # 4. Layout Customization (Centralized and Minimalist)
+        # 5. Layout Customization (Centralized and Minimalist)
+        # Handle Y-Axis range calculation (especially for y_max=None placeholder)
+        if settings.get('y_max') is None:
+            y_range = None
+        else:
+            y_min = settings.get('y_min', 0)
+            y_max = settings.get('y_max')
+            if settings.get('y_log_scale', False):
+                # Apply log transformation to the min/max values if log scale is enabled
+                y_range = [np.log10(y_min) if y_min > 0 else 0, np.log10(y_max)]
+            else:
+                y_range = [y_min, y_max]
+
         fig.update_layout(
             template=settings.get('color_scheme', 'plotly_white'),
             title={
@@ -510,8 +556,7 @@ class GraphGenerator:
             yaxis={
                 'title': 'Fold Change (Relative mRNA Expression)', # Updated Y-axis label
                 'type': 'log' if settings.get('y_log_scale', False) else 'linear',
-                'range': [np.log10(settings['y_min']) if settings.get('y_log_scale', False) and settings['y_min'] > 0 else settings['y_min'], 
-                          settings['y_max']] if settings['y_max'] is not None else None,
+                'range': y_range,
                 'gridcolor': settings.get('grid_color', '#E5E5E5'), # Custom grid color
                 'showgrid': settings.get('show_grid', True) # Grid visibility control
             },
@@ -525,7 +570,7 @@ class GraphGenerator:
             showlegend=False # Always hide default legend
         )
         
-        # 5. Add Custom Legend for Significance (Bottom Right)
+        # 6. Add Custom Legend for Significance (Bottom Right)
         sig_text = (
             "<sup>*</sup> $p < 0.05$<br>"
             "<sup>**</sup> $p < 0.01$<br>"
@@ -547,7 +592,8 @@ class GraphGenerator:
         )
 
         return fig
-    
+
+
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
                    params: dict, mapping: dict) -> bytes:
