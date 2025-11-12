@@ -461,22 +461,32 @@ class GraphGenerator:
         if 'SEM' not in gene_data.columns:
             gene_data['SEM'] = 0
         
-        # Apply sample ordering if provided
+        # ALWAYS use sample_order from mapping (converted to condition names)
         if sample_order:
-            ordered = [c for c in sample_order if c in gene_data['Condition'].unique()]
-            other = [c for c in gene_data['Condition'].unique() if c not in ordered]
-            final_order = ordered + other
-            gene_data['Condition'] = pd.Categorical(gene_data['Condition'], categories=final_order, ordered=True)
+            # Convert sample names to condition names using mapping
+            mapping = st.session_state.get('sample_mapping', {})
+            condition_order = []
+            for sample in sample_order:
+                cond = mapping.get(sample, {}).get('condition', sample)
+                if cond in gene_data['Condition'].unique():
+                    condition_order.append(cond)
+            
+            # Add any conditions not in order (shouldn't happen, but safety)
+            for cond in gene_data['Condition'].unique():
+                if cond not in condition_order:
+                    condition_order.append(cond)
+            
+            # Apply categorical ordering
+            gene_data['Condition'] = pd.Categorical(
+                gene_data['Condition'], 
+                categories=condition_order, 
+                ordered=True
+            )
             gene_data = gene_data.sort_values('Condition')
         else:
-            # Sort by group if available
-            if 'Group' in gene_data.columns:
-                group_order = ['Baseline', 'Negative Control', 'Positive Control', 'Treatment']
-                gene_data['group_sort'] = gene_data['Group'].apply(
-                    lambda x: group_order.index(x) if x in group_order else 999
-                )
-                gene_data = gene_data.sort_values(['group_sort', 'Condition'])
-        
+            # Fallback: sort by appearance order
+            gene_data = gene_data.sort_values('Condition')
+            
         # Get colors - Grey tones for controls, custom for treatments
         # Check for per-sample custom colors first
         bar_colors = []
@@ -794,130 +804,285 @@ with tab2:
             for ctrl_type, ctrl_name in config['controls'].items():
                 st.markdown(f"- **{ctrl_type.title()}**: {ctrl_name}")
         
-        # Sample mapping interface
-        st.subheader("🗺️ Sample Mapping")
+        # Sample mapping interface with professional layout
+        st.markdown("---")
+        st.markdown("### 🗺️ Sample Condition Mapping")
         
         samples = [s for s in sorted(st.session_state.data['Sample'].unique()) 
                   if s not in st.session_state.excluded_samples]
         
-        # Group type options based on efficacy
+        # Group type options
         group_types = ['Negative Control', 'Positive Control', 'Treatment']
         if 'baseline' in config['controls']:
             group_types.insert(0, 'Baseline')
         
-        # ---- Improved Sample Mapping UI: include/exclude + ordering ----
-        # Initialize persistent list for ordering
+        # Initialize sample_order if not exists
         if 'sample_order' not in st.session_state:
-            st.session_state.sample_order = [s for s in sorted(st.session_state.data['Sample'].unique()) 
-                                            if s not in st.session_state.excluded_samples]
-
-        # Master include/exclude buttons
-        col_a, col_b, col_c = st.columns([1,1,2])
-        with col_a:
-            if st.button("✅ Include ALL"):
+            st.session_state.sample_order = samples.copy()
+        
+        # Ensure all samples have mapping
+        for sample in samples:
+            if sample not in st.session_state.sample_mapping:
+                st.session_state.sample_mapping[sample] = {
+                    'condition': sample, 
+                    'group': 'Treatment', 
+                    'concentration': '', 
+                    'include': True
+                }
+            if 'include' not in st.session_state.sample_mapping[sample]:
+                st.session_state.sample_mapping[sample]['include'] = True
+        
+        # Master controls in styled container
+        st.markdown("""
+        <style>
+        .control-panel {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .control-button {
+            background-color: white;
+            color: #667eea;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        st.markdown('<div class="control-panel">', unsafe_allow_html=True)
+        col_master1, col_master2, col_master3 = st.columns(3)
+        
+        with col_master1:
+            if st.button("✅ Include ALL Samples", use_container_width=True):
                 for s in st.session_state.sample_order:
-                    st.session_state.sample_mapping.setdefault(s, {})
                     st.session_state.sample_mapping[s]['include'] = True
                 st.session_state.excluded_samples = set()
                 st.rerun()
-        with col_b:
-            if st.button("🚫 Exclude ALL"):
+        
+        with col_master2:
+            if st.button("🚫 Exclude ALL Samples", use_container_width=True):
                 for s in st.session_state.sample_order:
-                    st.session_state.sample_mapping.setdefault(s, {})
                     st.session_state.sample_mapping[s]['include'] = False
                 st.session_state.excluded_samples = set(st.session_state.sample_order)
                 st.rerun()
-        with col_c:
-            st.markdown("Use the move buttons to reorder samples; that order is used for plotting.")
-
-        # Ensure every sample has mapping keys and include flag
-        for sample in list(st.session_state.sample_order):
-            if sample not in st.session_state.sample_mapping:
-                st.session_state.sample_mapping[sample] = {'condition': sample, 'group': 'Treatment', 'concentration': '', 'include': True}
-            if 'include' not in st.session_state.sample_mapping[sample]:
-                st.session_state.sample_mapping[sample]['include'] = True
-
-        # Render each sample with include checkbox, mapping fields and order controls
+        
+        with col_master3:
+            if st.button("🔄 Reset Mapping", use_container_width=True):
+                st.session_state.sample_mapping = {}
+                st.session_state.sample_order = samples.copy()
+                st.rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Header row with styled background
+        st.markdown("""
+        <div style='background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px;'>
+            <table style='width: 100%;'>
+                <tr>
+                    <th style='width: 5%; text-align: center;'>✓</th>
+                    <th style='width: 10%;'>Order</th>
+                    <th style='width: 15%;'>Original</th>
+                    <th style='width: 25%;'>Condition Name</th>
+                    <th style='width: 20%;'>Group</th>
+                    <th style='width: 15%;'>Concentration</th>
+                    <th style='width: 10%;'>Move</th>
+                </tr>
+            </table>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Sample rows with improved spacing
         for i, sample in enumerate(st.session_state.sample_order):
-            col0, col1, col2, col3, col4 = st.columns([0.6, 1.5, 3, 2, 1.2])
-            # include toggle
-            include_flag = col0.checkbox("", value=st.session_state.sample_mapping[sample].get('include', True), key=f"include_{sample}")
-            st.session_state.sample_mapping[sample]['include'] = include_flag
-            # show sample name
-            col1.text(sample)
-            # condition name
-            cond = col2.text_input("Condition name", value=st.session_state.sample_mapping[sample].get('condition', sample), key=f"cond_{sample}", label_visibility="collapsed")
-            st.session_state.sample_mapping[sample]['condition'] = cond
-            # group selector
-            grp_idx = 0
-            try:
-                grp_idx = group_types.index(st.session_state.sample_mapping[sample].get('group', 'Treatment'))
-            except Exception:
-                grp_idx = 0
-            grp = col3.selectbox("Group", group_types, index=grp_idx, key=f"grp_{sample}", label_visibility="collapsed")
-            st.session_state.sample_mapping[sample]['group'] = grp
-            # conc
-            conc = col4.text_input("Conc", value=st.session_state.sample_mapping[sample].get('concentration',''), key=f"conc_{sample}", label_visibility="collapsed")
-            st.session_state.sample_mapping[sample]['concentration'] = conc
-
-            # Order controls (Move Up / Move Down) placed after the row for readability
-            col_left, col_right = st.columns([1,1])
-            with col_left:
-                if st.button("⬆ Move Up", key=f"up_{sample}") and i>0:
-                    order = st.session_state.sample_order
-                    order[i-1], order[i] = order[i], order[i-1]
-                    st.session_state.sample_order = order
-                    st.rerun()
-            with col_right:
-                if st.button("⬇ Move Down", key=f"down_{sample}") and i < len(st.session_state.sample_order)-1:
-                    order = st.session_state.sample_order
-                    order[i+1], order[i] = order[i], order[i+1]
-                    st.session_state.sample_order = order
-                    st.rerun()
-
-        # Update excluded_samples set from per-sample include flags
-        st.session_state.excluded_samples = set([s for s,v in st.session_state.sample_mapping.items() if not v.get('include', True)])
-
-        # Summary (now includes order)
-        st.subheader("📊 Mapping Summary (ordered)")
-        mapping_df = pd.DataFrame([{'Order': idx+1, 'Original': k, **v} 
-                                for idx, (k,v) in enumerate([(s, st.session_state.sample_mapping[s]) for s in st.session_state.sample_order])])
-        st.dataframe(mapping_df, use_container_width=True)
-
-        # Run Full Analysis Section
+            # Container for each row
+            with st.container():
+                col0, col_order, col1, col2, col3, col4, col_move = st.columns([0.5, 0.8, 1.5, 2.5, 2, 1.5, 1])
+                
+                # Include checkbox
+                with col0:
+                    include = st.checkbox(
+                        "", 
+                        value=st.session_state.sample_mapping[sample].get('include', True),
+                        key=f"include_{sample}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.sample_mapping[sample]['include'] = include
+                
+                # Order number
+                with col_order:
+                    st.markdown(f"<div style='text-align: center; padding-top: 10px;'><b>{i+1}</b></div>", unsafe_allow_html=True)
+                
+                # Original sample name (non-editable)
+                with col1:
+                    st.text_input("Original", sample, key=f"orig_{sample}", disabled=True, label_visibility="collapsed")
+                
+                # Condition name (editable)
+                with col2:
+                    cond = st.text_input(
+                        "Condition",
+                        st.session_state.sample_mapping[sample]['condition'],
+                        key=f"cond_{sample}",
+                        label_visibility="collapsed",
+                        placeholder="Enter condition name..."
+                    )
+                    st.session_state.sample_mapping[sample]['condition'] = cond
+                
+                # Group selector
+                with col3:
+                    grp_idx = 0
+                    try:
+                        grp_idx = group_types.index(st.session_state.sample_mapping[sample]['group'])
+                    except:
+                        pass
+                    
+                    grp = st.selectbox(
+                        "Group",
+                        group_types,
+                        index=grp_idx,
+                        key=f"grp_{sample}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.sample_mapping[sample]['group'] = grp
+                
+                # Concentration
+                with col4:
+                    conc = st.text_input(
+                        "Conc",
+                        st.session_state.sample_mapping[sample]['concentration'],
+                        key=f"conc_{sample}",
+                        label_visibility="collapsed",
+                        placeholder="e.g., 10µM"
+                    )
+                    st.session_state.sample_mapping[sample]['concentration'] = conc
+                
+                # Move buttons
+                with col_move:
+                    move_col1, move_col2 = st.columns(2)
+                    with move_col1:
+                        if i > 0:
+                            if st.button("⬆", key=f"up_{sample}", help="Move up"):
+                                order = st.session_state.sample_order
+                                order[i-1], order[i] = order[i], order[i-1]
+                                st.rerun()
+                    with move_col2:
+                        if i < len(st.session_state.sample_order) - 1:
+                            if st.button("⬇", key=f"down_{sample}", help="Move down"):
+                                order = st.session_state.sample_order
+                                order[i+1], order[i] = order[i], order[i+1]
+                                st.rerun()
+                
+                # Divider line
+                st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
+        
+        # Update excluded_samples from include flags
+        st.session_state.excluded_samples = set([
+            s for s, v in st.session_state.sample_mapping.items() 
+            if not v.get('include', True)
+        ])
+        
+        # Summary with styled cards
         st.markdown("---")
-        st.subheader("🔬 Run Full Analysis (ΔΔCt + statistics)")
+        st.subheader("📊 Mapping Summary")
+        
+        col_card1, col_card2, col_card3, col_card4 = st.columns(4)
+        
+        total_samples = len(st.session_state.sample_order)
+        included = sum(1 for v in st.session_state.sample_mapping.values() if v.get('include', True))
+        excluded = total_samples - included
+        
+        with col_card1:
+            st.metric("Total Samples", total_samples)
+        with col_card2:
+            st.metric("Included", included, delta=None if included == total_samples else f"-{excluded}")
+        with col_card3:
+            st.metric("Excluded", excluded, delta=None if excluded == 0 else f"+{excluded}")
+        with col_card4:
+            groups = set(v['group'] for v in st.session_state.sample_mapping.values() if v.get('include', True))
+            st.metric("Groups", len(groups))
+        
+        # Detailed table view
+        with st.expander("📋 View Detailed Mapping Table"):
+            mapping_df = pd.DataFrame([
+                {
+                    'Order': idx+1,
+                    'Include': '✅' if v.get('include', True) else '❌',
+                    'Original': s,
+                    'Condition': v['condition'],
+                    'Group': v['group'],
+                    'Concentration': v['concentration']
+                }
+                for idx, s in enumerate(st.session_state.sample_order)
+                for v in [st.session_state.sample_mapping[s]]
+            ])
+            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+          
+        # Run analysis   
+        st.markdown("---")
+        st.subheader("🔬 Run Full Analysis (ΔΔCt + Statistics)")
         
         sample_keys = st.session_state.get('sample_order') or list(st.session_state.sample_mapping.keys())
         
         if sample_keys:
+            # Enhanced layout with clear separation
+            st.markdown("#### 📊 Analysis Configuration")
+            
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.info("**ΔΔCt Reference:** Used to calculate fold changes. All samples will be relative to this (Fold Change = 1.0)")
+            with col_info2:
+                st.info("**P-value Reference:** Used for statistical comparison (t-test). All samples compared against this.")
+            
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 ref_choice = st.selectbox(
-                    "Reference sample (baseline = 1.0)",
+                    "🎯 ΔΔCt Reference Sample",
                     sample_keys,
                     index=0,
-                    key="ref_choice_unique",
-                    help="Fold changes calculated relative to this sample"
+                    key="ref_choice_ddct",
+                    help="Baseline for relative expression calculation"
                 )
+                ref_condition = st.session_state.sample_mapping.get(ref_choice, {}).get('condition', ref_choice)
+                st.caption(f"→ Condition: **{ref_condition}**")
+            
             with col_r2:
                 cmp_choice = st.selectbox(
-                    "Comparison sample (for p-values)",
+                    "📈 P-value Reference Sample",
                     sample_keys,
                     index=0,
-                    key="cmp_choice_unique",
-                    help="Statistical comparison reference"
+                    key="cmp_choice_pval",
+                    help="Control group for statistical testing"
                 )
+                cmp_condition = st.session_state.sample_mapping.get(cmp_choice, {}).get('condition', cmp_choice)
+                st.caption(f"→ Condition: **{cmp_condition}**")
             
+            # Visual summary
+            st.markdown("---")
+            col_sum1, col_sum2, col_sum3 = st.columns([1, 2, 1])
+            with col_sum2:
+                st.markdown(f"""
+                <div style='background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center;'>
+                    <h4>Analysis Summary</h4>
+                    <p><b>Fold Changes:</b> Relative to <code>{ref_condition}</code></p>
+                    <p><b>Significance:</b> Compared to <code>{cmp_condition}</code></p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # Run button
             if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
                 ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice)
                 if ok:
-                    st.success("✅ Analysis complete! Go to Graphs tab.")
+                    st.success(f"✅ Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values vs: **{cmp_condition}**")
+                    st.balloons()
                     st.rerun()
                 else:
                     st.error("❌ Analysis failed. Check messages above.")
         else:
-            st.warning("No samples available for analysis.")
+            st.warning("⚠️ No samples available for analysis.")
             
 # ==================== TAB 3: ANALYSIS ====================
 with tab3:
