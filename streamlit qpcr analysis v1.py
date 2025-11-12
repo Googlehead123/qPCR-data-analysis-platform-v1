@@ -357,64 +357,78 @@ class AnalysisEngine:
                     results.loc[mask, "significance"] = sig
 
         return results
-
+    # ------------------------------------------------------------
+    # Helper function: Run full qPCR ΔΔCt + statistics pipeline
+    # ------------------------------------------------------------
     def run_full_analysis(ref_sample_key: str, compare_sample_key: str):
-        """full ΔΔCt + statistics pipeline"""
+        """
+        Run ΔΔCt + statistical analysis and store results in st.session_state.
+        Produces st.session_state.processed_data = {gene: DataFrame}.
+        """
         try:
-            if st.session_state.get('data') is None:
-                st.error("No raw data loaded.")
-                return False
-            if not st.session_state.get('sample_mapping'):
-                st.error("No sample mapping available.")
-                return False
-            if not st.session_state.get('hk_gene'):
-                st.error("No housekeeping gene selected.")
-                return False
+            data = st.session_state.get("data")
+            mapping = st.session_state.get("sample_mapping", {})
+            hk_gene = st.session_state.get("hk_gene")
 
-            mapping = st.session_state.sample_mapping
-            ref_condition = mapping.get(ref_sample_key, {}).get('condition', ref_sample_key)
-            compare_condition = mapping.get(compare_sample_key, {}).get('condition', compare_sample_key)
-
-            processed_df = AnalysisEngine.calculate_ddct(
-                st.session_state.data,
-                st.session_state.hk_gene,
-                ref_condition,
-                compare_condition,
-                st.session_state.get('excluded_wells', set()),
-                st.session_state.get('excluded_samples', set()),
-                mapping
-            )
-
-            if processed_df is None or processed_df.empty:
-                st.warning("No processed results (ΔΔCt) — please check inputs.")
+            if data is None:
+                st.error("❌ No raw data loaded.")
+                return False
+            if not mapping:
+                st.error("❌ Sample mapping not found.")
+                return False
+            if not hk_gene:
+                st.error("❌ Housekeeping gene not selected.")
                 return False
 
-            try:
-                processed_with_stats = AnalysisEngine.calculate_statistics(
-                    processed_df,
-                    compare_condition,
-                    raw_data=st.session_state.data,
-                    hk_gene=st.session_state.hk_gene,
-                    sample_mapping=mapping
+            ref_condition = mapping.get(ref_sample_key, {}).get("condition", ref_sample_key)
+            cmp_condition = mapping.get(compare_sample_key, {}).get("condition", compare_sample_key)
+
+            with st.spinner(f"Running full analysis using reference '{ref_condition}' and comparison '{cmp_condition}'..."):
+                # --- ΔΔCt calculation ---
+                processed_df = AnalysisEngine.calculate_ddct(
+                    data,
+                    hk_gene,
+                    ref_condition,
+                    cmp_condition,
+                    st.session_state.get("excluded_wells", set()),
+                    st.session_state.get("excluded_samples", set()),
+                    mapping,
                 )
-            except TypeError:
-                processed_with_stats = AnalysisEngine.calculate_statistics(processed_df, compare_condition)
 
-            gene_dict = {}
-            if 'Target' in processed_with_stats.columns:
-                for g in processed_with_stats['Target'].unique():
-                    gene_df = processed_with_stats[processed_with_stats['Target'] == g].copy()
-                    gene_dict[g] = gene_df.reset_index(drop=True)
-            else:
-                gene_dict = {'results': processed_with_stats.reset_index(drop=True)}
+                if processed_df is None or processed_df.empty:
+                    st.warning("⚠️ No ΔΔCt results produced. Check mapping and housekeeping gene.")
+                    return False
 
-            st.session_state.processed_data = gene_dict
+                # --- Statistical test ---
+                try:
+                    processed_with_stats = AnalysisEngine.calculate_statistics(
+                        processed_df,
+                        cmp_condition,
+                        raw_data=data,
+                        hk_gene=hk_gene,
+                        sample_mapping=mapping,
+                    )
+                except TypeError:
+                    # fallback for simpler signature
+                    processed_with_stats = AnalysisEngine.calculate_statistics(processed_df, cmp_condition)
+
+                # --- Organize data for graphs ---
+                gene_dict = {}
+                if "Target" in processed_with_stats.columns:
+                    for gene in processed_with_stats["Target"].unique():
+                        gene_df = processed_with_stats[processed_with_stats["Target"] == gene].copy()
+                        gene_dict[gene] = gene_df.reset_index(drop=True)
+                else:
+                    gene_dict = {"results": processed_with_stats.reset_index(drop=True)}
+
+                st.session_state.processed_data = gene_dict
+
+            st.success("✅ Full analysis complete. Go to the Graphs tab to visualize results.")
             return True
 
         except Exception as e:
-            st.error(f"Analysis failed: {e}")
+            st.error(f"❌ Analysis failed: {e}")
             return False
-
 
 # ==================== GRAPH GENERATOR ====================
 class GraphGenerator:
@@ -882,6 +896,43 @@ with tab2:
                                 for idx, (k,v) in enumerate([(s, st.session_state.sample_mapping[s]) for s in st.session_state.sample_order])])
         st.dataframe(mapping_df, use_container_width=True)
         
+        # ------------------------------------------------------------
+        # Run Full Analysis Section
+        # ------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("🔬 Run Full ΔΔCt + Statistical Analysis")
+
+        sample_keys = list(st.session_state.sample_mapping.keys())
+
+        if sample_keys:
+            c1, c2 = st.columns(2)
+            with c1:
+                ref_choice = st.selectbox(
+                    "Reference sample (normalization)",
+                    sample_keys,
+                    index=0,
+                    key="ref_choice",
+                )
+            with c2:
+                cmp_choice = st.selectbox(
+                    "Comparison sample (for p-value)",
+                    sample_keys,
+                    index=0,
+                    key="cmp_choice",
+                )
+
+            st.caption(
+                "Select which samples to use as reference (baseline = 1.0) and comparison (for significance)."
+            )
+
+            if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
+                ok = run_full_analysis(ref_choice, cmp_choice)
+                if ok:
+                    st.rerun()
+        else:
+            st.warning("No samples available for analysis.")
+
+                
         # --- Analysis quick-run controls (placed after mapping summary) ---
         st.markdown("---")
         st.subheader("▶ Run Full Analysis (ΔΔCt + statistics)")
@@ -934,7 +985,7 @@ with tab3:
     st.header("📊 Visualization")
 
     # Guard: Require processed data
-    if "processed_data" not in st.session_state or st.session_state.processed_data is None:
+    if "processed_daat lta" not in st.session_state or st.session_state.processed_data is None:
         st.info("Run analysis first to visualize results.")
     else:
         st.divider()
