@@ -309,7 +309,7 @@ class AnalysisEngine:
 class GraphGenerator:
     @staticmethod
     def create_gene_graph(data: pd.DataFrame, gene: str, settings: dict, efficacy_config: dict = None) -> go.Figure:
-        """Create individual graph for each gene"""
+        """Create individual graph for each gene with extended interactive settings"""
         gene_data = data[data['Target'] == gene].copy()
         
         # Sort by group order: baseline → negative → positive → treatments
@@ -319,9 +319,10 @@ class GraphGenerator:
         )
         gene_data = gene_data.sort_values(['group_sort', 'Condition'])
         
+        # figure
         fig = go.Figure()
         
-        # Color mapping by group
+        # Color mapping by group (fall back to user-specified gene color)
         color_map = {
             'Baseline': '#808080',
             'Negative Control': '#FF6B6B',
@@ -329,24 +330,38 @@ class GraphGenerator:
             'Treatment': settings.get('bar_colors', {}).get(gene, '#95E1D3')
         }
         
+        # error bars (apply multiplier)
+        err_array = (gene_data['SEM'] * settings.get('error_multiplier', 1.96)).fillna(0).values
+        
+        # marker settings
+        marker = dict(
+            color=[color_map.get(g, settings.get('bar_colors', {}).get(gene, '#95E1D3')) for g in gene_data['Group']],
+            opacity=settings.get('bar_opacity', 0.95),
+            line=dict(width=settings.get('marker_line_width', 1), color='black')
+        )
+        
+        orientation = settings.get('orientation', 'v')
+        x_field = 'Condition' if orientation == 'v' else 'Relative_Expression'
+        y_field = 'Relative_Expression' if orientation == 'v' else 'Condition'
+        
+        # add trace as bar with orientation
         fig.add_trace(go.Bar(
-            x=gene_data['Condition'],
-            y=gene_data['Relative_Expression'],
-            error_y=dict(
-                type='data',
-                array=gene_data['SEM'] * 1.96,
-                visible=settings.get('show_error', True)
-            ),
+            x=gene_data[x_field] if orientation == 'v' else gene_data[y_field],
+            y=gene_data[y_field] if orientation == 'v' else gene_data[x_field],
+            error_y=dict(type='data', array=err_array, visible=settings.get('show_error', True)) if orientation == 'v' else None,
+            error_x=dict(type='data', array=err_array, visible=settings.get('show_error', True)) if orientation == 'h' else None,
             text=gene_data['significance'] if settings.get('show_significance', True) else None,
             textposition='outside',
             textfont=dict(size=settings.get('sig_font_size', 16)),
-            marker=dict(color=[color_map.get(g, '#95E1D3') for g in gene_data['Group']]),
-            showlegend=False
+            marker=marker,
+            orientation=orientation,
+            showlegend=settings.get('show_legend', False),
+            hovertemplate="%{x}<br>%{y}<extra></extra>"
         ))
         
         # Add expected direction indicator
         if efficacy_config and 'expected_direction' in efficacy_config:
-            direction = efficacy_config['expected_direction'].get(gene, '')
+            direction = efficacy_config.get('expected_direction', {}).get(gene, '')
             direction_text = '↑ Expected increase' if direction == 'up' else '↓ Expected decrease' if direction == 'down' else ''
             if direction_text:
                 fig.add_annotation(
@@ -358,10 +373,11 @@ class GraphGenerator:
                     align='left'
                 )
         
-        fig.update_layout(
+        # layout
+        layout = dict(
             title=dict(text=f"{gene} Expression", font=dict(size=settings.get('title_size', 20))),
-            xaxis_title=settings.get('xlabel', 'Condition'),
-            yaxis_title=settings.get('ylabel', 'Fold Change (Relative to Control)'),
+            xaxis_title=settings.get('xlabel', 'Condition') if orientation == 'v' else settings.get('ylabel', 'Fold Change (Relative to Control)'),
+            yaxis_title=settings.get('ylabel', 'Fold Change (Relative to Control)') if orientation == 'v' else settings.get('xlabel', 'Condition'),
             template=settings.get('color_scheme', 'plotly_white'),
             font=dict(size=settings.get('font_size', 14)),
             height=settings.get('figure_height', 600),
@@ -370,7 +386,22 @@ class GraphGenerator:
             yaxis=dict(showgrid=settings.get('show_grid', True))
         )
         
+        # apply y-axis log scale and manual ranges if requested
+        if settings.get('y_log_scale'):
+            layout['yaxis']['type'] = 'log'
+        if settings.get('y_min') is not None or settings.get('y_max') is not None:
+            layout['yaxis']['range'] = [
+                settings.get('y_min') if settings.get('y_min') is not None else None,
+                settings.get('y_max') if settings.get('y_max') is not None else None
+            ]
+        
+        # bar gap control (Plotly uses bargap for category gap)
+        layout['bargap'] = settings.get('bar_gap', 0.15)
+        
+        fig.update_layout(**layout)
+        
         return fig
+
 
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
@@ -564,18 +595,38 @@ with tab2:
             group_types.insert(0, 'Baseline')
         
         for sample in samples:
-            if sample not in st.session_state.sample_mapping:
+             if sample not in st.session_state.sample_mapping:
                 st.session_state.sample_mapping[sample] = {
                     'condition': sample,
                     'group': 'Treatment',
-                    'concentration': ''
-                }
-            
-            col1, col2, col3, col4 = st.columns([1, 3, 2, 2])
-            
-            with col1:
+                    'concentration': '',
+                    'include': True  # new flag default: included
+            }
+    
+             # ensure include flag exists if loading old presets
+             if 'include' not in st.session_state.sample_mapping[sample]:
+                 st.session_state.sample_mapping[sample]['include'] = True
+
+             col0, col1, col2, col3, col4 = st.columns([0.6, 1, 3, 2, 2])
+    
+             with col0:
+                  # per-sample include checkbox (controls excluded_samples)
+                 include_flag = st.checkbox(
+                      "Include",
+                      value=st.session_state.sample_mapping[sample].get('include', True),
+                       key=f"include_{sample}",
+                      help="If unchecked, this sample will be excluded from analysis"
+                   )
+                 st.session_state.sample_mapping[sample]['include'] = include_flag
+                # sync to global excluded_samples set
+                 if include_flag:
+                     st.session_state.excluded_samples.discard(sample)
+                 else:
+                     st.session_state.excluded_samples.add(sample)
+
+             with col1:
                 st.text(sample)
-            with col2:
+             with col2:
                 condition = st.text_input(
                     "Condition name",
                     value=st.session_state.sample_mapping[sample]['condition'],
@@ -583,17 +634,17 @@ with tab2:
                     label_visibility="collapsed"
                 )
                 st.session_state.sample_mapping[sample]['condition'] = condition
-            with col3:
+             with col3:
                 group = st.selectbox(
                     "Group",
                     group_types,
                     index=group_types.index(st.session_state.sample_mapping[sample]['group']) 
-                          if st.session_state.sample_mapping[sample]['group'] in group_types else 0,
+                        if st.session_state.sample_mapping[sample]['group'] in group_types else 0,
                     key=f"grp_{sample}",
                     label_visibility="collapsed"
                 )
                 st.session_state.sample_mapping[sample]['group'] = group
-            with col4:
+             with col4:
                 conc = st.text_input(
                     "Concentration",
                     value=st.session_state.sample_mapping[sample]['concentration'],
@@ -601,7 +652,7 @@ with tab2:
                     label_visibility="collapsed"
                 )
                 st.session_state.sample_mapping[sample]['concentration'] = conc
-        
+
         # Summary
         st.subheader("📊 Mapping Summary")
         mapping_df = pd.DataFrame([{'Original': k, **v} for k, v in st.session_state.sample_mapping.items()])
@@ -713,7 +764,7 @@ with tab4:
     st.header("Step 4: Individual Gene Graphs")
     
     if st.session_state.processed_data:
-        # Initialize graph settings
+        # Initialize graph settings (extend with new options)
         if 'graph_settings' not in st.session_state:
             st.session_state.graph_settings = {
                 'title_size': 20, 'font_size': 14, 'sig_font_size': 16,
@@ -721,51 +772,85 @@ with tab4:
                 'color_scheme': 'plotly_white', 'show_error': True,
                 'show_significance': True, 'show_grid': True,
                 'xlabel': 'Condition', 'ylabel': 'Fold Change (Relative to Control)',
-                'bar_colors': {}
+                'bar_colors': {},
+                # NEW options
+                'orientation': 'v',  # 'v' or 'h'
+                'error_multiplier': 1.96,
+                'bar_opacity': 0.95,
+                'bar_gap': 0.15,
+                'marker_line_width': 1,
+                'show_legend': False,
+                'y_log_scale': False,
+                'y_min': None,
+                'y_max': None
             }
-        
+
         # Global settings
         st.subheader("⚙️ Global Graph Settings")
-        
+
+        # layout widgets in groups for clarity
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.session_state.graph_settings['font_size'] = st.slider("Font Size", 10, 24, 14)
-            st.session_state.graph_settings['title_size'] = st.slider("Title Size", 14, 32, 20)
+            st.session_state.graph_settings['font_size'] = st.slider("Font Size", 8, 28, st.session_state.graph_settings['font_size'])
+            st.session_state.graph_settings['title_size'] = st.slider("Title Size", 10, 36, st.session_state.graph_settings['title_size'])
+            st.session_state.graph_settings['sig_font_size'] = st.slider("Significance Font Size", 8, 28, st.session_state.graph_settings['sig_font_size'])
         with col2:
-            st.session_state.graph_settings['figure_width'] = st.slider("Width (px)", 600, 1600, 1000)
-            st.session_state.graph_settings['figure_height'] = st.slider("Height (px)", 400, 1200, 600)
+            st.session_state.graph_settings['figure_width'] = st.slider("Width (px)", 600, 2000, st.session_state.graph_settings['figure_width'])
+            st.session_state.graph_settings['figure_height'] = st.slider("Height (px)", 300, 1400, st.session_state.graph_settings['figure_height'])
+            st.session_state.graph_settings['orientation'] = st.selectbox("Bar Orientation", ['v', 'h'], index=0 if st.session_state.graph_settings['orientation']=='v' else 1)
         with col3:
             st.session_state.graph_settings['color_scheme'] = st.selectbox(
-                "Theme", ['plotly_white', 'plotly', 'plotly_dark', 'seaborn', 'simple_white', 'presentation']
+                "Theme", ['plotly_white', 'plotly', 'plotly_dark', 'seaborn', 'simple_white', 'presentation'],
+                index=0 if st.session_state.graph_settings.get('color_scheme','plotly_white')=='plotly_white' else 0
             )
+            st.session_state.graph_settings['show_legend'] = st.checkbox("Show Legend", st.session_state.graph_settings.get('show_legend', False))
+            st.session_state.graph_settings['show_grid'] = st.checkbox("Grid", st.session_state.graph_settings.get('show_grid', True))
         with col4:
-            st.session_state.graph_settings['show_error'] = st.checkbox("Error Bars", True)
-            st.session_state.graph_settings['show_significance'] = st.checkbox("Significance", True)
-            st.session_state.graph_settings['show_grid'] = st.checkbox("Grid", True)
-        
-        # Quick presets
+            st.session_state.graph_settings['show_error'] = st.checkbox("Error Bars", st.session_state.graph_settings.get('show_error', True))
+            st.session_state.graph_settings['show_significance'] = st.checkbox("Significance", st.session_state.graph_settings.get('show_significance', True))
+            st.session_state.graph_settings['error_multiplier'] = st.slider("Error multiplier (σ → CI)", 0.5, 3.0, float(st.session_state.graph_settings.get('error_multiplier',1.96)), step=0.01)
+
+        # more detailed controls
+        col5, col6, col7 = st.columns([1.2, 1.2, 1])
+        with col5:
+            st.session_state.graph_settings['bar_opacity'] = st.slider("Bar Opacity", 0.1, 1.0, st.session_state.graph_settings.get('bar_opacity',0.95))
+            st.session_state.graph_settings['bar_gap'] = st.slider("Bar Gap (group gap)", 0.0, 0.5, st.session_state.graph_settings.get('bar_gap',0.15))
+        with col6:
+            st.session_state.graph_settings['marker_line_width'] = st.slider("Bar Edge Width", 0, 6, st.session_state.graph_settings.get('marker_line_width',1))
+            st.session_state.graph_settings['y_log_scale'] = st.checkbox("Y-axis log scale", st.session_state.graph_settings.get('y_log_scale', False))
+        with col7:
+            y_range = st.slider("Y-axis range (min,max) - set both to adjust, leave unchanged for auto", 0.0, 100.0, (0.0, 10.0))
+            # if user hasn't changed from defaults, keep None to use auto-scaling
+            if y_range != (0.0, 10.0):
+                st.session_state.graph_settings['y_min'] = float(y_range[0])
+                st.session_state.graph_settings['y_max'] = float(y_range[1])
+            else:
+                st.session_state.graph_settings['y_min'] = None
+                st.session_state.graph_settings['y_max'] = None
+
+        # Quick presets (kept, but updated to not clobber new keys)
         col1, col2, col3, col4 = st.columns(4)
         if col1.button("📄 Publication"):
             st.session_state.graph_settings.update({
                 'color_scheme': 'simple_white', 'font_size': 14, 'title_size': 18,
-                'figure_width': 1000, 'figure_height': 600
+                'figure_width': 1000, 'figure_height': 600, 'bar_opacity': 1.0
             })
-            st.rerun()
+            st.experimental_rerun()
         if col2.button("🎨 Presentation"):
             st.session_state.graph_settings.update({
                 'color_scheme': 'presentation', 'font_size': 18, 'title_size': 24,
-                'figure_width': 1200, 'figure_height': 700
+                'figure_width': 1200, 'figure_height': 700, 'bar_opacity': 0.95
             })
-            st.rerun()
+            st.experimental_rerun()
         if col3.button("🌙 Dark Mode"):
             st.session_state.graph_settings.update({'color_scheme': 'plotly_dark'})
-            st.rerun()
+            st.experimental_rerun()
         if col4.button("🔄 Reset"):
             del st.session_state.graph_settings
-            st.rerun()
-        
+            st.experimental_rerun()
+
         st.markdown("---")
-        
+
         # Generate graphs for each gene
         st.subheader("📊 Gene-Specific Graphs")
         
