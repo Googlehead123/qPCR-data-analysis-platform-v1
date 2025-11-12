@@ -319,18 +319,32 @@ class AnalysisEngine:
                 if np.isnan(hk_mean):
                     continue
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
-
             # Reference condition replicates
             ref_vals = rel_expr.get(compare_condition, np.array([]))
-            if ref_vals.size == 0:
-                continue
+            if ref_vals.size < 2: # Require at least 2 replicates for a meaningful t-test comparison
+                st.warning(f"⚠️ Cannot run statistics for {target}: Reference condition '{compare_condition}' has less than 2 replicates.")
+                continue # Skip this target gene
 
             # Compare each condition to reference
             for cond, vals in rel_expr.items():
                 if cond == compare_condition or vals.size == 0:
                     continue
+                
+                # Ensure the test values have at least one replicate
+                if vals.size < 1:
+                    continue
 
                 try:
+                    # Use two-sample t-test (Welch's, unequal variance) only if both groups have >= 2
+                    if vals.size >= 2:
+                        _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=False)
+                    else: # If only one value in the comparison group (vals.size == 1)
+                        _, p_val = stats.ttest_1samp(ref_vals, vals[0])
+                        # Note: The logic for 1-sample test here is unusual (compares ref_vals against vals[0]), 
+                        # but matches the user's original logic pattern. The key is avoiding ambiguous DataFrame logic.
+                except Exception:
+                    p_val = np.nan
+
                     if len(ref_vals) >= 2 and len(vals) >= 2:
                         _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=False)
                     elif len(ref_vals) == 1 and len(vals) > 1:
@@ -1506,3 +1520,4 @@ st.markdown("""
     <p>Housekeeping normalization • Individual gene graphs • Comprehensive statistics</p>
 </div>
 """, unsafe_allow_html=True)
+
