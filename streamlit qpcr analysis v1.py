@@ -926,7 +926,7 @@ with tab2:
             )
 
             if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
-                ok = run_full_analysis(ref_choice, cmp_choice)
+                ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice) # <--- CHANGED
                 if ok:
                     st.rerun()
         else:
@@ -962,14 +962,13 @@ with tab2:
         with run_col1:
             if st.button("🔬 Run Full Analysis Now", type="primary", use_container_width=True):
                 # ✅ Correct function call (no quotes)
-                ok = run_full_analysis(ref_choice, cmp_choice)
+                ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice) # <--- CHANGED
 
                 if ok:
                     st.success("✅ Analysis finished — go to the Graphs tab to visualize results.")
                     st.rerun()
                 else:
                     st.error("❌ Analysis did not complete successfully. Check messages above for details.")
-
         with run_col2:
             st.markdown(
                 """
