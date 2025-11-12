@@ -228,15 +228,15 @@ class AnalysisEngine:
                 hk_ct_mean = hk_ct_values.mean()
                 delta_ct = target_ct_mean - hk_ct_mean
                 
-                # Get reference ΔCt (compare_sample)
-                ref_target = target_data[target_data['Condition'] == compare_sample]
-                ref_hk = data[(data['Condition'] == compare_sample) & (data['Target'] == hk_gene)]
-                
+                # Get reference ΔCt (ref_sample)
+                ref_target = target_data[target_data['Condition'] == ref_sample]
+                ref_hk = data[(data['Condition'] == ref_sample) & (data['Target'] == hk_gene)]
+
                 if len(ref_target) > 0 and len(ref_hk) > 0:
                     ref_delta_ct = ref_target['CT'].mean() - ref_hk['CT'].mean()
                 else:
                     ref_delta_ct = 0
-                
+
                 # ΔΔCt and relative expression
                 ddct = delta_ct - ref_delta_ct
                 rel_expr = 2 ** (-ddct)
