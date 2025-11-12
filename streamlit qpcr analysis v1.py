@@ -269,107 +269,85 @@ class AnalysisEngine:
     
     @staticmethod
     def calculate_statistics(processed: pd.DataFrame, compare_condition: str,
-                             raw_data: pd.DataFrame = None,
-                             hk_gene: str = None,
-                             sample_mapping: dict = None) -> pd.DataFrame:
-        """
-        Perform two-tailed Welch's t-test (independent samples) comparing each condition
-        to the specified compare_condition. Works safely with triplicates.
-        If raw_data, hk_gene, or sample_mapping are not provided, it falls back to
-        st.session_state variables. Results are added as p_value and significance columns.
-        """
-        import numpy as np
-        from scipy import stats
-        import streamlit as st
-
-        # Use session_state fallbacks if args not provided
-        raw_data = raw_data or st.session_state.get("data")
-        hk_gene = hk_gene or st.session_state.get("hk_gene")
-        sample_mapping = sample_mapping or st.session_state.get("sample_mapping", {})
-
-        # If raw_data missing, return processed unchanged
+                            raw_data: pd.DataFrame = None,
+                            hk_gene: str = None,
+                            sample_mapping: dict = None) -> pd.DataFrame:
+        """Two-tailed Welch's t-test comparing each condition to compare_condition"""
+        
+        # Use session_state fallbacks
+        raw_data = raw_data if raw_data is not None else st.session_state.get("data")
+        hk_gene = hk_gene if hk_gene is not None else st.session_state.get("hk_gene")
+        sample_mapping = sample_mapping if sample_mapping is not None else st.session_state.get("sample_mapping", {})
+        
         if raw_data is None or hk_gene is None:
             return processed
-
+        
         results = processed.copy()
         results["p_value"] = np.nan
         results["significance"] = ""
-
+        
         for target in results["Target"].unique():
             if pd.isna(target):
                 continue
-
-            # Map samples to user-defined condition names
+            
+            # Map conditions
             t_rows = raw_data[raw_data["Target"] == target].copy()
             if t_rows.empty:
                 continue
+            
             t_rows["Condition"] = t_rows["Sample"].map(
                 lambda s: sample_mapping.get(s, {}).get("condition", s)
             )
-
+            
             hk_rows = raw_data[raw_data["Target"] == hk_gene].copy()
             hk_rows["Condition"] = hk_rows["Sample"].map(
                 lambda s: sample_mapping.get(s, {}).get("condition", s)
             )
             hk_means = hk_rows.groupby("Condition")["CT"].mean().to_dict()
-
+            
+            # Calculate relative expression per condition
             rel_expr = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
                 if np.isnan(hk_mean):
                     continue
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
-            # Reference condition replicates
+            
+            # Reference condition
             ref_vals = rel_expr.get(compare_condition, np.array([]))
-            if ref_vals.size < 2: # Require at least 2 replicates for a meaningful t-test comparison
-                st.warning(f"⚠️ Cannot run statistics for {target}: Reference condition '{compare_condition}' has less than 2 replicates.")
-                continue # Skip this target gene
-
+            if ref_vals.size < 1:
+                continue
+            
             # Compare each condition to reference
             for cond, vals in rel_expr.items():
                 if cond == compare_condition or vals.size == 0:
                     continue
                 
-                # Ensure the test values have at least one replicate
-                if vals.size < 1:
-                    continue
-
                 try:
-                    # Use two-sample t-test (Welch's, unequal variance) only if both groups have >= 2
-                    if vals.size >= 2:
+                    # Choose appropriate test
+                    if ref_vals.size >= 2 and vals.size >= 2:
                         _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=False)
-                    else: # If only one value in the comparison group (vals.size == 1)
+                    elif vals.size == 1 and ref_vals.size >= 2:
                         _, p_val = stats.ttest_1samp(ref_vals, vals[0])
-                        # Note: The logic for 1-sample test here is unusual (compares ref_vals against vals[0]), 
-                        # but matches the user's original logic pattern. The key is avoiding ambiguous DataFrame logic.
-                except Exception:
-                    p_val = np.nan
-
-                    if len(ref_vals) >= 2 and len(vals) >= 2:
-                        _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=False)
-                    elif len(ref_vals) == 1 and len(vals) > 1:
+                    elif ref_vals.size == 1 and vals.size >= 2:
                         _, p_val = stats.ttest_1samp(vals, ref_vals[0])
-                    elif len(vals) == 1 and len(ref_vals) > 1:
-                        _, p_val = stats.ttest_1samp(ref_vals, vals[0])
                     else:
                         p_val = np.nan
-                except Exception:
+                except:
                     p_val = np.nan
-
+                
                 # Annotate results
                 mask = (results["Target"] == target) & (results["Condition"] == cond)
-                results.loc[mask, "p_value"] = float(p_val) if not np.isnan(p_val) else np.nan
+                results.loc[mask, "p_value"] = p_val
+                
                 if not np.isnan(p_val):
                     if p_val < 0.001:
-                        sig = "***"
+                        results.loc[mask, "significance"] = "***"
                     elif p_val < 0.01:
-                        sig = "**"
+                        results.loc[mask, "significance"] = "**"
                     elif p_val < 0.05:
-                        sig = "*"
-                    else:
-                        sig = ""
-                    results.loc[mask, "significance"] = sig
-
+                        results.loc[mask, "significance"] = "*"
+        
         return results
     # ------------------------------------------------------------
     # Helper function: Run full qPCR ΔΔCt + statistics pipeline
@@ -571,67 +549,7 @@ class GraphGenerator:
         )
 
         return fig
-
-    def run_full_analysis(ref_sample_key: str, compare_sample_key: str):
-        """
-        Run a full ΔΔCt + statistics pipeline and store results in
-        st.session_state.processed_data as a dict: {gene: DataFrame}.
-        """
-        try:
-            if st.session_state.get('data') is None:
-                st.error("No raw data loaded.")
-                return False
-            if not st.session_state.get('sample_mapping'):
-                st.error("No sample mapping available.")
-                return False
-            if not st.session_state.get('hk_gene'):
-                st.error("No housekeeping gene selected.")
-                return False
-
-            mapping = st.session_state.sample_mapping
-            ref_condition = mapping.get(ref_sample_key, {}).get('condition', ref_sample_key)
-            compare_condition = mapping.get(compare_sample_key, {}).get('condition', compare_sample_key)
-
-            processed_df = AnalysisEngine.calculate_ddct(
-                st.session_state.data,
-                st.session_state.hk_gene,
-                ref_condition,
-                compare_condition,
-                st.session_state.get('excluded_wells', set()),
-                st.session_state.get('excluded_samples', set()),
-                mapping
-            )
-
-            if processed_df is None or processed_df.empty:
-                st.warning("No processed results (ΔΔCt) — please check inputs.")
-                return False
-
-            try:
-                processed_with_stats = AnalysisEngine.calculate_statistics(
-                    processed_df,
-                    compare_condition,
-                    raw_data=st.session_state.data,
-                    hk_gene=st.session_state.hk_gene,
-                    sample_mapping=mapping
-                )
-            except TypeError:
-                processed_with_stats = AnalysisEngine.calculate_statistics(processed_df, compare_condition)
-
-            # Split into dict of gene DataFrames for graphs
-            gene_dict = {}
-            if 'Target' in processed_with_stats.columns:
-                for g in processed_with_stats['Target'].unique():
-                    gene_df = processed_with_stats[processed_with_stats['Target'] == g].copy()
-                    gene_dict[g] = gene_df.reset_index(drop=True)
-            else:
-                gene_dict = {'results': processed_with_stats.reset_index(drop=True)}
-
-            st.session_state.processed_data = gene_dict
-            return True
-
-        except Exception as e:
-            st.error(f"Analysis failed: {e}")
-            return False
+    
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
                    params: dict, mapping: dict) -> bytes:
@@ -909,96 +827,48 @@ with tab2:
         mapping_df = pd.DataFrame([{'Order': idx+1, 'Original': k, **v} 
                                 for idx, (k,v) in enumerate([(s, st.session_state.sample_mapping[s]) for s in st.session_state.sample_order])])
         st.dataframe(mapping_df, use_container_width=True)
-        
-        # ------------------------------------------------------------
+
         # Run Full Analysis Section
-        # ------------------------------------------------------------
         st.markdown("---")
-        st.subheader("🔬 Run Full ΔΔCt + Statistical Analysis")
-
-        sample_keys = list(st.session_state.sample_mapping.keys())
-
-        if sample_keys:
-            c1, c2 = st.columns(2)
-            with c1:
-                ref_choice = st.selectbox(
-                    "Reference sample (normalization)",
-                    sample_keys,
-                    index=0,
-                    key="ref_choice",
-                )
-            with c2:
-                cmp_choice = st.selectbox(
-                    "Comparison sample (for p-value)",
-                    sample_keys,
-                    index=0,
-                    key="cmp_choice",
-                )
-
-            st.caption(
-                "Select which samples to use as reference (baseline = 1.0) and comparison (for significance)."
-            )
-
-            if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
-                ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice) # <--- CHANGED
-                if ok:
-                    st.rerun()
-        else:
-            st.warning("No samples available for analysis.")
-
-                
-        # --- Analysis quick-run controls (placed after mapping summary) ---
-        st.markdown("---")
-        st.subheader("▶ Run Full Analysis (ΔΔCt + statistics)")
-
-        # Build choices from sample_mapping keys (preserve user ordering if available)
+        st.subheader("🔬 Run Full Analysis (ΔΔCt + statistics)")
+        
         sample_keys = st.session_state.get('sample_order') or list(st.session_state.sample_mapping.keys())
-        if not sample_keys:
-            sample_keys = list(st.session_state.sample_mapping.keys())
-
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            ref_choice = st.selectbox(
-                "Reference sample (normalization ΔΔCt)",
-                sample_keys,
-                index=0 if sample_keys else 0,
-                help="This mapped sample will be used as the ΔΔCt baseline (fold change = 1.0)."
-            )
-        with col_r2:
-            cmp_choice = st.selectbox(
-                "Comparison sample (for p-values)",
-                sample_keys,
-                index=0 if sample_keys else 0,
-                help="This sample's replicates are used as the comparison group when calculating p-values."
-            )
-
-        run_col1, run_col2 = st.columns([1, 3])
-        with run_col1:
-            if st.button("🔬 Run Full Analysis Now", type="primary", use_container_width=True):
-                # ✅ Correct function call (no quotes)
-                ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice) # <--- CHANGED
-
+        
+        if sample_keys:
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                ref_choice = st.selectbox(
+                    "Reference sample (baseline = 1.0)",
+                    sample_keys,
+                    index=0,
+                    key="ref_choice_unique",
+                    help="Fold changes calculated relative to this sample"
+                )
+            with col_r2:
+                cmp_choice = st.selectbox(
+                    "Comparison sample (for p-values)",
+                    sample_keys,
+                    index=0,
+                    key="cmp_choice_unique",
+                    help="Statistical comparison reference"
+                )
+            
+            if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
+                ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice)
                 if ok:
-                    st.success("✅ Analysis finished — go to the Graphs tab to visualize results.")
+                    st.success("✅ Analysis complete! Go to Graphs tab.")
                     st.rerun()
                 else:
-                    st.error("❌ Analysis did not complete successfully. Check messages above for details.")
-        with run_col2:
-            st.markdown(
-                """
-                💡 **Tip:**  
-                After sample mapping, click **Run Full Analysis Now**  
-                to automatically calculate ΔΔCt values, perform t-tests,  
-                and prepare all results for graph visualization and export.
-                """
-            )
-
+                    st.error("❌ Analysis failed. Check messages above.")
+        else:
+            st.warning("No samples available for analysis.")
+            
 # ==================== TAB 3: ANALYSIS ====================
 with tab3:
     st.header("📊 Visualization")
 
     # Guard: Require processed data
-    if "processed_daat lta" not in st.session_state or st.session_state.processed_data is None:
+    if "processed_daat" not in st.session_state or st.session_state.processed_data is None:
         st.info("Run analysis first to visualize results.")
     else:
         st.divider()
@@ -1246,109 +1116,8 @@ with tab4:
                     ov = st.session_state.sample_gene_overrides.get(str((gene, cond)), {})
                     if ov.get('color'):
                         local_settings['bar_colors'][f"{gene}__{cond}"] = ov['color']
-
-        @staticmethod
-        def create_gene_graph(data: pd.DataFrame, gene: str, settings: dict, efficacy_config: dict = None, sample_order: List[str] = None, per_sample_overrides: dict = None) -> go.Figure:
-            """Create individual graph for each gene with support for sample ordering and per-sample overrides"""
-            gene_data = data[data['Target'] == gene].copy()
-
-            # Map group order and then apply a user-specified sample order if provided
-            group_order = ['Baseline', 'Negative Control', 'Positive Control', 'Treatment']
-            gene_data['group_sort'] = gene_data['Group'].apply(lambda x: group_order.index(x) if x in group_order else 999)
-
-            # Apply sample_order if provided to set custom Condition order (filter to included ones)
-            if sample_order:
-                # Keep only conditions in sample_order (but if gene has others, append them)
-                ordered = [c for c in sample_order if c in gene_data['Condition'].unique()]
-                other = [c for c in sorted(gene_data['Condition'].unique()) if c not in ordered]
-                final_order = ordered + other
-                gene_data['Condition'] = pd.Categorical(gene_data['Condition'], categories=final_order, ordered=True)
-                gene_data = gene_data.sort_values(['group_sort','Condition'])
-            else:
-                gene_data = gene_data.sort_values(['group_sort', 'Condition'])
-
-            # Apply per-sample-per-gene include overrides: drop excluded ones
-            if per_sample_overrides:
-                # keys are stored as str((gene, condition))
-                keep_mask = []
-                for _, row in gene_data.iterrows():
-                    key = str((gene, row['Condition']))
-                    ov = per_sample_overrides.get(key, {})
-                    # default include True
-                    keep_mask.append(bool(ov.get('include', True)))
-                gene_data = gene_data[np.array(keep_mask)]
-
-            fig = go.Figure()
-
-            # Color mapping by group (and fallbacks)
-            default_color = settings.get('bar_colors', {}).get(gene, '#95E1D3')
-            color_map = {
-                'Baseline': '#808080',
-                'Negative Control': '#FF6B6B',
-                'Positive Control': '#4ECDC4',
-                'Treatment': default_color
-            }
-
-            # per-bar colors: respect per-sample overrides if present
-            bar_colors = []
-            for _, row in gene_data.iterrows():
-                key = str((gene, row['Condition']))
-                ov = (per_sample_overrides or {}).get(key, {})
-                if ov and ov.get('color'):
-                    bar_colors.append(ov.get('color'))
-                else:
-                    bar_colors.append(color_map.get(row['Group'], default_color))
-
-            # error bars (apply multiplier option)
-            err_array = (gene_data['SEM'] * settings.get('error_multiplier', 1.96)).fillna(0).values
-
-            fig.add_trace(go.Bar(
-                x=gene_data['Condition'],
-                y=gene_data['Relative_Expression'],
-                error_y=dict(type='data', array=err_array, visible=settings.get('show_error', True)),
-                text=gene_data['significance'] if settings.get('show_significance', True) else None,
-                textposition='outside',
-                textfont=dict(size=settings.get('sig_font_size', 16)),
-                marker=dict(color=bar_colors, line=dict(width=settings.get('marker_line_width', 1), color='black')),
-                showlegend=settings.get('show_legend', False),
-                opacity=settings.get('bar_opacity', 0.95)
-            ))
-
-            # Add expected direction indicator
-            if efficacy_config and 'expected_direction' in efficacy_config:
-                direction = efficacy_config.get('expected_direction', {}).get(gene, '')
-                direction_text = '↑ Expected increase' if direction == 'up' else '↓ Expected decrease' if direction == 'down' else ''
-                if direction_text:
-                    fig.add_annotation(text=direction_text, xref='paper', yref='paper', x=0.02, y=0.98, showarrow=False, font=dict(size=12, color='red'), align='left')
-
-            # Layout
-            layout = dict(
-                title=dict(text=f"{gene} Expression", font=dict(size=settings.get('title_size', 20))),
-                xaxis_title=settings.get('xlabel', 'Condition'),
-                yaxis_title=settings.get('ylabel', 'Fold Change (Relative to Control)'),
-                template=settings.get('color_scheme', 'plotly_white'),
-                font=dict(size=settings.get('font_size', 14)),
-                height=settings.get('figure_height', 600),
-                width=settings.get('figure_width', 1000),
-                xaxis=dict(showgrid=settings.get('show_grid', True)),
-                yaxis=dict(showgrid=settings.get('show_grid', True))
-            )
-            if settings.get('y_log_scale'):
-                layout['yaxis']['type'] = 'log'
-            if settings.get('y_min') is not None or settings.get('y_max') is not None:
-                ymin = settings.get('y_min')
-                ymax = settings.get('y_max')
-                # Plotly expects range as [min,max]; None values are ignored
-                layout['yaxis']['range'] = [ymin if ymin is not None else None, ymax if ymax is not None else None]
-
-            layout['bargap'] = settings.get('bar_gap', 0.15)
-
-            fig.update_layout(**layout)
-            return fig
-        
-    else:
-        st.warning("⚠️ Run analysis first")
-
+                        
+                        
 # ==================== TAB 5: EXPORT ====================
 with tab5:
     st.header("Step 5: Export All Results")
