@@ -4,749 +4,977 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy import stats
-from difflib import SequenceMatcher
 import io
 import json
 from datetime import datetime
-from typing import Dict, List, Optional
-import re
+from typing import Dict, List, Tuple
 
-# ==================== CONFIG ====================
-st.set_page_config(page_title="qPCR Analysis Ultimate", layout="wide")
+# ==================== PAGE CONFIG ====================
+st.set_page_config(page_title="qPCR Analysis Suite Pro", layout="wide", initial_sidebar_state="expanded")
 
-# Session state
-defaults = {
-    'data': None, 'processed_data': {}, 'sample_mapping': {}, 'analysis_templates': {},
-    'graphs': {}, 'excluded_wells': set(), 'excluded_samples': set(), 'selected_efficacy': None,
-    'hk_gene': None, 'included_samples_analysis': {}, 'graph_settings': {}, 'auto_merged': {}
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+# ==================== SESSION STATE INIT ====================
+for key in ['data', 'processed_data', 'sample_mapping', 'analysis_templates', 'graphs', 
+            'excluded_wells', 'excluded_samples', 'selected_efficacy', 'hk_gene']:
+    if key not in st.session_state:
+        st.session_state[key] = {} if key in ['sample_mapping', 'analysis_templates', 'graphs'] else (set() if 'excluded' in key else None)
 
-# Efficacy configs
+# ==================== EFFICACY DATABASE ====================
 EFFICACY_CONFIG = {
-    '탄력': {'genes': ['COL1A1', 'ELN', 'FBN-1', 'FBN1'], 'cell': 'HS68'},
-    '항노화': {'genes': ['COL1A1', 'COL1', 'MMP-1', 'MMP1'], 'cell': 'HS68',
-              'expected': {'COL1A1': '↑', 'MMP-1': '↓'}},
-    '보습': {'genes': ['AQP3', 'HAS3'], 'cell': 'HaCaT'},
-    '장벽': {'genes': ['FLG', 'CLDN', 'IVL'], 'cell': 'HaCaT'},
-    '표피증식': {'genes': ['KI67', 'PCNA'], 'cell': 'HaCaT'},
-    '멜라닌억제': {'genes': ['MITF', 'TYR'], 'cell': 'B16F10', 'expected': {'MITF': '↓', 'TYR': '↓'}},
-    '진정': {'genes': ['IL1B', 'IL-1β', 'IL6', 'TNFA', 'TNFα'], 'cell': 'HaCaT',
-           'expected': {'IL1B': '↓', 'IL6': '↓', 'TNFA': '↓'}},
-    '지질억제': {'genes': ['SREBPA', 'SREBPa', 'SREBPC', 'SREBPc'], 'cell': 'SZ95',
-              'expected': {'SREBPA': '↓', 'SREBPC': '↓'}},
-    '냉감': {'genes': ['TRPM8', 'CIRBP'], 'cell': 'HaCaT'}
+    '탄력': {
+        'genes': ['COL1A1', 'ELN', 'FBN-1', 'FBN1'],
+        'cell': 'HS68 fibroblast',
+        'controls': {
+            'negative': 'Non-treated',
+            'positive': 'TGFb',
+            'compare_to': 'negative'
+        },
+        'description': 'Elasticity - Non-treated vs TGFb (positive) vs Treatments'
+    },
+    '항노화': {
+        'genes': ['COL1A1', 'COL1', 'MMP-1', 'MMP1'],
+        'cell': 'HS68 fibroblast',
+        'controls': {
+            'baseline': 'Non-treated (No UV)',
+            'negative': 'UVB only',
+            'positive': 'UVB+TGFb',
+            'compare_to': 'negative'
+        },
+        'description': 'Anti-aging - COL1↑ (recovery), MMP1↓ (inhibition) after UVB damage',
+        'expected_direction': {'COL1A1': 'up', 'COL1': 'up', 'MMP-1': 'down', 'MMP1': 'down'}
+    },
+    '보습': {
+        'genes': ['AQP3', 'HAS3'],
+        'cell': 'HaCaT keratinocyte',
+        'controls': {
+            'negative': 'Non-treated',
+            'positive': 'Retinoic acid',
+            'compare_to': 'negative'
+        },
+        'description': 'Hydration - Non-treated vs Retinoic acid (positive) vs Treatments'
+    },
+    '장벽': {
+        'genes': ['FLG', 'CLDN', 'IVL'],
+        'cell': 'HaCaT keratinocyte',
+        'controls': {
+            'negative': 'Non-treated',
+            'positive': 'Retinoic acid',
+            'compare_to': 'negative'
+        },
+        'description': 'Barrier function - Non-treated vs Retinoic acid (positive) vs Treatments'
+    },
+    '표피증식': {
+        'genes': ['KI67', 'PCNA'],
+        'cell': 'HaCaT keratinocyte',
+        'controls': {
+            'negative': 'Non-treated',
+            'positive': 'TGFb or FBS',
+            'compare_to': 'negative'
+        },
+        'description': 'Proliferation - Non-treated vs TGFb/FBS (positive) vs Treatments'
+    },
+    '멜라닌억제': {
+        'genes': ['MITF', 'TYR', 'Melanin'],
+        'cell': 'B16F10 melanocyte',
+        'controls': {
+            'baseline': 'Non-treated',
+            'negative': 'α-MSH only',
+            'positive': 'α-MSH+Arbutin',
+            'compare_to': 'negative'
+        },
+        'description': 'Melanin inhibition - α-MSH induced vs α-MSH+Arbutin (positive) vs α-MSH+Treatments',
+        'expected_direction': {'MITF': 'down', 'TYR': 'down', 'Melanin': 'down'}
+    },
+    '진정': {
+        'genes': ['IL1B', 'IL-1β', 'IL6', 'TNFA', 'TNFα'],
+        'cell': 'HaCaT keratinocyte',
+        'controls': {
+            'baseline': 'Non-treated',
+            'negative': 'IL4+PolyIC (Inflammation)',
+            'positive': 'Inflammation+Dexamethasone',
+            'compare_to': 'negative'
+        },
+        'description': 'Anti-inflammation - Reduce IL1β/IL6/TNFα (all should decrease)',
+        'expected_direction': {'IL1B': 'down', 'IL-1β': 'down', 'IL6': 'down', 'TNFA': 'down', 'TNFα': 'down'}
+    },
+    '지질억제': {
+        'genes': ['SREBPA', 'SREBPa', 'SREBPC', 'SREBPc', 'PPARY', 'PPARy'],
+        'cell': 'SZ95 sebocyte',
+        'controls': {
+            'baseline': 'Non-treated',
+            'negative': 'IGF only',
+            'positive': 'IGF+Reference inhibitor',
+            'compare_to': 'negative'
+        },
+        'description': 'Sebum inhibition - IGF induced vs IGF+Treatments',
+        'expected_direction': {'SREBPA': 'down', 'SREBPa': 'down', 'SREBPC': 'down', 'SREBPc': 'down', 'PPARY': 'down', 'PPARy': 'down'}
+    },
+    '냉감': {
+        'genes': ['TRPM8', 'CIRBP'],
+        'cell': 'HaCaT keratinocyte',
+        'controls': {
+            'negative': 'Non-treated',
+            'positive': 'Menthol',
+            'compare_to': 'negative'
+        },
+        'description': 'Cooling effect - Non-treated vs Menthol (positive) vs Treatments'
+    }
 }
 
-# Valid colors
-VALID_COLORS = {
-    'black': '#000000', 'white': '#FFFFFF', 'gray': '#808080', 'lightgray': '#D3D3D3',
-    'red': '#FF0000', 'blue': '#0000FF', 'green': '#008000', 'yellow': '#FFFF00'
-}
-
-# ==================== UNIVERSAL PARSER ====================
-class UniversalParser:
+# ==================== PARSER CLASS ====================
+class QPCRParser:
     @staticmethod
-    def similarity(a, b):
-        """Calculate string similarity"""
-        return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
+    def detect_format(df):
+        for idx, row in df.iterrows():
+            row_str = ' '.join(row.astype(str).values)
+            if 'Well Position' in row_str:
+                return 'format1', idx
+            elif row.iloc[0] == 'Well' and 'Sample Name' in row_str:
+                return ('format2' if 'Cт' in row_str or 'ΔCт' in row_str else 'format1'), idx
+        return 'unknown', 0
     
     @staticmethod
-    def find_data_start(df):
-        """Find where actual data starts by looking for 'Well' or 'Sample' keywords"""
-        keywords = ['well', 'sample', 'target', 'ct', 'cт']
+    def parse_format1(df, start):
+        df = df.iloc[start:].reset_index(drop=True)
+        df.columns = df.iloc[0]
+        df = df.iloc[1:].reset_index(drop=True)
         
-        for idx in range(min(50, len(df))):
-            row_str = ' '.join(str(x).lower() for x in df.iloc[idx].values if pd.notna(x))
-            if any(kw in row_str for kw in keywords):
-                return idx
-        return 0
+        well_col = next((c for c in ['Well Position', 'Well'] if c in df.columns), df.columns[0])
+        ct_col = next((c for c in ['CT', 'Ct', 'Cт'] if c in df.columns), None)
+        
+        if not ct_col:
+            return None
+        
+        parsed = pd.DataFrame({
+            'Well': df[well_col],
+            'Sample': df.get('Sample Name', df.iloc[:, 2]),
+            'Target': df.get('Target Name', df.iloc[:, 3]),
+            'CT': pd.to_numeric(df[ct_col], errors='coerce')
+        })
+        
+        return parsed.dropna(subset=['CT']).query('Sample.notna() & Target.notna()')
     
     @staticmethod
-    def find_columns(df):
-        """Intelligently find Well, Sample, Target, CT columns"""
-        header_row = df.iloc[0]
+    def parse_format2(df, start):
+        df = df.iloc[start:].reset_index(drop=True)
+        df.columns = df.iloc[0]
+        df = df.iloc[1:].reset_index(drop=True)
         
-        well_col = None
-        sample_col = None
-        target_col = None
-        ct_col = None
+        parsed = pd.DataFrame({
+            'Well': df['Well'],
+            'Sample': df['Sample Name'],
+            'Target': df['Target Name'],
+            'CT': pd.to_numeric(df['Cт'], errors='coerce')
+        })
         
-        # Find columns by fuzzy matching
-        for i, col_name in enumerate(header_row):
-            col_lower = str(col_name).lower()
-            
-            if well_col is None and ('well' in col_lower):
-                well_col = i
-            elif sample_col is None and ('sample' in col_lower):
-                sample_col = i
-            elif target_col is None and ('target' in col_lower or 'gene' in col_lower):
-                target_col = i
-            elif ct_col is None and ('ct' in col_lower or 'cт' in col_lower or 'cq' in col_lower):
-                ct_col = i
-        
-        return well_col, sample_col, target_col, ct_col
+        return parsed.dropna(subset=['CT']).query('Sample.notna() & Target.notna()')
     
     @staticmethod
     def parse(file):
-        """Universal CSV parser - works with any format"""
         try:
-            # Try multiple encodings
             df = None
-            for enc in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+            for enc in ['utf-8', 'latin-1', 'cp1252']:
                 try:
-                    df = pd.read_csv(file, encoding=enc, header=None, skip_blank_lines=False)
+                    df = pd.read_csv(file, encoding=enc, low_memory=False, skip_blank_lines=False)
                     break
-                except:
+                except UnicodeDecodeError:
                     continue
             
-            if df is None or len(df) == 0:
+            if df is None:
                 return None
             
-            # Find data start
-            start_idx = UniversalParser.find_data_start(df)
-            df = df.iloc[start_idx:].reset_index(drop=True)
-            
-            # Set first row as header
-            df.columns = df.iloc[0]
-            df = df.iloc[1:].reset_index(drop=True)
-            
-            # Find columns
-            well_idx, sample_idx, target_idx, ct_idx = UniversalParser.find_columns(df)
-            
-            # Fallback to position if not found
-            if sample_idx is None:
-                sample_idx = 2 if len(df.columns) > 2 else 1
-            if target_idx is None:
-                target_idx = 3 if len(df.columns) > 3 else 2
-            if ct_idx is None:
-                # Find first numeric column
-                for i in range(len(df.columns)):
-                    if pd.to_numeric(df.iloc[:, i], errors='coerce').notna().sum() > len(df) * 0.5:
-                        ct_idx = i
-                        break
-            
-            if ct_idx is None:
-                return None
-            
-            # Extract data
-            parsed = pd.DataFrame({
-                'Well': df.iloc[:, well_idx] if well_idx is not None else df.iloc[:, 0],
-                'Sample': df.iloc[:, sample_idx],
-                'Target': df.iloc[:, target_idx],
-                'CT': pd.to_numeric(df.iloc[:, ct_idx], errors='coerce')
-            })
-            
-            # Clean data
-            parsed = parsed.dropna(subset=['CT'])
-            parsed = parsed[parsed['Sample'].notna() & parsed['Target'].notna()]
-            parsed = parsed[parsed['Sample'].astype(str).str.strip() != '']
-            
-            return parsed if len(parsed) > 0 else None
-            
+            fmt, start = QPCRParser.detect_format(df)
+            return QPCRParser.parse_format1(df, start) if fmt == 'format1' else QPCRParser.parse_format2(df, start) if fmt == 'format2' else None
         except Exception as e:
-            st.error(f"Parse error: {str(e)}")
+            st.error(f"Parse error: {e}")
             return None
-    
-    @staticmethod
-    def auto_merge_samples(df, threshold=0.8):
-        """Automatically detect and suggest sample merges"""
-        samples = df['Sample'].unique()
-        merge_suggestions = {}
-        
-        for i, s1 in enumerate(samples):
-            for s2 in samples[i+1:]:
-                sim = UniversalParser.similarity(s1, s2)
-                if sim > threshold:
-                    # Use shorter name or first one
-                    canonical = s1 if len(str(s1)) <= len(str(s2)) else s2
-                    merge_suggestions[s1] = canonical
-                    merge_suggestions[s2] = canonical
-        
-        return merge_suggestions
 
 # ==================== ANALYSIS ENGINE ====================
 class AnalysisEngine:
     @staticmethod
-    def calculate_ddct(data, hk_gene, baseline, mapping, included):
-        data = data.copy()
-        data['Condition'] = data['Sample'].map(lambda x: mapping.get(x, {}).get('condition', x))
-        data['Group'] = data['Sample'].map(lambda x: mapping.get(x, {}).get('group', 'Treatment'))
+    def calculate_ddct(data: pd.DataFrame, hk_gene: str, ref_sample: str, compare_sample: str, 
+                       excluded_wells: set, excluded_samples: set, sample_mapping: dict) -> pd.DataFrame:
+        """Gene-by-gene ΔΔCt calculation with housekeeping normalization"""
         
-        results = {}
+        # Filter data
+        data = data[~data['Well'].isin(excluded_wells) & ~data['Sample'].isin(excluded_samples)].copy()
         
+        # Apply sample name mapping
+        data['Condition'] = data['Sample'].map(lambda x: sample_mapping.get(x, {}).get('condition', x))
+        data['Group'] = data['Sample'].map(lambda x: sample_mapping.get(x, {}).get('group', 'Treatment'))
+        
+        results = []
+        
+        # Process each target gene separately (exclude housekeeping)
         for target in data['Target'].unique():
             if target.upper() in [hk_gene.upper(), 'ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB']:
                 continue
             
-            inc = included.get(target, [])
-            if not inc or baseline not in inc:
-                continue
+            target_data = data[data['Target'] == target]
             
-            tdata = data[(data['Target'] == target) & (data['Condition'].isin(inc))]
-            
-            # Baseline
-            bl_t = tdata[tdata['Condition'] == baseline]
-            bl_h = data[(data['Condition'] == baseline) & (data['Target'] == hk_gene)]
-            if len(bl_t) == 0 or len(bl_h) == 0:
-                continue
-            
-            bl_dct = bl_t['CT'].mean() - bl_h['CT'].mean()
-            
-            gene_results = []
-            for cond in tdata['Condition'].unique():
-                ct = tdata[tdata['Condition'] == cond]
-                ch = data[(data['Condition'] == cond) & (data['Target'] == hk_gene)]
+            for condition in target_data['Condition'].unique():
+                cond_data = target_data[target_data['Condition'] == condition]
                 
-                if len(ch) == 0:
+                # Get housekeeping Ct for this condition
+                hk_data = data[(data['Condition'] == condition) & (data['Target'] == hk_gene)]
+                if len(hk_data) == 0:
                     continue
                 
-                ct_vals = ct['CT'].values
-                dct = ct_vals.mean() - ch['CT'].mean()
-                ddct = dct - bl_dct
-                fc = 2 ** (-ddct)
-                sem = ct_vals.std() / np.sqrt(len(ct_vals)) if len(ct_vals) > 1 else 0
+                # Calculate ΔCt = Target_Ct - HK_Ct
+                target_ct_values = cond_data['CT'].values
+                hk_ct_values = hk_data['CT'].values
                 
-                gene_results.append({
-                    'Target': target, 'Condition': cond, 'Group': ct['Group'].iloc[0],
-                    'n': len(ct_vals), 'CT_values': ct_vals, 'Fold_Change': fc, 'SEM': sem
+                # Use mean if multiple replicates
+                target_ct_mean = target_ct_values.mean()
+                hk_ct_mean = hk_ct_values.mean()
+                delta_ct = target_ct_mean - hk_ct_mean
+                
+                # Get reference ΔCt (compare_sample)
+                ref_target = target_data[target_data['Condition'] == compare_sample]
+                ref_hk = data[(data['Condition'] == compare_sample) & (data['Target'] == hk_gene)]
+                
+                if len(ref_target) > 0 and len(ref_hk) > 0:
+                    ref_delta_ct = ref_target['CT'].mean() - ref_hk['CT'].mean()
+                else:
+                    ref_delta_ct = 0
+                
+                # ΔΔCt and relative expression
+                ddct = delta_ct - ref_delta_ct
+                rel_expr = 2 ** (-ddct)
+                
+                # Error calculation
+                ct_sd = target_ct_values.std() if len(target_ct_values) > 1 else 0
+                sem = ct_sd / np.sqrt(len(target_ct_values)) if len(target_ct_values) > 1 else 0
+                
+                # Get original sample name and group
+                original_sample = cond_data['Sample'].iloc[0]
+                group = sample_mapping.get(original_sample, {}).get('group', 'Treatment')
+                
+                results.append({
+                    'Target': target,
+                    'Condition': condition,
+                    'Original_Sample': original_sample,
+                    'Group': group,
+                    'n_replicates': len(target_ct_values),
+                    'Target_Ct_Mean': target_ct_mean,
+                    'Target_Ct_SD': ct_sd,
+                    'HK_Ct_Mean': hk_ct_mean,
+                    'Delta_Ct': delta_ct,
+                    'Delta_Delta_Ct': ddct,
+                    'Relative_Expression': rel_expr,
+                    'SEM': sem,
+                    'Fold_Change': rel_expr
                 })
-            
-            if gene_results:
-                results[target] = pd.DataFrame(gene_results)
         
-        return results
+        return pd.DataFrame(results)
     
     @staticmethod
-    def calculate_stats(df, ref):
-        df = df.copy()
-        df['p_value'] = np.nan
-        df['sig'] = ''
+    def calculate_statistics(data: pd.DataFrame, compare_condition: str) -> pd.DataFrame:
+        """Calculate p-values comparing each condition to comparison control"""
+        results = data.copy()
+        results['p_value'] = np.nan
+        results['significance'] = ''
         
-        ref_data = df[df['Condition'] == ref]
-        if len(ref_data) == 0:
-            return df
-        
-        ref_vals = ref_data.iloc[0]['CT_values']
-        
-        for idx, row in df.iterrows():
-            if row['Condition'] == ref:
-                df.at[idx, 'p_value'] = 1.0
-                continue
+        for target in results['Target'].unique():
+            target_data = results[results['Target'] == target]
+            control_values = target_data[target_data['Condition'] == compare_condition]['Relative_Expression'].values
             
-            vals = row['CT_values']
-            
-            try:
-                if len(ref_vals) > 1 and len(vals) > 1:
-                    _, p = stats.ttest_ind(ref_vals, vals)
-                elif len(ref_vals) == 1 and len(vals) > 1:
-                    _, p = stats.ttest_1samp(vals, ref_vals[0])
-                else:
-                    p = np.nan
+            for condition in target_data['Condition'].unique():
+                if condition == compare_condition:
+                    continue
                 
-                df.at[idx, 'p_value'] = p
+                sample_values = target_data[target_data['Condition'] == condition]['Relative_Expression'].values
                 
-                if p < 0.001:
-                    df.at[idx, 'sig'] = '***'
-                elif p < 0.01:
-                    df.at[idx, 'sig'] = '**'
-                elif p < 0.05:
-                    df.at[idx, 'sig'] = '*'
-            except:
-                pass
+                if len(control_values) >= 1 and len(sample_values) >= 1:
+                    # Use one-sample t-test if only one control value
+                    if len(control_values) == 1 and len(sample_values) > 1:
+                        t_stat, p_val = stats.ttest_1samp(sample_values, control_values[0])
+                    elif len(sample_values) == 1 and len(control_values) > 1:
+                        t_stat, p_val = stats.ttest_1samp(control_values, sample_values[0])
+                    else:
+                        t_stat, p_val = stats.ttest_ind(control_values, sample_values)
+                    
+                    idx = (results['Target'] == target) & (results['Condition'] == condition)
+                    results.loc[idx, 'p_value'] = p_val
+                    
+                    if p_val < 0.001:
+                        results.loc[idx, 'significance'] = '***'
+                    elif p_val < 0.01:
+                        results.loc[idx, 'significance'] = '**'
+                    elif p_val < 0.05:
+                        results.loc[idx, 'significance'] = '*'
         
-        return df
+        return results
 
 # ==================== GRAPH GENERATOR ====================
-def create_graph(data, gene, settings):
-    gdata = data[data['Condition'].isin(settings['show_conditions'])].copy()
-    
-    # Custom order
-    if settings.get('order'):
-        order_map = {c: i for i, c in enumerate(settings['order'])}
-        gdata['_sort'] = gdata['Condition'].map(lambda x: order_map.get(x, 999))
-        gdata = gdata.sort_values('_sort')
-    
-    colors = [settings['colors'].get(c, '#636EFA') for c in gdata['Condition']]
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Bar(
-        x=gdata['Condition'],
-        y=gdata['Fold_Change'],
-        error_y=dict(
-            type='data',
-            array=gdata['SEM'] * 1.96,
-            visible=settings.get('show_error', True),
-            thickness=settings.get('err_thick', 2),
-            width=settings.get('err_width', 4),
-            color=settings.get('err_color', '#000000')
-        ),
-        text=gdata['sig'] if settings.get('show_sig', True) else None,
-        textposition=settings.get('sig_pos', 'outside'),
-        textfont=dict(size=settings.get('sig_size', 16), color=settings.get('sig_color', '#000000')),
-        marker=dict(
-            color=colors,
-            line=dict(color=settings.get('border_color', '#000000'), width=settings.get('border_width', 0)),
-            opacity=settings.get('opacity', 1.0)
-        ),
-        width=settings.get('bar_width', 0.8),
-        showlegend=False
-    ))
-    
-    # Reference line
-    if settings.get('show_ref', True):
-        fig.add_hline(y=settings.get('ref_val', 1.0), line_dash="dash",
-                     line_color=settings.get('ref_color', '#808080'),
-                     line_width=settings.get('ref_width', 2))
-    
-    fig.update_layout(
-        title=dict(text=settings.get('title', gene), font=dict(size=settings.get('title_size', 20))),
-        xaxis=dict(
-            title=settings.get('xlabel', 'Condition'),
-            showgrid=settings.get('x_grid', False),
-            gridcolor=VALID_COLORS.get('lightgray', '#D3D3D3'),
-            tickangle=settings.get('tick_angle', -45),
-            tickfont=dict(size=settings.get('tick_size', 12))
-        ),
-        yaxis=dict(
-            title=settings.get('ylabel', 'Fold Change'),
-            showgrid=settings.get('y_grid', True),
-            gridcolor=VALID_COLORS.get('lightgray', '#D3D3D3'),
-            range=settings.get('y_range')
-        ),
-        template=settings.get('theme', 'plotly_white'),
-        height=settings.get('height', 600),
-        width=settings.get('width', 1000),
-        plot_bgcolor=settings.get('plot_bg', '#FFFFFF'),
-        paper_bgcolor=settings.get('paper_bg', '#FFFFFF')
-    )
-    
-    return fig
+class GraphGenerator:
+    @staticmethod
+    def create_gene_graph(data: pd.DataFrame, gene: str, settings: dict, efficacy_config: dict = None) -> go.Figure:
+        """Create individual graph for each gene"""
+        gene_data = data[data['Target'] == gene].copy()
+        
+        # Sort by group order: baseline → negative → positive → treatments
+        group_order = ['Baseline', 'Negative Control', 'Positive Control', 'Treatment']
+        gene_data['group_sort'] = gene_data['Group'].apply(
+            lambda x: group_order.index(x) if x in group_order else 999
+        )
+        gene_data = gene_data.sort_values(['group_sort', 'Condition'])
+        
+        fig = go.Figure()
+        
+        # Color mapping by group
+        color_map = {
+            'Baseline': '#808080',
+            'Negative Control': '#FF6B6B',
+            'Positive Control': '#4ECDC4',
+            'Treatment': settings.get('bar_colors', {}).get(gene, '#95E1D3')
+        }
+        
+        fig.add_trace(go.Bar(
+            x=gene_data['Condition'],
+            y=gene_data['Relative_Expression'],
+            error_y=dict(
+                type='data',
+                array=gene_data['SEM'] * 1.96,
+                visible=settings.get('show_error', True)
+            ),
+            text=gene_data['significance'] if settings.get('show_significance', True) else None,
+            textposition='outside',
+            textfont=dict(size=settings.get('sig_font_size', 16)),
+            marker=dict(color=[color_map.get(g, '#95E1D3') for g in gene_data['Group']]),
+            showlegend=False
+        ))
+        
+        # Add expected direction indicator
+        if efficacy_config and 'expected_direction' in efficacy_config:
+            direction = efficacy_config['expected_direction'].get(gene, '')
+            direction_text = '↑ Expected increase' if direction == 'up' else '↓ Expected decrease' if direction == 'down' else ''
+            if direction_text:
+                fig.add_annotation(
+                    text=direction_text,
+                    xref='paper', yref='paper',
+                    x=0.02, y=0.98,
+                    showarrow=False,
+                    font=dict(size=12, color='red'),
+                    align='left'
+                )
+        
+        fig.update_layout(
+            title=dict(text=f"{gene} Expression", font=dict(size=settings.get('title_size', 20))),
+            xaxis_title=settings.get('xlabel', 'Condition'),
+            yaxis_title=settings.get('ylabel', 'Fold Change (Relative to Control)'),
+            template=settings.get('color_scheme', 'plotly_white'),
+            font=dict(size=settings.get('font_size', 14)),
+            height=settings.get('figure_height', 600),
+            width=settings.get('figure_width', 1000),
+            xaxis=dict(showgrid=settings.get('show_grid', True)),
+            yaxis=dict(showgrid=settings.get('show_grid', True))
+        )
+        
+        return fig
 
-# ==================== EXPORT ====================
-def export_excel(raw, processed, params, mapping):
+# ==================== EXPORT FUNCTIONS ====================
+def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
+                   params: dict, mapping: dict) -> bytes:
+    """Export comprehensive Excel with gene-by-gene sheets"""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as w:
-        pd.DataFrame([params]).to_excel(w, sheet_name='Params', index=False)
-        pd.DataFrame([{'Original': k, **v} for k, v in mapping.items()]).to_excel(w, sheet_name='Mapping', index=False)
-        raw.to_excel(w, sheet_name='Raw', index=False)
-        for g, d in processed.items():
-            d.drop(columns=['CT_values'], errors='ignore').to_excel(w, sheet_name=g[:31], index=False)
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Parameters sheet
+        pd.DataFrame([params]).to_excel(writer, sheet_name='Analysis_Parameters', index=False)
+        
+        # Sample mapping sheet
+        pd.DataFrame([{'Original': k, **v} for k, v in mapping.items()]).to_excel(
+            writer, sheet_name='Sample_Mapping', index=False
+        )
+        
+        # Raw data
+        raw_data.to_excel(writer, sheet_name='Raw_Data', index=False)
+        
+        # Gene-by-gene calculations
+        for gene, gene_data in processed_data.items():
+            sheet_name = f"{gene}_Analysis"[:31]  # Excel sheet name limit
+            gene_data.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        # Summary sheet
+        if processed_data:
+            all_data = pd.concat(processed_data.values(), ignore_index=True)
+            summary = all_data.groupby(['Target', 'Group']).agg({
+                'Relative_Expression': ['mean', 'std', 'count'],
+                'p_value': 'min'
+            }).round(4)
+            summary.to_excel(writer, sheet_name='Summary')
+    
     return output.getvalue()
 
 # ==================== UI ====================
-st.title("🧬 qPCR Analysis Ultimate Pro")
+st.title("🧬 qPCR Analysis Suite Pro")
+st.markdown("**Gene-by-gene analysis with efficacy-specific workflows**")
 
+# Sidebar
 with st.sidebar:
-    st.header("📖 Quick Guide")
+    st.header("💬 Quick Guide")
     st.markdown("""
-    1. Upload CSV files
-    2. Auto-merge samples
-    3. Map conditions
-    4. Analyze genes
-    5. Customize graphs
-    6. Export results
+    1. **Upload** CSV files
+    2. **Select** efficacy type
+    3. **Map** samples to conditions
+    4. **Exclude** unwanted samples/wells
+    5. **Analyze** gene-by-gene
+    6. **Customize** individual graphs
+    7. **Export** all results
     """)
     
-    if st.button("💾 Save Template"):
-        name = st.text_input("Name:", key="tpl_name")
-        if name and st.session_state.sample_mapping:
-            st.session_state.analysis_templates[name] = {
-                'mapping': st.session_state.sample_mapping.copy(),
-                'settings': st.session_state.graph_settings.copy()
-            }
-            st.success(f"✅ Saved '{name}'")
-
-tabs = st.tabs(["📁 Data", "🗺️ Mapping", "🔬 Analysis", "📊 Graphs", "📤 Export"])
-
-# ==================== TAB 1: DATA ====================
-with tabs[0]:
-    st.header("Upload & Process Data")
+    st.subheader("📋 Templates")
+    template_name = st.text_input("Save analysis as:")
+    if st.button("💾 Save") and st.session_state.sample_mapping:
+        st.session_state.analysis_templates[template_name] = {
+            'mapping': st.session_state.sample_mapping.copy(),
+            'efficacy': st.session_state.selected_efficacy,
+            'timestamp': datetime.now().isoformat()
+        }
+        st.success(f"✅ Saved '{template_name}'")
     
-    files = st.file_uploader("Upload CSV files", type=['csv'], accept_multiple_files=True)
+    if st.session_state.analysis_templates:
+        load = st.selectbox("Load:", [""] + list(st.session_state.analysis_templates.keys()))
+        if load:
+            template = st.session_state.analysis_templates[load]
+            st.session_state.sample_mapping = template['mapping']
+            st.session_state.selected_efficacy = template.get('efficacy')
+            st.info(f"✅ Loaded '{load}'")
+
+# Main tabs
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📁 Upload & Filter", "🗺️ Sample Mapping", "🔬 Analysis", "📊 Graphs", "📤 Export"])
+
+# ==================== TAB 1: UPLOAD & FILTER ====================
+with tab1:
+    st.header("Step 1: Upload & Filter Data")
     
-    if files:
+    uploaded_files = st.file_uploader("Upload qPCR CSV files", type=['csv'], accept_multiple_files=True)
+    
+    if uploaded_files:
         all_data = []
-        for f in files:
-            parsed = UniversalParser.parse(f)
+        for file in uploaded_files:
+            parsed = QPCRParser.parse(file)
             if parsed is not None:
-                parsed['Source'] = f.name
+                parsed['Source_File'] = file.name
                 all_data.append(parsed)
-                st.success(f"✅ {f.name}: {len(parsed)} wells")
+                st.success(f"✅ {file.name}: {len(parsed)} wells")
         
         if all_data:
-            combined = pd.concat(all_data, ignore_index=True)
+            st.session_state.data = pd.concat(all_data, ignore_index=True)
             
-            # Auto-merge detection
-            st.subheader("🔗 Auto-Merge Similar Samples")
-            merge_sugg = UniversalParser.auto_merge_samples(combined)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Wells", len(st.session_state.data))
+            col2.metric("Samples", st.session_state.data['Sample'].nunique())
+            col3.metric("Genes", st.session_state.data['Target'].nunique())
             
-            if merge_sugg:
-                st.info(f"Found {len(set(merge_sugg.values()))} potential merges")
+            # Detect housekeeping gene
+            hk_genes = [g for g in st.session_state.data['Target'].unique() 
+                       if g.upper() in ['ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB']]
+            if hk_genes:
+                st.session_state.hk_gene = st.selectbox("🔬 Housekeeping Gene", hk_genes, key='hk_select')
+                col4.metric("HK Gene", st.session_state.hk_gene)
+            
+            # Sample filter
+            st.subheader("🎯 Filter Samples")
+            st.markdown("*Select samples to INCLUDE in analysis*")
+            
+            all_samples = sorted(st.session_state.data['Sample'].unique())
+            selected_samples = st.multiselect(
+                "Include these samples:",
+                all_samples,
+                default=all_samples,
+                help="Deselect samples you want to exclude"
+            )
+            st.session_state.excluded_samples = set(all_samples) - set(selected_samples)
+            
+            if st.session_state.excluded_samples:
+                st.warning(f"⚠️ Excluding {len(st.session_state.excluded_samples)} samples: {', '.join(list(st.session_state.excluded_samples)[:5])}")
+            
+            # Gene filter
+            st.subheader("🧬 Filter Genes")
+            all_genes = sorted(st.session_state.data['Target'].unique())
+            selected_genes = st.multiselect(
+                "Include these genes:",
+                all_genes,
+                default=all_genes,
+                help="Deselect genes you want to exclude from analysis"
+            )
+            
+            # Filter data display
+            display_data = st.session_state.data[
+                st.session_state.data['Sample'].isin(selected_samples) &
+                st.session_state.data['Target'].isin(selected_genes)
+            ]
+            
+            st.subheader("📊 Filtered Data Preview")
+            st.dataframe(display_data.head(50), height=300)
+            
+            # Outlier detection
+            st.subheader("🚩 Outlier Detection")
+            for target in selected_genes:
+                target_data = display_data[display_data['Target'] == target]
+                q1, q3 = target_data['CT'].quantile([0.25, 0.75])
+                iqr = q3 - q1
+                outliers = target_data[(target_data['CT'] < q1 - 1.5*iqr) | (target_data['CT'] > q3 + 1.5*iqr)]
                 
-                if st.checkbox("Review merge suggestions"):
-                    for orig, canonical in sorted(set(merge_sugg.items())):
-                        col1, col2, col3 = st.columns([2, 1, 2])
-                        col1.text(f"'{orig}'")
-                        col2.markdown("→")
-                        apply = col3.checkbox(f"Merge to '{canonical}'", key=f"m_{orig}")
-                        if apply:
-                            st.session_state.auto_merged[orig] = canonical
-                
-                if st.button("Apply Auto-Merges") and st.session_state.auto_merged:
-                    combined['Sample'] = combined['Sample'].map(
-                        lambda x: st.session_state.auto_merged.get(x, x)
-                    )
-                    st.success(f"✅ Merged {len(st.session_state.auto_merged)} samples")
-            
-            st.session_state.data = combined
-            
-            # HK gene
-            hk = [g for g in combined['Target'].unique() if g.upper() in ['ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB']]
-            if hk:
-                st.session_state.hk_gene = st.selectbox("🔬 Housekeeping Gene", hk)
-            
-            # Filters
-            st.subheader("🎯 Filters")
-            samples = sorted(combined['Sample'].unique())
-            sel_samples = st.multiselect("Samples:", samples, default=samples, key="filt_samples")
-            st.session_state.excluded_samples = set(samples) - set(sel_samples)
-            
-            genes = [g for g in sorted(combined['Target'].unique()) if g.upper() not in ['ACTIN', 'GAPDH', 'B-ACTIN', 'ACTB']]
-            sel_genes = st.multiselect("Genes:", genes, default=genes, key="filt_genes")
-            
-            # Show data
-            st.subheader("📊 Filtered Data")
-            filt = combined[combined['Sample'].isin(sel_samples) & combined['Target'].isin(sel_genes)]
-            
-            for s in sel_samples[:5]:  # Show first 5
-                with st.expander(f"📍 {s}"):
-                    sdata = filt[filt['Sample'] == s]
-                    st.dataframe(sdata.groupby('Target')['CT'].agg(['mean', 'std', 'count']).round(2))
+                if len(outliers) > 0:
+                    with st.expander(f"⚠️ {target}: {len(outliers)} outliers"):
+                        st.dataframe(outliers[['Well', 'Sample', 'CT']])
+                        if st.checkbox(f"Exclude these wells", key=f"out_{target}"):
+                            st.session_state.excluded_wells.update(outliers['Well'].tolist())
 
-# ==================== TAB 2: MAPPING ====================
-with tabs[1]:
-    st.header("Sample Mapping")
+# ==================== TAB 2: SAMPLE MAPPING ====================
+with tab2:
+    st.header("Step 2: Map Samples to Conditions")
     
     if st.session_state.data is not None:
-        detected = set(st.session_state.data['Target'].unique())
-        suggested = next((e for e, c in EFFICACY_CONFIG.items() if any(g in detected for g in c['genes'])), None)
+        # Efficacy type selection
+        detected_genes = set(st.session_state.data['Target'].unique())
+        suggested = None
+        for eff, cfg in EFFICACY_CONFIG.items():
+            if any(g in detected_genes for g in cfg['genes']):
+                suggested = eff
+                break
         
-        efficacy = st.selectbox("🎯 Efficacy Type", list(EFFICACY_CONFIG.keys()),
-                               index=list(EFFICACY_CONFIG.keys()).index(suggested) if suggested else 0)
+        efficacy = st.selectbox(
+            "🎯 Efficacy Test Type",
+            list(EFFICACY_CONFIG.keys()),
+            index=list(EFFICACY_CONFIG.keys()).index(suggested) if suggested else 0
+        )
         st.session_state.selected_efficacy = efficacy
         
-        st.subheader("🗺️ Map Conditions")
+        config = EFFICACY_CONFIG[efficacy]
+        st.info(f"**{config['description']}**")
+        st.caption(f"Cell line: {config['cell']} | Genes: {', '.join(config['genes'])}")
+        
+        # Show control structure
+        with st.expander("📋 Control Structure for this Test"):
+            for ctrl_type, ctrl_name in config['controls'].items():
+                st.markdown(f"- **{ctrl_type.title()}**: {ctrl_name}")
+        
+        # Sample mapping interface
+        st.subheader("🗺️ Sample Mapping")
         
         samples = [s for s in sorted(st.session_state.data['Sample'].unique()) 
                   if s not in st.session_state.excluded_samples]
         
-        for s in samples:
-            if s not in st.session_state.sample_mapping:
-                st.session_state.sample_mapping[s] = {'condition': s, 'group': 'Treatment', 'conc': ''}
+        # Group type options based on efficacy
+        group_types = ['Negative Control', 'Positive Control', 'Treatment']
+        if 'baseline' in config['controls']:
+            group_types.insert(0, 'Baseline')
         
-        # Headers
-        c1, c2, c3, c4 = st.columns([1, 3, 2, 2])
-        c1.markdown("**Original**")
-        c2.markdown("**Condition**")
-        c3.markdown("**Group**")
-        c4.markdown("**Concentration**")
+        for sample in samples:
+            if sample not in st.session_state.sample_mapping:
+                st.session_state.sample_mapping[sample] = {
+                    'condition': sample,
+                    'group': 'Treatment',
+                    'concentration': ''
+                }
+            
+            col1, col2, col3, col4 = st.columns([1, 3, 2, 2])
+            
+            with col1:
+                st.text(sample)
+            with col2:
+                condition = st.text_input(
+                    "Condition name",
+                    value=st.session_state.sample_mapping[sample]['condition'],
+                    key=f"cond_{sample}",
+                    label_visibility="collapsed"
+                )
+                st.session_state.sample_mapping[sample]['condition'] = condition
+            with col3:
+                group = st.selectbox(
+                    "Group",
+                    group_types,
+                    index=group_types.index(st.session_state.sample_mapping[sample]['group']) 
+                          if st.session_state.sample_mapping[sample]['group'] in group_types else 0,
+                    key=f"grp_{sample}",
+                    label_visibility="collapsed"
+                )
+                st.session_state.sample_mapping[sample]['group'] = group
+            with col4:
+                conc = st.text_input(
+                    "Concentration",
+                    value=st.session_state.sample_mapping[sample]['concentration'],
+                    key=f"conc_{sample}",
+                    label_visibility="collapsed"
+                )
+                st.session_state.sample_mapping[sample]['concentration'] = conc
         
-        groups = ['Baseline', 'Negative Control', 'Positive Control', 'Treatment']
-        
-        for s in samples:
-            c1, c2, c3, c4 = st.columns([1, 3, 2, 2])
-            c1.text(s)
-            
-            cond = c2.text_input("C", st.session_state.sample_mapping[s]['condition'],
-                                key=f"cn_{s}", label_visibility="collapsed")
-            st.session_state.sample_mapping[s]['condition'] = cond
-            
-            grp = c3.selectbox("G", groups,
-                              index=groups.index(st.session_state.sample_mapping[s]['group']) 
-                              if st.session_state.sample_mapping[s]['group'] in groups else 0,
-                              key=f"gr_{s}", label_visibility="collapsed")
-            st.session_state.sample_mapping[s]['group'] = grp
-            
-            conc = c4.text_input("Cn", st.session_state.sample_mapping[s]['conc'],
-                                key=f"cc_{s}", label_visibility="collapsed")
-            st.session_state.sample_mapping[s]['conc'] = conc
+        # Summary
+        st.subheader("📊 Mapping Summary")
+        mapping_df = pd.DataFrame([{'Original': k, **v} for k, v in st.session_state.sample_mapping.items()])
+        st.dataframe(mapping_df, use_container_width=True)
+    else:
+        st.warning("⚠️ Upload data first")
 
 # ==================== TAB 3: ANALYSIS ====================
-with tabs[2]:
-    st.header("Analysis")
+with tab3:
+    st.header("Step 3: Gene-by-Gene Analysis")
     
     if st.session_state.data is not None and st.session_state.sample_mapping and st.session_state.hk_gene:
-        c1, c2 = st.columns(2)
+        config = EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {})
         
-        with c1:
-            bl_samples = [k for k, v in st.session_state.sample_mapping.items() if v['group'] == 'Baseline']
-            bl = st.selectbox("🎯 Baseline", bl_samples if bl_samples else list(st.session_state.sample_mapping.keys()))
-            bl_cond = st.session_state.sample_mapping[bl]['condition']
+        col1, col2 = st.columns(2)
         
-        with c2:
-            all_conds = [v['condition'] for v in st.session_state.sample_mapping.values()]
-            pv_cond = st.selectbox("📊 P-value Ref", all_conds,
-                                  index=all_conds.index(bl_cond) if bl_cond in all_conds else 0)
-        
-        # Per-gene selection
-        st.subheader("🧬 Samples Per Gene")
-        genes = [g for g in st.session_state.data['Target'].unique() 
-                if g.upper() not in ['ACTIN', 'GAPDH', 'B-ACTIN', 'ACTB']]
-        
-        for g in genes:
-            if g not in st.session_state.included_samples_analysis:
-                st.session_state.included_samples_analysis[g] = all_conds.copy()
+        with col1:
+            # Select reference sample (what treatments are relative to)
+            ref_samples = [k for k, v in st.session_state.sample_mapping.items() 
+                          if v['group'] == 'Negative Control']
+            if not ref_samples and 'baseline' in config.get('controls', {}):
+                ref_samples = [k for k, v in st.session_state.sample_mapping.items() 
+                              if v['group'] == 'Baseline']
             
-            sel = st.multiselect(f"{g}:", all_conds,
-                                default=st.session_state.included_samples_analysis[g],
-                                key=f"inc_{g}")
-            st.session_state.included_samples_analysis[g] = sel
+            ref_sample = st.selectbox(
+                "Reference Sample (Fold change = 1.0)",
+                ref_samples if ref_samples else list(st.session_state.sample_mapping.keys())
+            )
+            ref_condition = st.session_state.sample_mapping[ref_sample]['condition']
         
-        if st.button("🔬 Run Analysis", type="primary"):
-            with st.spinner("Analyzing..."):
-                results = AnalysisEngine.calculate_ddct(
-                    st.session_state.data, st.session_state.hk_gene, bl_cond,
-                    st.session_state.sample_mapping, st.session_state.included_samples_analysis
+        with col2:
+            # Select comparison control (for p-value calculation)
+            compare_samples = [k for k, v in st.session_state.sample_mapping.items() 
+                             if v['group'] == 'Negative Control']
+            compare_sample = st.selectbox(
+                "Compare To (for p-values)",
+                compare_samples if compare_samples else list(st.session_state.sample_mapping.keys())
+            )
+            compare_condition = st.session_state.sample_mapping[compare_sample]['condition']
+        
+        st.info(f"📊 Analysis setup: All fold changes relative to **{ref_condition}**, p-values vs **{compare_condition}**")
+        
+        if st.button("🔬 Run Gene-by-Gene Analysis", type="primary"):
+            with st.spinner("Analyzing each gene separately..."):
+                # Calculate ΔΔCt
+                processed = AnalysisEngine.calculate_ddct(
+                    st.session_state.data,
+                    st.session_state.hk_gene,
+                    ref_condition,
+                    compare_condition,
+                    st.session_state.excluded_wells,
+                    st.session_state.excluded_samples,
+                    st.session_state.sample_mapping
                 )
                 
-                if results:
-                    for g, d in results.items():
-                        results[g] = AnalysisEngine.calculate_stats(d, pv_cond)
+                if processed is not None and len(processed) > 0:
+                    # Calculate statistics
+                    processed = AnalysisEngine.calculate_statistics(processed, compare_condition)
                     
-                    st.session_state.processed_data = results
-                    st.success(f"✅ {len(results)} genes analyzed")
+                    # Split by gene
+                    gene_data = {}
+                    for gene in processed['Target'].unique():
+                        gene_df = processed[processed['Target'] == gene].copy()
+                        gene_data[gene] = gene_df
+                    
+                    st.session_state.processed_data = gene_data
+                    st.success(f"✅ Analysis complete! {len(gene_data)} genes analyzed")
         
+        # Display results
         if st.session_state.processed_data:
-            st.subheader("📊 Results")
-            for g, d in st.session_state.processed_data.items():
-                with st.expander(f"{g}", expanded=False):
-                    disp = d.drop(columns=['CT_values'], errors='ignore')
-                    st.dataframe(disp[['Condition', 'Group', 'Fold_Change', 'p_value', 'sig', 'n']]\
-                        .style.background_gradient(subset=['Fold_Change'], cmap='RdYlGn')\
-                        .format({'Fold_Change': '{:.3f}', 'p_value': '{:.4f}'}))
+            st.subheader("📊 Analysis Results by Gene")
+            
+            # Overall summary
+            all_results = pd.concat(st.session_state.processed_data.values(), ignore_index=True)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Genes Analyzed", len(st.session_state.processed_data))
+            col2.metric("Conditions", all_results['Condition'].nunique())
+            sig_count = (all_results['p_value'] < 0.05).sum()
+            col3.metric("Significant (p<0.05)", sig_count)
+            col4.metric("Total Comparisons", len(all_results))
+            
+            # Gene-by-gene tables
+            for gene, gene_df in st.session_state.processed_data.items():
+                with st.expander(f"🧬 {gene} - Detailed Results", expanded=True):
+                    # Show expected direction if available
+                    config = EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {})
+                    if 'expected_direction' in config and gene in config['expected_direction']:
+                        direction = config['expected_direction'][gene]
+                        st.caption(f"Expected: {'↑ Increase' if direction == 'up' else '↓ Decrease'}")
+                    
+                    display_cols = ['Condition', 'Group', 'Fold_Change', 'p_value', 'significance', 
+                                  'n_replicates', 'Target_Ct_Mean', 'SEM']
+                    
+                    styled_df = gene_df[display_cols].style.background_gradient(
+                        subset=['Fold_Change'], cmap='RdYlGn', vmin=0, vmax=3
+                    ).format({
+                        'Fold_Change': '{:.3f}',
+                        'p_value': '{:.4f}',
+                        'Target_Ct_Mean': '{:.2f}',
+                        'SEM': '{:.3f}'
+                    })
+                    
+                    st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.warning("⚠️ Complete previous steps first")
 
 # ==================== TAB 4: GRAPHS ====================
-with tabs[3]:
-    st.header("Interactive Graph Editor")
+with tab4:
+    st.header("Step 4: Individual Gene Graphs")
     
     if st.session_state.processed_data:
+        # Initialize graph settings
+        if 'graph_settings' not in st.session_state:
+            st.session_state.graph_settings = {
+                'title_size': 20, 'font_size': 14, 'sig_font_size': 16,
+                'figure_width': 1000, 'figure_height': 600,
+                'color_scheme': 'plotly_white', 'show_error': True,
+                'show_significance': True, 'show_grid': True,
+                'xlabel': 'Condition', 'ylabel': 'Fold Change (Relative to Control)',
+                'bar_colors': {}
+            }
+        
+        # Global settings
+        st.subheader("⚙️ Global Graph Settings")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.session_state.graph_settings['font_size'] = st.slider("Font Size", 10, 24, 14)
+            st.session_state.graph_settings['title_size'] = st.slider("Title Size", 14, 32, 20)
+        with col2:
+            st.session_state.graph_settings['figure_width'] = st.slider("Width (px)", 600, 1600, 1000)
+            st.session_state.graph_settings['figure_height'] = st.slider("Height (px)", 400, 1200, 600)
+        with col3:
+            st.session_state.graph_settings['color_scheme'] = st.selectbox(
+                "Theme", ['plotly_white', 'plotly', 'plotly_dark', 'seaborn', 'simple_white', 'presentation']
+            )
+        with col4:
+            st.session_state.graph_settings['show_error'] = st.checkbox("Error Bars", True)
+            st.session_state.graph_settings['show_significance'] = st.checkbox("Significance", True)
+            st.session_state.graph_settings['show_grid'] = st.checkbox("Grid", True)
         
         # Quick presets
-        c1, c2, c3 = st.columns(3)
-        if c1.button("📄 Publication"):
-            for g in st.session_state.graph_settings:
-                st.session_state.graph_settings[g].update({'theme': 'simple_white', 'width': 1000, 'height': 600})
+        col1, col2, col3, col4 = st.columns(4)
+        if col1.button("📄 Publication"):
+            st.session_state.graph_settings.update({
+                'color_scheme': 'simple_white', 'font_size': 14, 'title_size': 18,
+                'figure_width': 1000, 'figure_height': 600
+            })
             st.rerun()
-        if c2.button("🎨 Presentation"):
-            for g in st.session_state.graph_settings:
-                st.session_state.graph_settings[g].update({'theme': 'presentation', 'width': 1200, 'height': 700})
+        if col2.button("🎨 Presentation"):
+            st.session_state.graph_settings.update({
+                'color_scheme': 'presentation', 'font_size': 18, 'title_size': 24,
+                'figure_width': 1200, 'figure_height': 700
+            })
             st.rerun()
-        if c3.button("🔄 Reset All"):
-            st.session_state.graph_settings = {}
+        if col3.button("🌙 Dark Mode"):
+            st.session_state.graph_settings.update({'color_scheme': 'plotly_dark'})
+            st.rerun()
+        if col4.button("🔄 Reset"):
+            del st.session_state.graph_settings
             st.rerun()
         
         st.markdown("---")
         
+        # Generate graphs for each gene
+        st.subheader("📊 Gene-Specific Graphs")
+        
+        efficacy_config = EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {})
+        
+        # Create graphs
+        if 'graphs' not in st.session_state:
+            st.session_state.graphs = {}
+        
         for gene in st.session_state.processed_data.keys():
-            st.markdown(f"## {gene}")
+            st.markdown(f"### 🧬 {gene}")
             
-            # Initialize
-            if gene not in st.session_state.graph_settings:
-                colors_default = px.colors.qualitative.Plotly
-                all_conds = list(st.session_state.processed_data[gene]['Condition'].unique())
+            # Gene-specific color picker
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if gene not in st.session_state.graph_settings['bar_colors']:
+                    default_colors = px.colors.qualitative.Plotly
+                    idx = list(st.session_state.processed_data.keys()).index(gene)
+                    st.session_state.graph_settings['bar_colors'][gene] = default_colors[idx % len(default_colors)]
                 
-                st.session_state.graph_settings[gene] = {
-                    'title': f"{gene} Expression", 'xlabel': 'Condition', 'ylabel': 'Fold Change',
-                    'title_size': 20, 'tick_size': 12, 'sig_size': 16,
-                    'width': 1000, 'height': 600, 'theme': 'plotly_white',
-                    'show_error': True, 'show_sig': True, 'show_ref': True, 'ref_val': 1.0,
-                    'x_grid': False, 'y_grid': True, 'bar_width': 0.8, 'opacity': 1.0,
-                    'border_width': 0, 'err_thick': 2, 'err_width': 4, 'ref_width': 2,
-                    'tick_angle': -45, 'sig_pos': 'outside', 'y_range': None,
-                    'show_conditions': all_conds, 'order': None,
-                    'colors': {c: colors_default[i % len(colors_default)] for i, c in enumerate(all_conds)},
-                    'sig_color': '#000000', 'err_color': '#000000', 'border_color': '#000000',
-                    'ref_color': '#808080', 'plot_bg': '#FFFFFF', 'paper_bg': '#FFFFFF'
-                }
-            
-            settings = st.session_state.graph_settings[gene]
-            gdata = st.session_state.processed_data[gene]
-            
-            # Tabs
-            t1, t2, t3, t4 = st.tabs(["📋 Data", "📊 Style", "🎨 Colors", "📝 Text"])
-            
-            with t1:
-                all_c = list(gdata['Condition'].unique())
-                settings['show_conditions'] = st.multiselect("Display:", all_c, default=settings['show_conditions'],
-                                                             key=f"show_{gene}")
-                
-                if st.checkbox("Custom order", key=f"ord_{gene}"):
-                    settings['order'] = st.multiselect("Order:", settings['show_conditions'],
-                                                      default=settings['show_conditions'], key=f"order_{gene}")
-            
-            with t2:
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    settings['bar_width'] = st.slider("Bar Width", 0.1, 1.5, float(settings['bar_width']), key=f"bw_{gene}")
-                    settings['opacity'] = st.slider("Opacity", 0.0, 1.0, float(settings['opacity']), key=f"op_{gene}")
-                    settings['border_width'] = st.slider("Border", 0, 5, int(settings['border_width']), key=f"bd_{gene}")
-                
-                with c2:
-                    settings['show_error'] = st.checkbox("Error Bars", settings['show_error'], key=f"er_{gene}")
-                    if settings['show_error']:
-                        settings['err_thick'] = st.slider("Thickness", 1, 5, int(settings['err_thick']), key=f"et_{gene}")
-                        settings['err_width'] = st.slider("Cap Width", 2, 10, int(settings['err_width']), key=f"ew_{gene}")
-                
-                with c3:
-                    settings['show_ref'] = st.checkbox("Reference Line", settings['show_ref'], key=f"rf_{gene}")
-                    if settings['show_ref']:
-                        settings['ref_val'] = st.number_input("Value", value=float(settings['ref_val']), key=f"rv_{gene}")
-                        settings['ref_width'] = st.slider("Width", 1, 5, int(settings['ref_width']), key=f"rw_{gene}")
-                
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    themes = ['plotly_white', 'plotly', 'plotly_dark', 'seaborn', 'simple_white', 'presentation']
-                    settings['theme'] = st.selectbox("Theme", themes, 
-                                                     index=themes.index(settings['theme']) if settings['theme'] in themes else 0,
-                                                     key=f"th_{gene}")
-                with c2:
-                    settings['width'] = st.number_input("Width", 400, 2000, int(settings['width']), key=f"w_{gene}")
-                    settings['height'] = st.number_input("Height", 300, 1500, int(settings['height']), key=f"h_{gene}")
-                with c3:
-                    settings['x_grid'] = st.checkbox("X Grid", settings['x_grid'], key=f"xg_{gene}")
-                    settings['y_grid'] = st.checkbox("Y Grid", settings['y_grid'], key=f"yg_{gene}")
-                    
-                    use_y = st.checkbox("Custom Y Range", value=settings['y_range'] is not None, key=f"yr_{gene}")
-                    if use_y:
-                        curr = settings['y_range'] or [0, 3]
-                        ymin = st.number_input("Y Min", value=float(curr[0]), key=f"ymin_{gene}")
-                        ymax = st.number_input("Y Max", value=float(curr[1]), key=f"ymax_{gene}")
-                        settings['y_range'] = [ymin, ymax]
-                    else:
-                        settings['y_range'] = None
-            
-            with t3:
-                st.markdown("**Bar Colors**")
-                cols = st.columns(3)
-                for i, c in enumerate(settings['show_conditions']):
-                    with cols[i % 3]:
-                        if c not in settings['colors']:
-                            settings['colors'][c] = '#636EFA'
-                        settings['colors'][c] = st.color_picker(c, settings['colors'][c], key=f"col_{gene}_{c}")
-                
-                st.markdown("**Other Colors**")
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    settings['sig_color'] = st.color_picker("Significance", settings['sig_color'], key=f"sc_{gene}")
-                    settings['err_color'] = st.color_picker("Error Bars", settings['err_color'], key=f"ec_{gene}")
-                with c2:
-                    settings['border_color'] = st.color_picker("Border", settings['border_color'], key=f"bc_{gene}")
-                    settings['ref_color'] = st.color_picker("Reference", settings['ref_color'], key=f"rc_{gene}")
-                with c3:
-                    settings['plot_bg'] = st.color_picker("Plot BG", settings['plot_bg'], key=f"pb_{gene}")
-                    settings['paper_bg'] = st.color_picker("Paper BG", settings['paper_bg'], key=f"papb_{gene}")
-            
-            with t4:
-                c1, c2 = st.columns(2)
-                with c1:
-                    settings['title'] = st.text_input("Title", settings['title'], key=f"tit_{gene}")
-                    settings['xlabel'] = st.text_input("X Label", settings['xlabel'], key=f"xl_{gene}")
-                    settings['ylabel'] = st.text_input("Y Label", settings['ylabel'], key=f"yl_{gene}")
-                
-                with c2:
-                    settings['title_size'] = st.slider("Title Size", 12, 36, int(settings['title_size']), key=f"ts_{gene}")
-                    settings['tick_size'] = st.slider("Tick Size", 8, 20, int(settings['tick_size']), key=f"tks_{gene}")
-                    settings['tick_angle'] = st.slider("Tick Angle", -90, 90, int(settings['tick_angle']), key=f"ta_{gene}")
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    settings['show_sig'] = st.checkbox("Show Stars", settings['show_sig'], key=f"ss_{gene}")
-                with c2:
-                    if settings['show_sig']:
-                        positions = ['outside', 'inside', 'auto']
-                        settings['sig_pos'] = st.selectbox("Position", positions,
-                                                          index=positions.index(settings['sig_pos']) if settings['sig_pos'] in positions else 0,
-                                                          key=f"sp_{gene}")
-                        settings['sig_size'] = st.slider("Star Size", 10, 30, int(settings['sig_size']), key=f"ssi_{gene}")
+                st.session_state.graph_settings['bar_colors'][gene] = st.color_picker(
+                    f"{gene} color",
+                    st.session_state.graph_settings['bar_colors'][gene],
+                    key=f"color_{gene}"
+                )
             
             # Generate graph
-            st.markdown("### 📊 Preview")
-            fig = create_graph(gdata, gene, settings)
-            st.plotly_chart(fig, use_container_width=True, key=f"fig_{gene}")
+            fig = GraphGenerator.create_gene_graph(
+                st.session_state.processed_data[gene],
+                gene,
+                st.session_state.graph_settings,
+                efficacy_config
+            )
             
-            if 'graphs' not in st.session_state:
-                st.session_state.graphs = {}
+            st.plotly_chart(fig, use_container_width=True, key=f"graph_{gene}")
             st.session_state.graphs[gene] = fig
             
             st.markdown("---")
+    else:
+        st.warning("⚠️ Run analysis first")
 
 # ==================== TAB 5: EXPORT ====================
-with tabs[4]:
-    st.header("Export Results")
+with tab5:
+    st.header("Step 5: Export All Results")
     
     if st.session_state.processed_data:
-        params = {
+        st.subheader("📦 Download Options")
+        
+        # Prepare export parameters
+        analysis_params = {
             'Date': datetime.now().strftime("%Y-%m-%d %H:%M"),
-            'Efficacy': st.session_state.selected_efficacy,
-            'HK_Gene': st.session_state.hk_gene,
-            'Baseline': bl_cond if 'bl_cond' in locals() else 'N/A',
-            'Pvalue_Ref': pv_cond if 'pv_cond' in locals() else 'N/A',
-            'Genes': len(st.session_state.processed_data)
+            'Efficacy_Type': st.session_state.selected_efficacy,
+            'Housekeeping_Gene': st.session_state.hk_gene,
+            'Reference_Sample': ref_condition if 'ref_condition' in locals() else 'N/A',
+            'Compare_To': compare_condition if 'compare_condition' in locals() else 'N/A',
+            'Excluded_Wells': len(st.session_state.excluded_wells),
+            'Excluded_Samples': len(st.session_state.excluded_samples),
+            'Genes_Analyzed': len(st.session_state.processed_data)
         }
         
-        c1, c2 = st.columns(2)
+        col1, col2 = st.columns(2)
         
-        with c1:
-            st.markdown("### 📊 Excel")
-            excel = export_excel(st.session_state.data, st.session_state.processed_data,
-                                params, st.session_state.sample_mapping)
-            st.download_button("📥 Download Excel", excel,
-                             f"qPCR_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                             type="primary")
+        with col1:
+            st.markdown("### 📊 Complete Excel Report")
+            st.caption("Includes: Parameters, Mapping, Raw Data, Gene-by-Gene Calculations, Summary")
+            
+            excel_data = export_to_excel(
+                st.session_state.data,
+                st.session_state.processed_data,
+                analysis_params,
+                st.session_state.sample_mapping
+            )
+            
+            st.download_button(
+                label="📥 Download Excel Report",
+                data=excel_data,
+                file_name=f"qPCR_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
         
-        with c2:
-            st.markdown("### 📈 Graphs")
+        with col2:
+            st.markdown("### 📈 All Graphs (HTML)")
+            st.caption("Interactive graphs for all genes in one file")
+            
             if st.session_state.graphs:
-                html = ["<html><head><title>qPCR</title></head><body>",
-                       f"<h1>{st.session_state.selected_efficacy}</h1>"]
-                for g, fig in st.session_state.graphs.items():
-                    html.append(f"<h2>{g}</h2>")
-                    html.append(fig.to_html(include_plotlyjs='cdn'))
-                html.append("</body></html>")
+                # Create combined HTML
+                html_parts = ["<html><head><title>qPCR Analysis Graphs</title></head><body>"]
+                html_parts.append(f"<h1>{st.session_state.selected_efficacy} Analysis</h1>")
+                html_parts.append(f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>")
                 
-                st.download_button("📥 Download Graphs", "\n".join(html),
-                                 f"graphs_{datetime.now().strftime('%Y%m%d')}.html",
-                                 "text/html", type="primary")
+                for gene, fig in st.session_state.graphs.items():
+                    html_parts.append(f"<h2>{gene}</h2>")
+                    html_parts.append(fig.to_html(include_plotlyjs='cdn', div_id=f"graph_{gene}"))
+                    html_parts.append("<hr>")
+                
+                html_parts.append("</body></html>")
+                combined_html = "\n".join(html_parts)
+                
+                st.download_button(
+                    label="📥 Download All Graphs (HTML)",
+                    data=combined_html,
+                    file_name=f"qPCR_graphs_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                    mime="text/html",
+                    type="primary"
+                )
         
         st.markdown("---")
-        st.subheader("Individual Files")
+        st.subheader("📋 Individual Downloads")
         
-        c1, c2, c3 = st.columns(3)
+        col1, col2, col3 = st.columns(3)
         
-        with c1:
-            st.markdown("**CSV**")
-            for g, d in st.session_state.processed_data.items():
-                csv = io.StringIO()
-                d.drop(columns=['CT_values'], errors='ignore').to_csv(csv, index=False)
-                st.download_button(f"{g}.csv", csv.getvalue(), f"{g}.csv", "text/csv", key=f"csv_{g}")
+        with col1:
+            # CSV export per gene
+            st.markdown("**Gene-by-Gene CSV**")
+            for gene, gene_df in st.session_state.processed_data.items():
+                csv_buffer = io.StringIO()
+                gene_df.to_csv(csv_buffer, index=False)
+                
+                st.download_button(
+                    label=f"📥 {gene}.csv",
+                    data=csv_buffer.getvalue(),
+                    file_name=f"{gene}_calculations_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key=f"csv_{gene}"
+                )
         
-        with c2:
-            st.markdown("**HTML**")
-            for g, fig in st.session_state.graphs.items():
-                html = io.StringIO()
-                fig.write_html(html)
-                st.download_button(f"{g}.html", html.getvalue(), f"{g}.html", "text/html", key=f"html_{g}")
+        with col2:
+            # Individual graph HTML
+            st.markdown("**Individual Graph HTML**")
+            for gene, fig in st.session_state.graphs.items():
+                html_buffer = io.StringIO()
+                fig.write_html(html_buffer)
+                
+                st.download_button(
+                    label=f"📥 {gene}.html",
+                    data=html_buffer.getvalue(),
+                    file_name=f"{gene}_graph_{datetime.now().strftime('%Y%m%d')}.html",
+                    mime="text/html",
+                    key=f"html_{gene}"
+                )
         
-        with c3:
-            st.markdown("**Config**")
-            config = {'params': params, 'mapping': st.session_state.sample_mapping,
-                     'settings': st.session_state.graph_settings}
-            st.download_button("Config", json.dumps(config, indent=2), "config.json", "application/json")
+        with col3:
+            # Configuration export
+            st.markdown("**Reproducibility Files**")
+            
+            # Analysis config
+            config_data = {
+                'analysis_params': analysis_params,
+                'sample_mapping': st.session_state.sample_mapping,
+                'graph_settings': st.session_state.graph_settings,
+                'excluded_wells': list(st.session_state.excluded_wells),
+                'excluded_samples': list(st.session_state.excluded_samples)
+            }
+            
+            st.download_button(
+                label="📥 Analysis Config",
+                data=json.dumps(config_data, indent=2),
+                file_name=f"config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json"
+            )
+            
+            # Graph preset
+            st.download_button(
+                label="📥 Graph Preset",
+                data=json.dumps(st.session_state.graph_settings, indent=2),
+                file_name=f"graph_preset_{datetime.now().strftime('%Y%m%d')}.json",
+                mime="application/json"
+            )
+        
+        # Export tips
+        with st.expander("💡 Export Guide"):
+            st.markdown(f"""
+            ### For {st.session_state.selected_efficacy} Analysis
+            
+            **Complete Package (Recommended)**
+            - ✅ Excel Report: All calculations, statistics, and raw data
+            - ✅ All Graphs HTML: Interactive figures for all {len(st.session_state.graphs)} genes
+            - ✅ Analysis Config: For reproducibility and audit trail
+            
+            **For Publications**
+            1. Download Excel → Reviewer can verify calculations
+            2. Download individual HTML → Open in browser → Right-click → Save as PNG/SVG
+            3. Or screenshot from browser for manuscripts
+            
+            **For Presentations**
+            - Drag HTML files directly into PowerPoint/Google Slides
+            - Interactive graphs work in presentations!
+            
+            **For Patents/IP**
+            - Excel: Complete audit trail with timestamps
+            - Config JSON: Reproducibility proof
+            - All Graphs HTML: Visual evidence
+            
+            **Gene-by-Gene Files**
+            - Useful for sharing specific gene results
+            - CSV for data analysis in other tools
+            - HTML for interactive sharing
+            """)
+        
+        st.success("✅ All export options ready!")
+    else:
+        st.warning("⚠️ Complete analysis first")
 
+# ==================== FOOTER ====================
 st.markdown("---")
-st.caption("🧬 qPCR Analysis Ultimate Pro v5.0 | Universal Parser • Auto-Merge • Full Customization")
+st.markdown("""
+<div style='text-align: center; color: #666;'>
+    <p>🧬 qPCR Analysis Suite Pro v2.0 | Gene-by-gene analysis with efficacy-specific workflows</p>
+    <p>Housekeeping normalization • Individual gene graphs • Comprehensive statistics</p>
+</div>
+""", unsafe_allow_html=True)
