@@ -270,15 +270,15 @@ class AnalysisEngine:
         @staticmethod
         def calculate_statistics(processed: pd.DataFrame, compare_condition: str, raw_data: pd.DataFrame = None, hk_gene: str = None, sample_mapping: dict = None) -> pd.DataFrame:
             """
-            Recompute replicate-level relative expressions (per-well) using raw_data + sample_mapping,
-            then perform two-tailed t-tests (Welch's t-test via ttest_ind with equal_var=False) comparing
-            each condition to compare_condition.
-            - processed: summary table (keeps API compatible)
-            - raw_data: optional; if None, pulls from st.session_state.data
-            - hk_gene: optional; if None, pulls from st.session_state.hk_gene
-            - sample_mapping: optional; if None, pulls from st.session_state.sample_mapping
+            Compute replicate-level relative expression and run two-tailed t-tests comparing each condition
+            to `compare_condition`. This function is backwards-compatible: if raw_data / hk_gene / sample_mapping
+            are None it will read from st.session_state (so existing callers don't need to change).
             """
-            # Get raw inputs if needed
+            # import locally to avoid top-level issues
+            import numpy as np
+            from scipy import stats
+
+            # fallback to session_state
             if raw_data is None:
                 raw_data = st.session_state.get('data')
             if hk_gene is None:
@@ -286,80 +286,86 @@ class AnalysisEngine:
             if sample_mapping is None:
                 sample_mapping = st.session_state.get('sample_mapping', {})
 
+            # copy processed so we don't mutate original
             results = processed.copy()
             results['p_value'] = np.nan
             results['significance'] = ''
 
-            # Build replicate-level relative expression per condition & target
-            # For each condition, compute hk mean for that condition, then compute rel expr per target replicate:
-            # delta_ct_rep = ct_target_rep - hk_mean_condition
-            # For the compare_condition we compute the ref delta_cts and use them as the comparison group
-            for target in results['Target'].unique():
+            # If raw data or hk gene missing, return results unchanged
+            if raw_data is None or hk_gene is None:
+                return results
+
+            # For each target in processed, compute replicate-level relative expression and t-test vs compare_condition
+            targets = results['Target'].unique()
+            for target in targets:
                 if pd.isna(target):
                     continue
 
-                # gather all conditions for this target
-                target_rows = raw_data[raw_data['Target'] == target].copy()
-                if target_rows.empty:
+                # get all raw rows for this target and map Sample->Condition using sample_mapping
+                tgt_rows = raw_data[raw_data['Target'] == target].copy()
+                if tgt_rows.empty:
                     continue
+                tgt_rows['Condition'] = tgt_rows['Sample'].map(lambda s: sample_mapping.get(s, {}).get('condition', s))
 
-                # map sample -> condition name
-                target_rows['Condition'] = target_rows['Sample'].map(lambda x: sample_mapping.get(x, {}).get('condition', x))
-
-                # compute hk mean per condition (from raw_data)
+                # HK rows to compute HK mean per condition
                 hk_rows = raw_data[raw_data['Target'] == hk_gene].copy()
-                hk_rows['Condition'] = hk_rows['Sample'].map(lambda x: sample_mapping.get(x, {}).get('condition', x))
+                hk_rows['Condition'] = hk_rows['Sample'].map(lambda s: sample_mapping.get(s, {}).get('condition', s))
+                if hk_rows.empty:
+                    continue
                 hk_mean_by_cond = hk_rows.groupby('Condition')['CT'].mean().to_dict()
 
-                # compute replicate-level relative expression arrays per condition
-                rel_expr_by_cond = {}
-                for cond, grp in target_rows.groupby('Condition'):
+                # Build relative-expression arrays per condition for this target
+                rel_by_cond = {}
+                for cond, grp in tgt_rows.groupby('Condition'):
                     hk_mean = hk_mean_by_cond.get(cond, np.nan)
-                    if np.isnan(hk_mean):
+                    if pd.isna(hk_mean):
+                        # can't compute relative expression without hk mean
                         continue
                     ct_vals = grp['CT'].values
-                    delta_cts = ct_vals - hk_mean        # per-replicate ΔCt
-                    # For compare condition, we'll shift later vs its ref; for now store delta_cts
-                    rel_exprs = 2 ** (-delta_cts)
-                    rel_expr_by_cond[cond] = rel_exprs
+                    delta_ct = ct_vals - hk_mean
+                    rel = 2.0 ** (-delta_ct)
+                    rel_by_cond[cond] = rel
 
-                # get reference (compare_condition) replicate array
-                ref_vals = rel_expr_by_cond.get(compare_condition, np.array([]))
-                # If reference empty, try to use sample_mapping label direct match fallback
+                # Reference (compare_condition) replicates
+                ref_vals = rel_by_cond.get(compare_condition, np.array([]))
                 if ref_vals.size == 0:
-                    # try find by sample mapping keys whose condition equals compare_condition
-                    ref_samples = [k for k,v in sample_mapping.items() if v.get('condition') == compare_condition]
+                    # fallback: find samples whose mapped condition equals compare_condition
+                    ref_samples = [s for s,v in sample_mapping.items() if v.get('condition') == compare_condition]
                     if ref_samples:
                         ref_rows = raw_data[(raw_data['Sample'].isin(ref_samples)) & (raw_data['Target'] == target)]
-                        ref_hk_mean = hk_rows[hk_rows['Condition'] == compare_condition]['CT'].mean() if not hk_rows.empty else np.nan
-                        if not np.isnan(ref_hk_mean) and not ref_rows.empty:
-                            ref_vals = 2 ** (-(ref_rows['CT'].values - ref_hk_mean))
+                        if not ref_rows.empty:
+                            ref_hk_mean = hk_mean_by_cond.get(compare_condition, np.nan)
+                            if not pd.isna(ref_hk_mean):
+                                ref_vals = 2.0 ** (-(ref_rows['CT'].values - ref_hk_mean))
 
-                # loop conditions and run t-tests (two-tailed)
-                for cond in list(rel_expr_by_cond.keys()):
+                # Now test each condition vs reference
+                for cond, vals in rel_by_cond.items():
                     if cond == compare_condition:
                         continue
-                    sample_vals = rel_expr_by_cond.get(cond, np.array([]))
+                    sample_vals = vals
+                    # require at least one value on both sides
                     if sample_vals.size == 0 or ref_vals.size == 0:
                         continue
 
-                    # If both have >=2 replicates, use Welch's t-test (two-tailed)
-                    if len(ref_vals) >= 2 and len(sample_vals) >= 2:
-                        t_stat, p_val = stats.ttest_ind(ref_vals, sample_vals, equal_var=False, nan_policy='omit')
-                    else:
-                        # fallback to one-sample t-test comparing means when one side has n==1
-                        if len(ref_vals) == 1 and len(sample_vals) > 1:
-                            t_stat, p_val = stats.ttest_1samp(sample_vals, ref_vals[0])
-                        elif len(sample_vals) == 1 and len(ref_vals) > 1:
-                            t_stat, p_val = stats.ttest_1samp(ref_vals, sample_vals[0])
+                    # use Welch two-sample t-test when both sides have >=2
+                    try:
+                        if len(ref_vals) >= 2 and len(sample_vals) >= 2:
+                            t_stat, p_val = stats.ttest_ind(ref_vals, sample_vals, equal_var=False, nan_policy='omit')
                         else:
-                            # too little data
-                            p_val = np.nan
+                            # fallback: one-sample test when one side has n==1
+                            if len(ref_vals) == 1 and len(sample_vals) > 1:
+                                t_stat, p_val = stats.ttest_1samp(sample_vals, ref_vals[0], nan_policy='omit')
+                            elif len(sample_vals) == 1 and len(ref_vals) > 1:
+                                t_stat, p_val = stats.ttest_1samp(ref_vals, sample_vals[0], nan_policy='omit')
+                            else:
+                                p_val = np.nan
+                    except Exception:
+                        p_val = np.nan
 
-                    # write back p-value to results (matching target & condition)
+                    # store results back to the processed results frame
                     idx = (results['Target'] == target) & (results['Condition'] == cond)
-                    results.loc[idx, 'p_value'] = float(p_val) if not pd.isna(p_val) else np.nan
                     if not pd.isna(p_val):
+                        results.loc[idx, 'p_value'] = float(p_val)
                         if p_val < 0.001:
                             sig = '***'
                         elif p_val < 0.01:
@@ -369,8 +375,12 @@ class AnalysisEngine:
                         else:
                             sig = ''
                         results.loc[idx, 'significance'] = sig
+                    else:
+                        results.loc[idx, 'p_value'] = np.nan
+                        results.loc[idx, 'significance'] = ''
 
             return results
+
 
 
 # ==================== GRAPH GENERATOR ====================
