@@ -525,49 +525,32 @@ class GraphGenerator:
         # Error bars
         error_array = gene_data['SEM'] * settings.get('error_multiplier', 1.96)
         
-        # Per-bar settings
-        gene_bar_settings = st.session_state.get(f'{gene}_bar_settings', {})
+        # Add bar trace
+        fig.add_trace(go.Bar(
+            x=gene_data['Condition'],
+            y=gene_data['Relative_Expression'],
+            error_y=dict(
+                type='data',
+                array=error_array,
+                visible=settings.get('show_error', True),
+                thickness=2,
+                width=4,
+                color='rgba(0,0,0,0.5)'
+            ),
+            text=sig_text if settings.get('show_significance', True) else None,
+            textposition='outside',
+            textfont=dict(size=settings.get('sig_font_size', 16), color='black'),
+            marker=dict(
+                color=bar_colors,
+                line=dict(
+                    width=settings.get('marker_line_width', 1),
+                    color='black'
+                ),
+                opacity=settings.get('bar_opacity', 0.95)
+            ),
+            showlegend=False
+        ))
         
-        # Build per-bar error visibility and sig text
-        error_visible_array = []
-        sig_text_array = []
-        
-        for idx, row in gene_data.iterrows():
-            condition = row['Condition']
-            bar_key = f"{gene}_{condition}"
-            bar_config = gene_bar_settings.get(bar_key, {'show_sig': True, 'show_err': True})
-            
-            # Error bar visibility
-            if bar_config.get('show_err', True) and settings.get(f"{gene}_show_err", True):
-                error_visible_array.append(True)
-            else:
-                error_visible_array.append(False)
-            
-            # Significance text
-            sig = row.get('significance', '')
-            if bar_config.get('show_sig', True) and settings.get(f"{gene}_show_sig", True):
-                sig_text_array.append(sig if sig in ['*', '**', '***'] else '')
-            else:
-                sig_text_array.append('')
-        
-            # Add bar trace with per-bar controls
-            fig.add_trace(
-                go.Bar(
-                    x=gene_data['Condition'],
-                    y=gene_data['Relative_Expression'],
-                    error_y=dict(
-                        type='data',
-                        array=[err if vis else 0 for err, vis in zip(error_array, error_visible_array)],
-                        visible=True,  # Always visible, but array is 0 where hidden
-                        thickness=2,
-                        width=4,
-                        color='rgba(0,0,0,0.5)',
-                    ),
-                    text=sig_text_array,  # Per-bar significance
-                    textposition='outside',
-                )
-            )
-            
         # Update layout
         y_axis_config = dict(
             title=settings.get('ylabel', 'Relative mRNA Expression'),
