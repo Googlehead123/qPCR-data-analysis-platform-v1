@@ -1215,11 +1215,6 @@ with tab4:
                 )
                 
                 # === BAR COLORS & INDIVIDUAL CONTROLS ===
-
-                # Generate graph
-                gene_data = st.session_state.processed_data[gene]
-                
-                # === BAR COLORS & INDIVIDUAL CONTROLS ===
                 st.markdown("#### 🎨 Bar Colors & Controls")
                 st.caption("Customize each bar individually")
                 
@@ -1308,10 +1303,43 @@ with tab4:
                             if bar_key in st.session_state.graph_settings.get('bar_colors_per_sample', {}):
                                 del st.session_state.graph_settings['bar_colors_per_sample'][bar_key]
                             st.rerun()
-
+            with col_graph:
+                st.markdown("### 📊 Graph")
+                
+                # Get gene data
+                gene_data = st.session_state.processed_data[gene]
+                
+                # Apply gene-specific show/hide settings
+                show_sig_key = f"{gene}_show_sig"
+                show_err_key = f"{gene}_show_err"
+                
+                # Create copy of settings with gene-specific overrides
+                current_settings = st.session_state.graph_settings.copy()
+                current_settings['show_significance'] = current_settings.get(show_sig_key, True)
+                current_settings['show_error'] = current_settings.get(show_err_key, True)
+                
+                # Apply bar gap setting
+                bar_gap_key = f"{gene}_bar_gap"
+                if bar_gap_key in current_settings:
+                    current_settings['bar_gap'] = current_settings[bar_gap_key]
+                
+                # Generate the graph
+                fig = GraphGenerator.create_gene_graph(
+                    gene_data,
+                    gene,
+                    current_settings,
+                    EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {}),
+                    sample_order=st.session_state.get('sample_order'),
+                    per_sample_overrides=None
+                )
+                
+                # Display the graph
+                st.plotly_chart(fig, use_container_width=True, key=f"fig_{gene}")
+                
+                # Store graph in session state for export
+                st.session_state.graphs[gene] = fig
     else:
         st.info("⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'")
-        
     
 # ==================== TAB 5: EXPORT ====================
 with tab5:
