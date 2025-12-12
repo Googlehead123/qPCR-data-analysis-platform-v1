@@ -613,36 +613,33 @@ class GraphGenerator:
         # Custom y-axis label with bold red gene name
         y_label_html = f"Relative <b style='color:red;'>{gene}</b> Expression Level"
         
-        # Y-axis configuration - ensure bars start at baseline (0)
+        # Calculate max value for y-axis range
+        max_y_value = gene_data_indexed['Relative_Expression'].max()
+        max_error = error_array.max() if len(error_array) > 0 else 0
+        y_max_auto = max_y_value + max_error + (max_y_value * 0.15)  # Add 15% padding for stars
+        
+        # Y-axis configuration - CRITICAL: Explicit range starting at EXACTLY 0
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
             ),
             showgrid=False,
-            zeroline=False,
-            rangemode='tozero'  # CRITICAL: Forces y-axis to include 0 and start from it
+            zeroline=True,           # CHANGED: Show zero line
+            zerolinewidth=1,         # ADDED: Make zero line visible
+            zerolinecolor='black',   # ADDED: Black zero line
+            range=[0, y_max_auto]    # CRITICAL: Explicit range [0, calculated_max]
         )
         
         if settings.get('y_log_scale'):
             y_axis_config['type'] = 'log'
         
-        # Explicit range handling
+        # Manual range override if user specified
         if settings.get('y_min') is not None or settings.get('y_max') is not None:
             y_range = []
-            if settings.get('y_min') is not None:
-                y_range.append(settings['y_min'])
-            else:
-                y_range.append(0)  # Default to 0 if min not specified
-            
-            if settings.get('y_max') is not None:
-                y_range.append(settings['y_max'])
-            
-            if len(y_range) == 2:
-                y_axis_config['range'] = y_range
-        else:
-            # If no manual range, ensure it starts at 0
-            y_axis_config['range'] = [0, None]  # Start at 0, auto-calculate max
+            y_range.append(settings.get('y_min', 0))  # Always start at 0 or user-specified min
+            y_range.append(settings.get('y_max', y_max_auto))
+            y_axis_config['range'] = y_range
         
         # Get gene-specific settings
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get('bar_gap', 0.15))
@@ -692,13 +689,7 @@ class GraphGenerator:
                 side='bottom',
                 range=[-0.5, n_bars - 0.5]  # CRITICAL: Proper range to show all bars
             ),
-            yaxis=dict(
-                **y_axis_config,
-                showline=True,          # Show y-axis line
-                linewidth=1,          # Normal weight (not bold)
-                linecolor='black',
-                mirror=False            # Only left line (not right)
-            ),
+            yaxis=y_axis_config,  # Just use the config directly, no additional line
             template=settings.get('color_scheme', 'plotly_white'),
             font=dict(size=settings.get('font_size', 14)),
             height=settings.get('figure_height', 600),
