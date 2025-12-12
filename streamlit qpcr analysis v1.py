@@ -1149,7 +1149,7 @@ with tab4:
         # Initialize graph settings
         if 'graph_settings' not in st.session_state:
             st.session_state.graph_settings = {
-                'title_size': 20, 'font_size': 14, 'sig_font_size': 16,
+                'title_size': 20, 'font_size': 14, 'sig_font_size': 18,
                 'figure_width': 1000, 'figure_height': 600,
                 'color_scheme': 'plotly_white', 'show_error': True,
                 'show_significance': True, 'show_grid': True,
@@ -1204,7 +1204,7 @@ with tab4:
                 st.markdown("#### 📐 Bar Spacing")
                 bar_gap_key = f"{gene}_bar_gap"
                 if bar_gap_key not in st.session_state.graph_settings:
-                    st.session_state.graph_settings[bar_gap_key] = 0.15
+                    st.session_state.graph_settings[bar_gap_key] = 0.25
                 
                 st.session_state.graph_settings[bar_gap_key] = st.slider(
                     "Gap between bars",
