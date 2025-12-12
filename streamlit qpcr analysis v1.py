@@ -492,7 +492,14 @@ class GraphGenerator:
         else:
             # Fallback: sort by appearance order
             gene_data = gene_data.sort_values('Condition')
-            
+        
+        # Reset index to ensure proper sequential indexing
+        gene_data_indexed = gene_data.reset_index(drop=True)
+        
+        # Store condition names for labels
+        condition_names = gene_data_indexed['Condition'].tolist()
+        n_bars = len(gene_data_indexed)
+        
         # Get colors - White/Medium Grey for controls, Grey base for treatments
         bar_colors = []
         
@@ -506,7 +513,7 @@ class GraphGenerator:
             'Treatment': '#D3D3D3'
         }
         
-        for idx, row in gene_data.iterrows():
+        for idx, row in gene_data_indexed.iterrows():
             condition = row['Condition']
             group = row.get('Group', 'Treatment')
             
@@ -524,7 +531,6 @@ class GraphGenerator:
         fig = go.Figure()
         
         # Error bars
-        gene_data_indexed = gene_data.reset_index(drop=True)
         error_array = (gene_data_indexed['SEM'] * settings.get('error_multiplier', 1.96)).values
         
         # Per-bar settings for individual control
@@ -537,7 +543,7 @@ class GraphGenerator:
         # Build error visibility array
         error_visible_array = []
         
-        for idx in range(len(gene_data_indexed)):
+        for idx in range(n_bars):
             row = gene_data_indexed.iloc[idx]
             condition = row['Condition']
             bar_key = f"{gene}_{condition}"
@@ -552,18 +558,19 @@ class GraphGenerator:
                 error_visible_array.append(0)
         
         # Add bar trace with UPPER-ONLY error bars
+        # CRITICAL: Use numeric x-values (indices) for proper positioning
         fig.add_trace(go.Bar(
-            x=gene_data_indexed['Condition'],
+            x=list(range(n_bars)),  # Use numeric indices 0, 1, 2, ... n_bars-1
             y=gene_data_indexed['Relative_Expression'],
             error_y=dict(
                 type='data',
                 array=error_visible_array,
-                arrayminus=[0] * len(error_visible_array),  # NO LOWER ERROR BARS
+                arrayminus=[0] * n_bars,  # NO LOWER ERROR BARS
                 visible=True,
                 thickness=2,
                 width=4,
                 color='rgba(0,0,0,0.5)',
-                symmetric=False  # CRITICAL for one-sided error bars
+                symmetric=False
             ),
             marker=dict(
                 color=bar_colors,
@@ -576,8 +583,8 @@ class GraphGenerator:
             showlegend=False
         ))
         
-        # Add significance stars - FIXED to match actual bars only
-        for idx in range(len(gene_data_indexed)):
+        # Add significance stars - aligned with bars
+        for idx in range(n_bars):
             row = gene_data_indexed.iloc[idx]
             condition = row['Condition']
             bar_key = f"{gene}_{condition}"
@@ -590,9 +597,9 @@ class GraphGenerator:
                 error_bar_height = error_visible_array[idx]
                 y_position = bar_height + error_bar_height + (bar_height * 0.05)
                 
-                # FIXED: Use index-based positioning to match bars exactly
+                # Use index-based positioning to match bars exactly
                 fig.add_annotation(
-                    x=idx,  # Use numerical index instead of condition name
+                    x=idx,
                     y=y_position,
                     text=sig,
                     showarrow=False,
@@ -606,17 +613,14 @@ class GraphGenerator:
         # Custom y-axis label with bold red gene name
         y_label_html = f"Relative <b style='color:red;'>{gene}</b> Expression Level"
         
+        # Y-axis configuration (lines added in layout, not here)
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
             ),
             showgrid=False,
-            zeroline=False,
-            showline=True,        # THICK AXIS BORDER
-            linewidth=1,          # THICK AXIS BORDER
-            linecolor='black',    # THICK AXIS BORDER
-            mirror=False      # THICK AXIS BORDER
+            zeroline=False
         )
         
         if settings.get('y_log_scale'):
@@ -637,8 +641,8 @@ class GraphGenerator:
         gene_bg_color = settings.get(f"{gene}_bg_color", settings.get('plot_bgcolor', '#FFFFFF'))
         gene_tick_size = settings.get(f"{gene}_tick_size", 12)
         
-        # Wrap x-axis labels
-        wrapped_labels = [GraphGenerator._wrap_text(str(cond), 15) for cond in gene_data_indexed['Condition']]
+        # Wrap x-axis labels - all of them
+        wrapped_labels = [GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names]
         
         # P-VALUE LEGEND
         fig.add_annotation(
@@ -668,17 +672,24 @@ class GraphGenerator:
                 showgrid=False,
                 zeroline=False,
                 tickmode='array',
-                tickvals=list(range(len(gene_data_indexed))),
-                ticktext=wrapped_labels,
+                tickvals=list(range(n_bars)),  # All indices
+                ticktext=wrapped_labels,        # All labels
                 tickfont=dict(size=gene_tick_size),
                 tickangle=0,
-                showline=True,        # Show x-axis line
-                linewidth=1,        # Normal weight (not bold)
+                showline=True,          # Show x-axis line
+                linewidth=1,         # Normal weight (not bold)
                 linecolor='black',
-                mirror=False,         # CHANGED: Only bottom line, not top
-                side='bottom'         # Ensure it's at the bottom
+                mirror=False,           # Only bottom line (not top)
+                side='bottom',
+                range=[-0.5, n_bars - 0.5]  # CRITICAL: Proper range to show all bars
             ),
-            yaxis=y_axis_config,
+            yaxis=dict(
+                **y_axis_config,
+                showline=True,          # Show y-axis line
+                linewidth=1,          # Normal weight (not bold)
+                linecolor='black',
+                mirror=False            # Only left line (not right)
+            ),
             template=settings.get('color_scheme', 'plotly_white'),
             font=dict(size=settings.get('font_size', 14)),
             height=settings.get('figure_height', 600),
