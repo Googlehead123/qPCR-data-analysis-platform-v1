@@ -625,10 +625,9 @@ class GraphGenerator:
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
             ),
             showgrid=False,
-            zeroline=True,           # CHANGED: Show zero line
-            zerolinewidth=1,         # ADDED: Make zero line visible
-            zerolinecolor='black',   # ADDED: Black zero line
-            range=[0, y_max_auto]    # CRITICAL: Explicit range [0, calculated_max]
+            zeroline=False,       # CHANGED: Don't use separate zeroline
+            range=[0, y_max_auto],
+            fixedrange=False
         )
         
         if settings.get('y_log_scale'):
@@ -690,10 +689,12 @@ class GraphGenerator:
             ),
             yaxis=dict(
                 **y_axis_config,
-                showline=True,        # SHOW y-axis border line
-                linewidth=1,        # Normal line weight
-                linecolor='black',    # Black border
-                mirror=False          # Only left side, NOT right
+                showline=True,        # Show y-axis line
+                linewidth=1,
+                linecolor='black',
+                mirror=False,
+                ticks='outside',      # ADD THIS: Positions line correctly
+                ticklen=5             # ADD THIS: Ensures proper connection
             ),
             template=settings.get('color_scheme', 'plotly_white'),
             font=dict(size=settings.get('font_size', 14)),
