@@ -619,13 +619,16 @@ class GraphGenerator:
         y_max_auto = max_y_value + max_error + (max_y_value * 0.15)  # Add 15% padding for stars
         
         # Y-axis configuration - CRITICAL: Explicit range starting at EXACTLY 0
+        # Y-axis configuration with baseline
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
             ),
             showgrid=False,
-            zeroline=False,       # CHANGED: Don't use separate zeroline
+            zeroline=True,        # CHANGED: Show horizontal line at y=0
+            zerolinewidth=1,    # ADDED: Match y-axis line thickness
+            zerolinecolor='black', # ADDED: Black baseline
             range=[0, y_max_auto],
             fixedrange=False
         )
