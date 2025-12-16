@@ -188,7 +188,7 @@ class QPCRParser:
             st.error(f"Parse error: {e}")
             return None
 
-# ==================== UPDATED ANALYSIS ENGINE ====================
+# ==================== ANALYSIS ENGINE ====================
 class AnalysisEngine:
     @staticmethod
     def calculate_ddct(data: pd.DataFrame, hk_gene: str, ref_sample: str, compare_sample: str, 
@@ -268,17 +268,11 @@ class AnalysisEngine:
         return pd.DataFrame(results)
     
     @staticmethod
-    def calculate_statistics(processed: pd.DataFrame, 
-                            compare_condition: str,
-                            compare_condition_2: str = None,
+    def calculate_statistics(processed: pd.DataFrame, compare_condition: str,
                             raw_data: pd.DataFrame = None,
                             hk_gene: str = None,
                             sample_mapping: dict = None) -> pd.DataFrame:
-        """
-        Dual p-value analysis: Compare each condition to TWO reference conditions.
-        - compare_condition: Primary reference (*, **, ***)
-        - compare_condition_2: Secondary reference (#, ##, ###)
-        """
+        """Two-tailed Welch's t-test comparing each condition to compare_condition"""
         
         # Use session_state fallbacks
         raw_data = raw_data if raw_data is not None else st.session_state.get("data")
@@ -291,8 +285,6 @@ class AnalysisEngine:
         results = processed.copy()
         results["p_value"] = np.nan
         results["significance"] = ""
-        results["p_value_2"] = np.nan
-        results["significance_2"] = ""
         
         for target in results["Target"].unique():
             if pd.isna(target):
@@ -321,75 +313,49 @@ class AnalysisEngine:
                     continue
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
             
-            # PRIMARY COMPARISON (stars *)
+            # Reference condition
             ref_vals = rel_expr.get(compare_condition, np.array([]))
-            if ref_vals.size >= 1:
-                for cond, vals in rel_expr.items():
-                    if cond == compare_condition or vals.size == 0:
-                        continue
-                    
-                    try:
-                        if ref_vals.size >= 2 and vals.size >= 2:
-                            _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=False)
-                        elif vals.size == 1 and ref_vals.size >= 2:
-                            _, p_val = stats.ttest_1samp(ref_vals, vals[0])
-                        elif ref_vals.size == 1 and vals.size >= 2:
-                            _, p_val = stats.ttest_1samp(vals, ref_vals[0])
-                        else:
-                            p_val = np.nan
-                    except:
-                        p_val = np.nan
-                    
-                    mask = (results["Target"] == target) & (results["Condition"] == cond)
-                    results.loc[mask, "p_value"] = p_val
-                    
-                    if not np.isnan(p_val):
-                        if p_val < 0.001:
-                            results.loc[mask, "significance"] = "***"
-                        elif p_val < 0.01:
-                            results.loc[mask, "significance"] = "**"
-                        elif p_val < 0.05:
-                            results.loc[mask, "significance"] = "*"
+            if ref_vals.size < 1:
+                continue
             
-            # SECONDARY COMPARISON (hashes #) - Only if compare_condition_2 provided
-            if compare_condition_2 is not None:
-                ref_vals_2 = rel_expr.get(compare_condition_2, np.array([]))
-                if ref_vals_2.size >= 1:
-                    for cond, vals in rel_expr.items():
-                        if cond == compare_condition_2 or vals.size == 0:
-                            continue
-                        
-                        try:
-                            if ref_vals_2.size >= 2 and vals.size >= 2:
-                                _, p_val_2 = stats.ttest_ind(ref_vals_2, vals, equal_var=False)
-                            elif vals.size == 1 and ref_vals_2.size >= 2:
-                                _, p_val_2 = stats.ttest_1samp(ref_vals_2, vals[0])
-                            elif ref_vals_2.size == 1 and vals.size >= 2:
-                                _, p_val_2 = stats.ttest_1samp(vals, ref_vals_2[0])
-                            else:
-                                p_val_2 = np.nan
-                        except:
-                            p_val_2 = np.nan
-                        
-                        mask = (results["Target"] == target) & (results["Condition"] == cond)
-                        results.loc[mask, "p_value_2"] = p_val_2
-                        
-                        if not np.isnan(p_val_2):
-                            if p_val_2 < 0.001:
-                                results.loc[mask, "significance_2"] = "###"
-                            elif p_val_2 < 0.01:
-                                results.loc[mask, "significance_2"] = "##"
-                            elif p_val_2 < 0.05:
-                                results.loc[mask, "significance_2"] = "#"
+            # Compare each condition to reference
+            for cond, vals in rel_expr.items():
+                if cond == compare_condition or vals.size == 0:
+                    continue
+                
+                try:
+                    # Choose appropriate test
+                    if ref_vals.size >= 2 and vals.size >= 2:
+                        _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=False)
+                    elif vals.size == 1 and ref_vals.size >= 2:
+                        _, p_val = stats.ttest_1samp(ref_vals, vals[0])
+                    elif ref_vals.size == 1 and vals.size >= 2:
+                        _, p_val = stats.ttest_1samp(vals, ref_vals[0])
+                    else:
+                        p_val = np.nan
+                except:
+                    p_val = np.nan
+                
+                # Annotate results
+                mask = (results["Target"] == target) & (results["Condition"] == cond)
+                results.loc[mask, "p_value"] = p_val
+                
+                if not np.isnan(p_val):
+                    if p_val < 0.001:
+                        results.loc[mask, "significance"] = "***"
+                    elif p_val < 0.01:
+                        results.loc[mask, "significance"] = "**"
+                    elif p_val < 0.05:
+                        results.loc[mask, "significance"] = "*"
         
         return results
-    
-    @staticmethod
-    def run_full_analysis(ref_sample_key: str, compare_sample_key: str, compare_sample_key_2: str = None):
+    # ------------------------------------------------------------
+    # Helper function: Run full qPCR ΔΔCt + statistics pipeline
+    # ------------------------------------------------------------
+    def run_full_analysis(ref_sample_key: str, compare_sample_key: str):
         """
-        Run ΔΔCt + dual statistical analysis.
-        compare_sample_key: Primary p-value reference (stars)
-        compare_sample_key_2: Secondary p-value reference (hashes) - optional
+        Run ΔΔCt + statistical analysis and store results in st.session_state.
+        Produces st.session_state.processed_data = {gene: DataFrame}.
         """
         try:
             data = st.session_state.get("data")
@@ -408,10 +374,9 @@ class AnalysisEngine:
 
             ref_condition = mapping.get(ref_sample_key, {}).get("condition", ref_sample_key)
             cmp_condition = mapping.get(compare_sample_key, {}).get("condition", compare_sample_key)
-            cmp_condition_2 = mapping.get(compare_sample_key_2, {}).get("condition", compare_sample_key_2) if compare_sample_key_2 else None
 
-            with st.spinner(f"Running full analysis..."):
-                # ΔΔCt calculation
+            with st.spinner(f"Running full analysis using reference '{ref_condition}' and comparison '{cmp_condition}'..."):
+                # --- ΔΔCt calculation ---
                 processed_df = AnalysisEngine.calculate_ddct(
                     data,
                     hk_gene,
@@ -423,20 +388,23 @@ class AnalysisEngine:
                 )
 
                 if processed_df is None or processed_df.empty:
-                    st.warning("⚠️ No ΔΔCt results produced.")
+                    st.warning("⚠️ No ΔΔCt results produced. Check mapping and housekeeping gene.")
                     return False
 
-                # Statistical test with dual comparisons
-                processed_with_stats = AnalysisEngine.calculate_statistics(
-                    processed_df,
-                    cmp_condition,
-                    cmp_condition_2,
-                    raw_data=data,
-                    hk_gene=hk_gene,
-                    sample_mapping=mapping,
-                )
+                # --- Statistical test ---
+                try:
+                    processed_with_stats = AnalysisEngine.calculate_statistics(
+                        processed_df,
+                        cmp_condition,
+                        raw_data=data,
+                        hk_gene=hk_gene,
+                        sample_mapping=mapping,
+                    )
+                except TypeError:
+                    # fallback for simpler signature
+                    processed_with_stats = AnalysisEngine.calculate_statistics(processed_df, cmp_condition)
 
-                # Organize data for graphs
+                # --- Organize data for graphs ---
                 gene_dict = {}
                 if "Target" in processed_with_stats.columns:
                     for gene in processed_with_stats["Target"].unique():
@@ -447,7 +415,7 @@ class AnalysisEngine:
 
                 st.session_state.processed_data = gene_dict
 
-            st.success("✅ Full analysis complete.")
+            st.success("✅ Full analysis complete. Go to the Graphs tab to visualize results.")
             return True
 
         except Exception as e:
@@ -590,13 +558,14 @@ class GraphGenerator:
                 error_visible_array.append(0)
         
         # Add bar trace with UPPER-ONLY error bars
+        # CRITICAL: Use numeric x-values (indices) for proper positioning
         fig.add_trace(go.Bar(
-            x=list(range(n_bars)),
-            y=gene_data_indexed['Relative_Expression'].values,
+            x=list(range(n_bars)),  # Use numeric indices 0, 1, 2, ... n_bars-1
+            y=gene_data_indexed['Relative_Expression'],
             error_y=dict(
                 type='data',
                 array=error_visible_array,
-                arrayminus=[0] * n_bars,
+                arrayminus=[0] * n_bars,  # NO LOWER ERROR BARS
                 visible=True,
                 thickness=2,
                 width=4,
@@ -611,30 +580,27 @@ class GraphGenerator:
                 ),
                 opacity=settings.get('bar_opacity', 0.95)
             ),
-            showlegend=False,
-            base=0  # Bars start at y=0
+            showlegend=False
         ))
         
-        # Add significance markers (stars * and hashes #) - STACKED VERTICALLY
+        # Add significance stars - aligned with bars
         for idx in range(n_bars):
             row = gene_data_indexed.iloc[idx]
             condition = row['Condition']
             bar_key = f"{gene}_{condition}"
             bar_config = gene_bar_settings.get(bar_key, {'show_sig': True, 'show_err': True})
             
-            # Primary significance (stars *)
             sig = row.get('significance', '')
-            sig_2 = row.get('significance_2', '')
-            
-            bar_height = row['Relative_Expression']
-            error_bar_height = error_visible_array[idx]
-            base_y_position = bar_height + error_bar_height + (bar_height * 0.05)
-            
-            # Add primary significance (stars *) at base position
             if show_sig_global and bar_config.get('show_sig', True) and sig in ['*', '**', '***']:
+                # Calculate y position: bar height + error bar + small offset
+                bar_height = row['Relative_Expression']
+                error_bar_height = error_visible_array[idx]
+                y_position = bar_height + error_bar_height + (bar_height * 0.05)
+                
+                # Use index-based positioning to match bars exactly
                 fig.add_annotation(
                     x=idx,
-                    y=base_y_position,
+                    y=y_position,
                     text=sig,
                     showarrow=False,
                     font=dict(size=settings.get('sig_font_size', 16), color='black'),
@@ -643,47 +609,25 @@ class GraphGenerator:
                     xanchor='center',
                     yanchor='bottom'
                 )
-            
-            # Add secondary significance (hashes #) ABOVE primary
-            if show_sig_global and bar_config.get('show_sig', True) and sig_2 in ['#', '##', '###']:
-                # Calculate offset: if primary exists, stack above it
-                if sig in ['*', '**', '***']:
-                    # Stack above the primary marker
-                    offset_y = base_y_position + (bar_height * 0.08)  # Additional 8% above primary
-                else:
-                    # No primary marker, use base position
-                    offset_y = base_y_position
-                
-                fig.add_annotation(
-                    x=idx,
-                    y=offset_y,
-                    text=sig_2,
-                    showarrow=False,
-                    font=dict(size=settings.get('sig_font_size', 16), color='black'),
-                    xref='x',
-                    yref='y',
-                    xanchor='center',
-                    yanchor='bottom'
-                )
         
-        # Custom y-axis label
+        # Custom y-axis label with bold red gene name
         y_label_html = f"Relative <b style='color:red;'>{gene}</b> Expression Level"
         
-        # Calculate appropriate y-axis maximum
+        # Calculate max value for y-axis range
         max_y_value = gene_data_indexed['Relative_Expression'].max()
         max_error = error_array.max() if len(error_array) > 0 else 0
-        y_max_auto = max_y_value + max_error + (max_y_value * 0.15)
+        y_max_auto = max_y_value + max_error + (max_y_value * 0.15)  # Add 15% padding for stars
         
-        # Y-axis configuration with baseline
+        # Y-axis configuration
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
             ),
             showgrid=False,
-            zeroline=True,         # Show horizontal line at y=0 (baseline)
-            zerolinewidth=1.5,     # Match y-axis line thickness
-            zerolinecolor='black', # Black baseline
+            zeroline=True,        # CHANGED: Show horizontal line at y=0
+            zerolinewidth=1,    # ADDED: Match y-axis line thickness
+            zerolinecolor='black', # ADDED: Black baseline
             range=[0, y_max_auto],
             fixedrange=False
         )
@@ -694,12 +638,10 @@ class GraphGenerator:
         
         # Manual range override if user specified
         if settings.get('y_min') is not None or settings.get('y_max') is not None:
-            if not settings.get('y_log_scale'):
-                y_range = [
-                    settings.get('y_min', 0),
-                    settings.get('y_max', y_max_auto)
-                ]
-                y_axis_config['range'] = y_range
+            y_range = []
+            y_range.append(settings.get('y_min', 0))  # Always start at 0 or user-specified min
+            y_range.append(settings.get('y_max', y_max_auto))
+            y_axis_config['range'] = y_range
         
         # Get gene-specific settings
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get('bar_gap', 0.15))
@@ -707,25 +649,17 @@ class GraphGenerator:
         gene_bg_color = settings.get(f"{gene}_bg_color", settings.get('plot_bgcolor', '#FFFFFF'))
         gene_tick_size = settings.get(f"{gene}_tick_size", 12)
         
-        # Wrap x-axis labels
+        # Wrap x-axis labels - all of them
         wrapped_labels = [GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names]
         
-        # P-VALUE LEGEND - Updated for dual significance
-        legend_text = "<b>Significance:</b>  * p<0.05  ** p<0.01  *** p<0.001"
-        
-        # Check if secondary comparison exists in data
-        if 'significance_2' in gene_data_indexed.columns and gene_data_indexed['significance_2'].notna().any():
-            has_secondary = gene_data_indexed['significance_2'].str.contains('#', na=False).any()
-            if has_secondary:
-                legend_text += "<br># p<0.05  ## p<0.01  ### p<0.001"
-        
+        # P-VALUE LEGEND
         fig.add_annotation(
-            text=legend_text,
+            text="<b>Significance:</b>  * p<0.05  ** p<0.01  *** p<0.001",
             xref="paper", yref="paper",
             x=1.0, y=-0.15,
             xanchor='right', yanchor='top',
             showarrow=False,
-            font=dict(size=10, color='#666666', family='Arial'),
+            font=dict(size=14, color='#666666', family='Arial'),
             bgcolor='rgba(255,255,255,0.9)',
             bordercolor='#CCCCCC',
             borderwidth=1,
@@ -750,16 +684,12 @@ class GraphGenerator:
                 ticktext=wrapped_labels,
                 tickfont=dict(size=gene_tick_size),
                 tickangle=0,
-                showline=False,  # NO x-axis line
+                showline=False,       # CHANGED: Hide x-axis line
                 mirror=False,
                 side='bottom',
                 range=[-0.5, n_bars - 0.5]
             ),
-            yaxis=dict(
-                **y_axis_config,
-                showline=False,       # NO y-axis border line
-                mirror=False
-            ),
+            yaxis=y_axis_config,
             template=settings.get('color_scheme', 'plotly_white'),
             font=dict(size=settings.get('font_size', 14)),
             height=settings.get('figure_height', 600),
@@ -980,31 +910,6 @@ with tab2:
         </div>
         """, unsafe_allow_html=True)
         
-        # Initialize move action tracker
-        if 'pending_move' not in st.session_state:
-            st.session_state.pending_move = None
-        
-        # Process pending move before rendering
-        if st.session_state.pending_move:
-            action, sample = st.session_state.pending_move
-            current_order = st.session_state.sample_order.copy()
-            current_idx = current_order.index(sample)
-            
-            if action == 'up' and current_idx > 0:
-                # Swap with previous
-                current_order[current_idx], current_order[current_idx - 1] = \
-                    current_order[current_idx - 1], current_order[current_idx]
-                st.session_state.sample_order = current_order
-            elif action == 'down' and current_idx < len(current_order) - 1:
-                # Swap with next
-                current_order[current_idx], current_order[current_idx + 1] = \
-                    current_order[current_idx + 1], current_order[current_idx]
-                st.session_state.sample_order = current_order
-            
-            # Clear pending move
-            st.session_state.pending_move = None
-            st.rerun()
-        
         # Sample rows with improved spacing
         for i, sample in enumerate(st.session_state.sample_order):
             # Container for each row
@@ -1057,23 +962,25 @@ with tab2:
                     )
                     st.session_state.sample_mapping[sample]['group'] = grp
                 
-                # Move buttons with callback
+                # Move controls - Simple Up/Down only
                 with col_move:
-                    move_col1, move_col2 = st.columns(2)
-                    with move_col1:
+                    btn_col1, btn_col2 = st.columns(2)
+                    with btn_col1:
                         if i > 0:
-                            if st.button("⬆", key=f"up_{sample}_{i}", help="Move up", use_container_width=True):
-                                st.session_state.pending_move = ('up', sample)
+                            if st.button("⬆", key=f"up_{sample}", help="Move up", use_container_width=True):
+                                order = st.session_state.sample_order
+                                order[i-1], order[i] = order[i], order[i-1]
                                 st.rerun()
-                    with move_col2:
+                    with btn_col2:
                         if i < len(st.session_state.sample_order) - 1:
-                            if st.button("⬇", key=f"down_{sample}_{i}", help="Move down", use_container_width=True):
-                                st.session_state.pending_move = ('down', sample)
+                            if st.button("⬇", key=f"down_{sample}", help="Move down", use_container_width=True):
+                                order = st.session_state.sample_order
+                                order[i+1], order[i] = order[i], order[i-1]
                                 st.rerun()
-                
+                            
                 # Divider line
                 st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
-                
+        
         # Update excluded_samples from include flags
         st.session_state.excluded_samples = set([
             s for s, v in st.session_state.sample_mapping.items() 
@@ -1134,87 +1041,54 @@ with tab2:
             # Enhanced layout with clear separation
             st.markdown("#### 📊 Analysis Configuration")
             
-            # Info boxes
-            col_info1, col_info2, col_info3 = st.columns(3)
+            col_info1, col_info2 = st.columns(2)
             with col_info1:
-                st.info("**ΔΔCt Reference:** Baseline for fold change calculation (FC = 1.0)")
+                st.info("**ΔΔCt Reference:** Used to calculate fold changes. All samples will be relative to this (Fold Change = 1.0)")
             with col_info2:
-                st.info("**P-value Ref 1:** Primary comparison (*)")
-            with col_info3:
-                st.info("**P-value Ref 2:** Secondary comparison (#) - Optional")
+                st.info("**P-value Reference:** Used for statistical comparison (t-test). All samples compared against this.")
             
-            # Selection boxes
-            col_r1, col_r2, col_r3 = st.columns(3)
-            
+            col_r1, col_r2 = st.columns(2)
             with col_r1:
                 ref_condition = st.selectbox(
-                    "🎯 ΔΔCt Reference",
+                    "🎯 ΔΔCt Reference Condition",
                     condition_list,
                     index=0,
                     key="ref_choice_ddct",
-                    help="Baseline for relative expression"
+                    help="Baseline for relative expression calculation"
                 )
                 ref_sample_key = sample_to_condition[ref_condition]
                 st.caption(f"→ Sample: **{ref_sample_key}**")
             
             with col_r2:
                 cmp_condition = st.selectbox(
-                    "📈 P-value Ref 1 (*)",
+                    "📈 P-value Reference Condition",
                     condition_list,
                     index=0,
                     key="cmp_choice_pval",
-                    help="Primary statistical comparison"
+                    help="Control group for statistical testing"
                 )
                 cmp_sample_key = sample_to_condition[cmp_condition]
                 st.caption(f"→ Sample: **{cmp_sample_key}**")
-            
-            with col_r3:
-                # Add "None" option for optional second comparison
-                condition_list_with_none = ["None"] + condition_list
-                cmp_condition_2_display = st.selectbox(
-                    "📊 P-value Ref 2 (#)",
-                    condition_list_with_none,
-                    index=0,
-                    key="cmp_choice_pval_2",
-                    help="Secondary statistical comparison (optional)"
-                )
-                
-                if cmp_condition_2_display == "None":
-                    cmp_sample_key_2 = None
-                    st.caption("→ No secondary comparison")
-                else:
-                    cmp_sample_key_2 = sample_to_condition[cmp_condition_2_display]
-                    st.caption(f"→ Sample: **{cmp_sample_key_2}**")
             
             # Visual summary
             st.markdown("---")
             col_sum1, col_sum2, col_sum3 = st.columns([1, 2, 1])
             with col_sum2:
-                summary_text = f"""
+                st.markdown(f"""
                 <div style='background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center;'>
                     <h4>Analysis Summary</h4>
                     <p><b>Fold Changes:</b> Relative to <code>{ref_condition}</code></p>
-                    <p><b>Significance (*):</b> Compared to <code>{cmp_condition}</code></p>
-                """
-                
-                if cmp_sample_key_2:
-                    summary_text += f"<p><b>Significance (#):</b> Compared to <code>{cmp_condition_2_display}</code></p>"
-                else:
-                    summary_text += "<p><b>Significance (#):</b> Not enabled</p>"
-                
-                summary_text += "</div>"
-                st.markdown(summary_text, unsafe_allow_html=True)
+                    <p><b>Significance:</b> Compared to <code>{cmp_condition}</code></p>
+                </div>
+                """, unsafe_allow_html=True)
             
             st.markdown("---")
             
             # Run button
             if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
-                ok = AnalysisEngine.run_full_analysis(ref_sample_key, cmp_sample_key, cmp_sample_key_2)
+                ok = AnalysisEngine.run_full_analysis(ref_sample_key, cmp_sample_key)
                 if ok:
-                    success_msg = f"✅ Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values (*) vs: **{cmp_condition}**"
-                    if cmp_sample_key_2:
-                        success_msg += f"\n- P-values (#) vs: **{cmp_condition_2_display}**"
-                    st.success(success_msg)
+                    st.success(f"✅ Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values vs: **{cmp_condition}**")
                     st.balloons()
                     st.rerun()
                 else:
