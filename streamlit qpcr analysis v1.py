@@ -968,14 +968,20 @@ with tab2:
                     with btn_col1:
                         if i > 0:
                             if st.button("⬆", key=f"up_{sample}", help="Move up", use_container_width=True):
-                                order = st.session_state.sample_order
-                                order[i-1], order[i] = order[i], order[i-1]
+                                # Create a copy to avoid reference issues
+                                order = st.session_state.sample_order.copy()
+                                # Swap with the one above
+                                order[i], order[i-1] = order[i-1], order[i]
+                                st.session_state.sample_order = order
                                 st.rerun()
                     with btn_col2:
                         if i < len(st.session_state.sample_order) - 1:
                             if st.button("⬇", key=f"down_{sample}", help="Move down", use_container_width=True):
-                                order = st.session_state.sample_order
-                                order[i+1], order[i] = order[i], order[i-1]
+                                # Create a copy to avoid reference issues
+                                order = st.session_state.sample_order.copy()
+                                # Swap with the one below
+                                order[i], order[i+1] = order[i+1], order[i]
+                                st.session_state.sample_order = order
                                 st.rerun()
                             
                 # Divider line
