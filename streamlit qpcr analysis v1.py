@@ -1379,7 +1379,7 @@ with tab_qc:
                 value_col='CT',
                 excluded_wells=st.session_state.excluded_wells
             )
-            st.plotly_chart(plate_fig, use_container_width=True)
+            st.plotly_chart(plate_fig, width="stretch")
             
             st.caption("🔴 Red = High CT (low expression) | 🟢 Green = Low CT (high expression) | ❌ = Excluded")
         
@@ -1398,7 +1398,7 @@ with tab_qc:
                     return [''] * len(row)
                 
                 styled_stats = rep_stats.style.apply(highlight_status, axis=1)
-                st.dataframe(styled_stats, height=350, use_container_width=True)
+                st.dataframe(styled_stats, height=350, width="stretch")
         
         st.markdown("---")
         st.subheader("⚠️ Flagged Wells")
@@ -1420,7 +1420,7 @@ with tab_qc:
                     
                     with cols[0]:
                         exclude = st.checkbox(
-                            "",
+                            "Exclude well",
                             value=is_excluded,
                             key=f"qc_exclude_{well}_{idx}",
                             label_visibility="collapsed"
@@ -1491,25 +1491,25 @@ with tab_qc:
         action_col1, action_col2, action_col3, action_col4 = st.columns(4)
         
         with action_col1:
-            if st.button("🔄 Re-run QC Check", use_container_width=True):
+            if st.button("🔄 Re-run QC Check", width="stretch"):
                 st.rerun()
         
         with action_col2:
-            if st.button("❌ Exclude All Flagged", use_container_width=True, type="secondary"):
+            if st.button("❌ Exclude All Flagged", width="stretch", type="secondary"):
                 st.session_state.excluded_wells_history.append(st.session_state.excluded_wells.copy())
                 for _, row in flagged.iterrows():
                     st.session_state.excluded_wells.add(row['Well'])
                 st.rerun()
         
         with action_col3:
-            if st.button("✅ Clear All Exclusions", use_container_width=True):
+            if st.button("✅ Clear All Exclusions", width="stretch"):
                 st.session_state.excluded_wells_history.append(st.session_state.excluded_wells.copy())
                 st.session_state.excluded_wells = set()
                 st.rerun()
         
         with action_col4:
             can_undo = len(st.session_state.excluded_wells_history) > 0
-            if st.button("↩️ Undo", use_container_width=True, disabled=not can_undo):
+            if st.button("↩️ Undo", width="stretch", disabled=not can_undo):
                 if st.session_state.excluded_wells_history:
                     st.session_state.excluded_wells = st.session_state.excluded_wells_history.pop()
                     st.rerun()
@@ -1606,9 +1606,9 @@ with tab2:
                 # Include checkbox
                 with col0:
                     include = st.checkbox(
-                        "",
+                        "Include sample",
                         value=st.session_state.sample_mapping[sample].get('include', True),
-                        key=f"include_{sample}_{i}",  # FIXED: Add index to make unique
+                        key=f"include_{sample}_{i}",
                         label_visibility="collapsed"
                     )
                     st.session_state.sample_mapping[sample]['include'] = include
@@ -1654,7 +1654,7 @@ with tab2:
                     btn_col1, btn_col2 = st.columns(2)
                     with btn_col1:
                         if i > 0:
-                            if st.button("⬆", key=f"up_{sample}_{i}", help="Move up", use_container_width=True):
+                            if st.button("⬆", key=f"up_{sample}_{i}", help="Move up", width="stretch"):
                                 # Create new list with swapped items (immutable operation)
                                 new_order = st.session_state.sample_order.copy()
                                 new_order[i], new_order[i-1] = new_order[i-1], new_order[i]
@@ -1662,7 +1662,7 @@ with tab2:
                                 st.rerun()
                     with btn_col2:
                         if i < len(display_samples) - 1:
-                            if st.button("⬇", key=f"down_{sample}_{i}", help="Move down", use_container_width=True):
+                            if st.button("⬇", key=f"down_{sample}_{i}", help="Move down", width="stretch"):
                                 # Create new list with swapped items (immutable operation)
                                 new_order = st.session_state.sample_order.copy()
                                 new_order[i], new_order[i+1] = new_order[i+1], new_order[i]
@@ -1712,7 +1712,7 @@ with tab2:
                 }
                 for idx, s in enumerate(st.session_state.sample_order)
             ])
-            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+            st.dataframe(mapping_df, width="stretch", hide_index=True)
         
         # Run analysis
         st.markdown("---")
@@ -1810,7 +1810,7 @@ with tab2:
             st.markdown("---")
             
             # Run button
-            if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
+            if st.button("▶️ Run Full Analysis Now", type="primary", width="stretch"):
                 ok = AnalysisEngine.run_full_analysis(
                     ref_sample_key,
                     cmp_sample_key,
@@ -1874,7 +1874,7 @@ with tab3:
                     'SEM': '{:.3f}'
                 }, na_rep='—')
                 
-                st.dataframe(styled, use_container_width=True)
+                st.dataframe(styled, width="stretch")
         
         st.success("✅ Results ready! Go to Graphs tab to visualize.")
     
@@ -2006,7 +2006,7 @@ with tab4:
                 if st.button(
                     f"{'✓ ' if idx == st.session_state.selected_gene_idx else ''}{gene}",
                     key=f"gene_btn_{gene}",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary" if idx == st.session_state.selected_gene_idx else "secondary"
                 ):
                     st.session_state.selected_gene_idx = idx
@@ -2045,7 +2045,7 @@ with tab4:
             st.session_state.graph_settings[bar_gap_key] = gap_val
         
         with toolbar_cols[3]:
-            if st.button("↺ Reset All", key=f"reset_all_{current_gene}", use_container_width=True):
+            if st.button("↺ Reset All", key=f"reset_all_{current_gene}", width="stretch"):
                 if f'{current_gene}_bar_settings' in st.session_state:
                     del st.session_state[f'{current_gene}_bar_settings']
                 st.session_state.graph_settings[show_sig_key] = True
@@ -2090,7 +2090,7 @@ with tab4:
                         
                         c1, c2, c3 = st.columns([2, 1, 1])
                         with c1:
-                            new_color = st.color_picker("", st.session_state[f'{current_gene}_bar_settings'][bar_key]['color'],
+                            new_color = st.color_picker("Bar color", st.session_state[f'{current_gene}_bar_settings'][bar_key]['color'],
                                                         key=f"cp_{current_gene}_{idx}", label_visibility="collapsed")
                             st.session_state[f'{current_gene}_bar_settings'][bar_key]['color'] = new_color
                             st.session_state.graph_settings['bar_colors_per_sample'][bar_key] = new_color
@@ -2105,7 +2105,7 @@ with tab4:
                 
                 preset_cols = st.columns(4)
                 with preset_cols[0]:
-                    if st.button("🔵 Blues", key=f"preset_blue_{current_gene}", use_container_width=True):
+                    if st.button("🔵 Blues", key=f"preset_blue_{current_gene}", width="stretch"):
                         blues = ['#e3f2fd', '#90caf9', '#42a5f5', '#1976d2', '#0d47a1']
                         for idx, (_, row) in enumerate(gene_data.iterrows()):
                             bar_key = f"{current_gene}_{row['Condition']}"
@@ -2113,7 +2113,7 @@ with tab4:
                             st.session_state.graph_settings['bar_colors_per_sample'][bar_key] = blues[idx % len(blues)]
                         st.rerun()
                 with preset_cols[1]:
-                    if st.button("🟢 Greens", key=f"preset_green_{current_gene}", use_container_width=True):
+                    if st.button("🟢 Greens", key=f"preset_green_{current_gene}", width="stretch"):
                         greens = ['#e8f5e9', '#a5d6a7', '#66bb6a', '#388e3c', '#1b5e20']
                         for idx, (_, row) in enumerate(gene_data.iterrows()):
                             bar_key = f"{current_gene}_{row['Condition']}"
@@ -2121,7 +2121,7 @@ with tab4:
                             st.session_state.graph_settings['bar_colors_per_sample'][bar_key] = greens[idx % len(greens)]
                         st.rerun()
                 with preset_cols[2]:
-                    if st.button("🔴 Warm", key=f"preset_warm_{current_gene}", use_container_width=True):
+                    if st.button("🔴 Warm", key=f"preset_warm_{current_gene}", width="stretch"):
                         warms = ['#fff3e0', '#ffcc80', '#ff9800', '#f57c00', '#e65100']
                         for idx, (_, row) in enumerate(gene_data.iterrows()):
                             bar_key = f"{current_gene}_{row['Condition']}"
@@ -2129,7 +2129,7 @@ with tab4:
                             st.session_state.graph_settings['bar_colors_per_sample'][bar_key] = warms[idx % len(warms)]
                         st.rerun()
                 with preset_cols[3]:
-                    if st.button("⬜ Grayscale", key=f"preset_gray_{current_gene}", use_container_width=True):
+                    if st.button("⬜ Grayscale", key=f"preset_gray_{current_gene}", width="stretch"):
                         grays = ['#ffffff', '#e0e0e0', '#bdbdbd', '#9e9e9e', '#616161']
                         for idx, (_, row) in enumerate(gene_data.iterrows()):
                             bar_key = f"{current_gene}_{row['Condition']}"
@@ -2148,7 +2148,7 @@ with tab4:
             per_sample_overrides=None
         )
         
-        st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
+        st.plotly_chart(fig, width="stretch", key=f"main_fig_{current_gene}")
         st.session_state.graphs[current_gene] = fig
         
         with st.expander("📊 All Gene Graphs (Quick View)", expanded=False):
@@ -2181,7 +2181,7 @@ with tab4:
                 
                 with all_gene_cols[idx % len(all_gene_cols)]:
                     st.markdown(f"**{gene}**")
-                    st.plotly_chart(f, use_container_width=True, key=f"mini_{gene}")
+                    st.plotly_chart(f, width="stretch", key=f"mini_{gene}")
                     st.session_state.graphs[gene] = f
     else:
         st.info("⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'")
@@ -2387,7 +2387,7 @@ with tab5:
             batch_col1, batch_col2 = st.columns(2)
             
             with batch_col1:
-                if st.button("📥 Download All Figures (ZIP)", type="primary", use_container_width=True):
+                if st.button("📥 Download All Figures (ZIP)", type="primary", width="stretch"):
                     try:
                         zip_buffer = io.BytesIO()
                         total_graphs = len(st.session_state.graphs)
@@ -2421,7 +2421,7 @@ with tab5:
                         st.error(f"Batch export requires kaleido: pip install kaleido")
             
             with batch_col2:
-                if st.button("📥 Download Complete Report (ZIP)", use_container_width=True):
+                if st.button("📥 Download Complete Report (ZIP)", width="stretch"):
                     try:
                         zip_buffer = io.BytesIO()
                         total_steps = 2 + len(st.session_state.graphs) + len(st.session_state.processed_data)
