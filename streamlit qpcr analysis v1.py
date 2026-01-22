@@ -1270,11 +1270,35 @@ with tab1:
             col2.metric("Samples", st.session_state.data['Sample'].nunique())
             col3.metric("Genes", st.session_state.data['Target'].nunique())
             
-            # Detect housekeeping gene
-            hk_genes = [g for g in st.session_state.data['Target'].unique()
-                       if g.upper() in ['ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB']]
+            KNOWN_HK_GENES = ['ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB', 'BETA-ACTIN', 'BETAACTIN',
+                             '18S', '18S RRNA', 'HPRT', 'HPRT1', 'B2M', 'RPLP0', 'TBP', 'PPIA',
+                             'RPL13A', 'YWHAZ', 'SDHA', 'HMBS', 'UBC', 'GUSB', 'PGK1']
+            all_genes = list(st.session_state.data['Target'].unique())
+            hk_genes = [g for g in all_genes if g.upper() in KNOWN_HK_GENES]
+            
             if hk_genes:
-                st.session_state.hk_gene = st.selectbox("🔬 Housekeeping Gene", hk_genes, key='hk_select')
+                default_idx = 0
+                if st.session_state.get('hk_gene') in hk_genes:
+                    default_idx = hk_genes.index(st.session_state.hk_gene)
+                st.session_state.hk_gene = st.selectbox(
+                    "🔬 Housekeeping Gene (auto-detected)", 
+                    hk_genes, 
+                    index=default_idx,
+                    key='hk_select'
+                )
+                col4.metric("HK Gene", st.session_state.hk_gene)
+            else:
+                st.warning("⚠️ No standard housekeeping gene detected. Please select one manually.")
+                default_idx = 0
+                if st.session_state.get('hk_gene') in all_genes:
+                    default_idx = all_genes.index(st.session_state.hk_gene)
+                st.session_state.hk_gene = st.selectbox(
+                    "🔬 Select Housekeeping Gene", 
+                    all_genes,
+                    index=default_idx,
+                    key='hk_select_manual',
+                    help="Select the reference/housekeeping gene for normalization"
+                )
                 col4.metric("HK Gene", st.session_state.hk_gene)
             
             # Data preview
