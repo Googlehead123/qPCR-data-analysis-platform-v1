@@ -1236,105 +1236,102 @@ with tab1:
     uploaded_files = st.file_uploader("Upload qPCR CSV files", type=['csv'], accept_multiple_files=True)
     
     if uploaded_files:
-        all_data = []
-        for file in uploaded_files:
-            parsed = QPCRParser.parse(file)
-            if parsed is not None:
-                parsed['Source_File'] = file.name
-                all_data.append(parsed)
-                st.success(f"✅ {file.name}: {len(parsed)} wells")
+        current_file_names = sorted([f.name for f in uploaded_files])
+        previous_file_names = st.session_state.get('_uploaded_file_names', [])
+        is_new_upload = current_file_names != previous_file_names
         
-        if all_data:
-            st.session_state.data = pd.concat(all_data, ignore_index=True)
-            # Clear stale analysis results when new data is uploaded
-            st.session_state.processed_data = {}
-            st.session_state.graphs = {}
-            st.session_state.sample_mapping = {}
+        if is_new_upload:
+            all_data = []
+            for file in uploaded_files:
+                parsed = QPCRParser.parse(file)
+                if parsed is not None:
+                    parsed['Source_File'] = file.name
+                    all_data.append(parsed)
+                    st.success(f"✅ {file.name}: {len(parsed)} wells")
             
-            unique_samples = sorted(
-                st.session_state.data['Sample'].unique(),
-                key=natural_sort_key
-            )
-            
-            # FIXED: Only initialize sample_order if it doesn't exist or if new samples appeared
-            if 'sample_order' not in st.session_state or st.session_state.sample_order is None:
+            if all_data:
+                st.session_state.data = pd.concat(all_data, ignore_index=True)
+                st.session_state.processed_data = {}
+                st.session_state.graphs = {}
+                st.session_state.sample_mapping = {}
+                st.session_state._uploaded_file_names = current_file_names
+                
+                unique_samples = sorted(
+                    st.session_state.data['Sample'].unique(),
+                    key=natural_sort_key
+                )
                 st.session_state.sample_order = unique_samples
-            else:
-                # Add any new samples that weren't in the previous order
-                existing_set = set(st.session_state.sample_order)
-                new_samples = [s for s in unique_samples if s not in existing_set]
-                st.session_state.sample_order.extend(new_samples)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Wells", len(st.session_state.data))
-            col2.metric("Samples", st.session_state.data['Sample'].nunique())
-            col3.metric("Genes", st.session_state.data['Target'].nunique())
-            
-            KNOWN_HK_GENES = ['ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB', 'BETA-ACTIN', 'BETAACTIN',
-                             '18S', '18S RRNA', 'HPRT', 'HPRT1', 'B2M', 'RPLP0', 'TBP', 'PPIA',
-                             'RPL13A', 'YWHAZ', 'SDHA', 'HMBS', 'UBC', 'GUSB', 'PGK1']
-            all_genes = list(st.session_state.data['Target'].unique())
-            hk_genes = [g for g in all_genes if g.upper() in KNOWN_HK_GENES]
-            
-            if hk_genes:
-                default_idx = 0
-                if st.session_state.get('hk_gene') in hk_genes:
-                    default_idx = hk_genes.index(st.session_state.hk_gene)
-                st.session_state.hk_gene = st.selectbox(
-                    "🔬 Housekeeping Gene (auto-detected)", 
-                    hk_genes, 
-                    index=default_idx,
-                    key='hk_select'
-                )
-                col4.metric("HK Gene", st.session_state.hk_gene)
-            else:
-                st.warning("⚠️ No standard housekeeping gene detected. Please select one manually.")
-                default_idx = 0
-                if st.session_state.get('hk_gene') in all_genes:
-                    default_idx = all_genes.index(st.session_state.hk_gene)
-                st.session_state.hk_gene = st.selectbox(
-                    "🔬 Select Housekeeping Gene", 
-                    all_genes,
-                    index=default_idx,
-                    key='hk_select_manual',
-                    help="Select the reference/housekeeping gene for normalization"
-                )
-                col4.metric("HK Gene", st.session_state.hk_gene)
-            
-            # Data preview
-            st.subheader("📊 Data Preview")
-            st.dataframe(st.session_state.data.head(50), height=300)
-            
-            st.subheader("⚠️ Data Validation")
-            warnings_found = False
-            
-            data = st.session_state.data
-            replicate_counts = data.groupby(['Sample', 'Target']).size()
-            
-            single_replicates = replicate_counts[replicate_counts < 2]
-            if len(single_replicates) > 0:
+    
+    if st.session_state.data is not None:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Wells", len(st.session_state.data))
+        col2.metric("Samples", st.session_state.data['Sample'].nunique())
+        col3.metric("Genes", st.session_state.data['Target'].nunique())
+        
+        KNOWN_HK_GENES = ['ACTIN', 'B-ACTIN', 'GAPDH', 'ACTB', 'BETA-ACTIN', 'BETAACTIN',
+                         '18S', '18S RRNA', 'HPRT', 'HPRT1', 'B2M', 'RPLP0', 'TBP', 'PPIA',
+                         'RPL13A', 'YWHAZ', 'SDHA', 'HMBS', 'UBC', 'GUSB', 'PGK1']
+        all_genes = list(st.session_state.data['Target'].unique())
+        hk_genes = [g for g in all_genes if g.upper() in KNOWN_HK_GENES]
+        
+        if hk_genes:
+            default_idx = 0
+            if st.session_state.get('hk_gene') in hk_genes:
+                default_idx = hk_genes.index(st.session_state.hk_gene)
+            st.session_state.hk_gene = st.selectbox(
+                "🔬 Housekeeping Gene (auto-detected)", 
+                hk_genes, 
+                index=default_idx,
+                key='hk_select'
+            )
+            col4.metric("HK Gene", st.session_state.hk_gene)
+        else:
+            st.warning("⚠️ No standard housekeeping gene detected. Please select one manually.")
+            default_idx = 0
+            if st.session_state.get('hk_gene') in all_genes:
+                default_idx = all_genes.index(st.session_state.hk_gene)
+            st.session_state.hk_gene = st.selectbox(
+                "🔬 Select Housekeeping Gene", 
+                all_genes,
+                index=default_idx,
+                key='hk_select_manual',
+                help="Select the reference/housekeeping gene for normalization"
+            )
+            col4.metric("HK Gene", st.session_state.hk_gene)
+        
+        st.subheader("📊 Data Preview")
+        st.dataframe(st.session_state.data.head(50), height=300)
+        
+        st.subheader("⚠️ Data Validation")
+        warnings_found = False
+        
+        data = st.session_state.data
+        replicate_counts = data.groupby(['Sample', 'Target']).size()
+        
+        single_replicates = replicate_counts[replicate_counts < 2]
+        if len(single_replicates) > 0:
+            warnings_found = True
+            st.warning(f"⚠️ **Low Replicates**: {len(single_replicates)} sample-target combinations have only 1 replicate. Statistical analysis requires n≥2.")
+            with st.expander("View affected samples"):
+                st.dataframe(single_replicates.reset_index(name='n'))
+        
+        if st.session_state.get('hk_gene'):
+            hk = st.session_state.hk_gene
+            samples_with_hk = set(data[data['Target'] == hk]['Sample'].unique())
+            all_samples = set(data['Sample'].unique())
+            missing_hk = all_samples - samples_with_hk
+            if missing_hk:
                 warnings_found = True
-                st.warning(f"⚠️ **Low Replicates**: {len(single_replicates)} sample-target combinations have only 1 replicate. Statistical analysis requires n≥2.")
-                with st.expander("View affected samples"):
-                    st.dataframe(single_replicates.reset_index(name='n'))
-            
-            if st.session_state.get('hk_gene'):
-                hk = st.session_state.hk_gene
-                samples_with_hk = set(data[data['Target'] == hk]['Sample'].unique())
-                all_samples = set(data['Sample'].unique())
-                missing_hk = all_samples - samples_with_hk
-                if missing_hk:
-                    warnings_found = True
-                    st.error(f"❌ **Missing Housekeeping Gene**: {len(missing_hk)} samples have no {hk} data: {', '.join(list(missing_hk)[:5])}{'...' if len(missing_hk) > 5 else ''}")
-            
-            high_ct_count = len(data[data['CT'] > AnalysisConstants.CT_HIGH_WARNING])
-            if high_ct_count > 0:
-                warnings_found = True
-                pct = high_ct_count / len(data) * 100
-                st.warning(f"⚠️ **High CT Values**: {high_ct_count} wells ({pct:.1f}%) have CT > {AnalysisConstants.CT_HIGH_WARNING} (low expression)")
-            
-            if not warnings_found:
-                st.success("✅ Data validation passed. No issues detected.")
+                st.error(f"❌ **Missing Housekeeping Gene**: {len(missing_hk)} samples have no {hk} data: {', '.join(list(missing_hk)[:5])}{'...' if len(missing_hk) > 5 else ''}")
+        
+        high_ct_count = len(data[data['CT'] > AnalysisConstants.CT_HIGH_WARNING])
+        if high_ct_count > 0:
+            warnings_found = True
+            pct = high_ct_count / len(data) * 100
+            st.warning(f"⚠️ **High CT Values**: {high_ct_count} wells ({pct:.1f}%) have CT > {AnalysisConstants.CT_HIGH_WARNING} (low expression)")
+        
+        if not warnings_found:
+            st.success("✅ Data validation passed. No issues detected.")
 
 # ==================== TAB QC: QUALITY CONTROL ====================
 with tab_qc:
