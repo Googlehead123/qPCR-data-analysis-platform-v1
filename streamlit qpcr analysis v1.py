@@ -196,10 +196,14 @@ class QPCRParser:
     @staticmethod
     def detect_format(df):
         for idx, row in df.iterrows():
+            # Skip empty rows to prevent IndexError
+            if len(row) == 0 or row.isna().all():
+                continue
+
             row_str = " ".join(row.astype(str).values)
             if "Well Position" in row_str:
                 return "format1", idx
-            elif row.iloc[0] == "Well" and "Sample Name" in row_str:
+            elif len(row) > 0 and row.iloc[0] == "Well" and "Sample Name" in row_str:
                 return (
                     "format2" if "Cт" in row_str or "ΔCт" in row_str else "format1"
                 ), idx
@@ -218,9 +222,15 @@ class QPCRParser:
         well_col = next(
             (c for c in ["Well Position", "Well"] if c in df.columns), df.columns[0]
         )
-        ct_col = next((c for c in ["CT", "Ct", "Cт"] if c in df.columns), None)
+
+        # Case-insensitive CT column detection
+        ct_col = next(
+            (c for c in df.columns if str(c).upper() in ["CT", "CТ"] or str(c) == "Cт"),
+            None,
+        )
 
         if not ct_col:
+            st.error("CT column not found. Expected column named 'CT', 'Ct', or 'Cт'.")
             return None
 
         sample_col = (
@@ -243,24 +253,76 @@ class QPCRParser:
             }
         )
 
-        return parsed.dropna(subset=["CT"]).query("Sample.notna() & Target.notna()")
+        # Count invalid CT values for user feedback
+        invalid_ct_count = parsed["CT"].isna().sum()
+        if invalid_ct_count > 0:
+            st.info(
+                f"Note: {invalid_ct_count} rows with invalid/undetermined CT values were filtered out."
+            )
+
+        result = parsed.dropna(subset=["CT"]).query("Sample.notna() & Target.notna()")
+
+        if result.empty:
+            st.warning(
+                "No valid data rows found after filtering. Check that your file contains valid CT values and Sample/Target names."
+            )
+
+        return result
 
     @staticmethod
     def parse_format2(df, start):
-        df = df.iloc[start:].reset_index(drop=True)
-        df.columns = df.iloc[0]
-        df = df.iloc[1:].reset_index(drop=True)
+        try:
+            df = df.iloc[start:].reset_index(drop=True)
+            df.columns = df.iloc[0]
+            df = df.iloc[1:].reset_index(drop=True)
 
-        parsed = pd.DataFrame(
-            {
-                "Well": df["Well"],
-                "Sample": df["Sample Name"],
-                "Target": df["Target Name"],
-                "CT": pd.to_numeric(df["Cт"], errors="coerce"),
-            }
-        )
+            # Try to find columns with flexible matching
+            well_col = next((c for c in df.columns if str(c).strip() == "Well"), None)
+            sample_col = next((c for c in df.columns if "Sample" in str(c)), None)
+            target_col = next((c for c in df.columns if "Target" in str(c)), None)
+            ct_col = next(
+                (c for c in df.columns if str(c).strip() in ["Cт", "CT", "Ct"]), None
+            )
 
-        return parsed.dropna(subset=["CT"]).query("Sample.notna() & Target.notna()")
+            if not all([well_col, sample_col, target_col, ct_col]):
+                missing = []
+                if not well_col:
+                    missing.append("Well")
+                if not sample_col:
+                    missing.append("Sample Name")
+                if not target_col:
+                    missing.append("Target Name")
+                if not ct_col:
+                    missing.append("CT/Cт")
+                st.error(
+                    f"Format2 parsing failed: Missing columns: {', '.join(missing)}"
+                )
+                return None
+
+            parsed = pd.DataFrame(
+                {
+                    "Well": df[well_col],
+                    "Sample": df[sample_col],
+                    "Target": df[target_col],
+                    "CT": pd.to_numeric(df[ct_col], errors="coerce"),
+                }
+            )
+
+            result = parsed.dropna(subset=["CT"]).query(
+                "Sample.notna() & Target.notna()"
+            )
+            if result.empty:
+                st.warning(
+                    "No valid data rows found after filtering. Check CT values and Sample/Target names."
+                )
+            return result
+
+        except KeyError as e:
+            st.error(f"Format2 parsing failed: Column not found - {e}")
+            return None
+        except Exception as e:
+            st.error(f"Format2 parsing error: {e}")
+            return None
 
     MAX_FILE_SIZE_MB = 50
 
@@ -914,7 +976,16 @@ class AnalysisEngine:
                 if len(ref_target) > 0 and len(ref_hk) > 0:
                     ref_delta_ct = ref_target["CT"].mean() - ref_hk["CT"].mean()
                 else:
-                    ref_delta_ct = 0
+                    # CRITICAL: Missing reference data - skip this sample instead of using 0
+                    # Using ref_delta_ct = 0 would produce completely wrong fold changes
+                    # Log warning and skip this condition
+                    if condition == ref_sample:
+                        # This IS the reference - use own delta_ct as reference (fold change = 1)
+                        ref_delta_ct = delta_ct
+                    else:
+                        # Reference sample missing - cannot calculate relative expression
+                        # Skip this entry rather than produce incorrect results
+                        continue
 
                 ddct = delta_ct - ref_delta_ct
                 rel_expr = 2 ** (-ddct)
@@ -926,9 +997,15 @@ class AnalysisEngine:
 
                 target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else 0
                 hk_sem = hk_sd / np.sqrt(n_hk) if n_hk > 1 else 0
+
+                # Correct error propagation for 2^(-ΔΔCt) transformation
+                # Using the formula: SEM(2^x) = 2^x * ln(2) * SEM(x)
+                # where x = -ΔΔCt and SEM(ΔΔCt) = sqrt(SEM_target^2 + SEM_hk^2)
                 combined_sem = np.sqrt(target_sem**2 + hk_sem**2)
 
-                sem = combined_sem * rel_expr * np.log(2)
+                # SEM of relative expression = rel_expr * ln(2) * SEM(ΔCt)
+                # Note: This propagates the error correctly through the exponential transformation
+                sem = rel_expr * np.log(2) * combined_sem
 
                 # Get original sample name and group
                 original_sample = cond_data["Sample"].iloc[0]
@@ -1013,7 +1090,9 @@ class AnalysisEngine:
             rel_expr = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
-                if np.isnan(hk_mean):
+                # Division-by-zero protection: validate HK Ct is in valid range
+                if np.isnan(hk_mean) or hk_mean <= 0 or hk_mean > 45:
+                    # Invalid housekeeping gene Ct value - skip this condition
                     continue
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
 
@@ -1028,14 +1107,21 @@ class AnalysisEngine:
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore", RuntimeWarning)
                             if ref_vals.size >= 2 and vals.size >= 2:
+                                # Standard Welch's t-test for two independent samples
                                 _, p_val = stats.ttest_ind(
                                     ref_vals, vals, equal_var=False
                                 )
                             elif vals.size == 1 and ref_vals.size >= 2:
+                                # Single treatment replicate: test if ref group mean equals this value
+                                # Note: Limited statistical power with n=1
                                 _, p_val = stats.ttest_1samp(ref_vals, vals[0])
                             elif ref_vals.size == 1 and vals.size >= 2:
+                                # Single reference replicate: test if treatment mean equals ref value
+                                # Note: Limited statistical power with n=1
                                 _, p_val = stats.ttest_1samp(vals, ref_vals[0])
                             else:
+                                # Both groups have n=1: cannot compute meaningful p-value
+                                # Intentionally return NaN - statistical comparison not possible
                                 p_val = np.nan
                     except (ValueError, TypeError) as e:
                         p_val = np.nan
@@ -1165,6 +1251,32 @@ class AnalysisEngine:
             if not hk_gene:
                 st.error("❌ Housekeeping gene not selected.")
                 return False
+
+            ct_values = data["CT"]
+            high_ct_count = (ct_values > 35).sum()
+            low_ct_count = (ct_values < 10).sum()
+            single_rep_samples = []
+
+            for sample in data["Sample"].unique():
+                for target in data["Target"].unique():
+                    sample_target_data = data[
+                        (data["Sample"] == sample) & (data["Target"] == target)
+                    ]
+                    if len(sample_target_data) == 1:
+                        single_rep_samples.append(f"{sample}/{target}")
+
+            if high_ct_count > 0:
+                st.warning(
+                    f"⚠️ {high_ct_count} CT values > 35 detected (possible low expression or failed reactions)"
+                )
+            if low_ct_count > 0:
+                st.warning(
+                    f"⚠️ {low_ct_count} CT values < 10 detected (unusually high expression - verify data)"
+                )
+            if single_rep_samples:
+                st.info(
+                    f"ℹ️ {len(single_rep_samples)} sample/target combinations have only 1 replicate (limited statistical power)"
+                )
 
             ref_condition = mapping.get(ref_sample_key, {}).get(
                 "condition", ref_sample_key
