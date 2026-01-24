@@ -37,6 +37,14 @@ DEFAULT_GROUP_COLORS = {
     "Treatment": "#D3D3D3",
 }
 
+# COSMAX brand colors for PPT redesign
+COSMAX_RED = "#EA1D22"  # Primary accent, emphasis
+COSMAX_BLACK = "#000000"  # Main text
+COSMAX_WHITE = "#FFFFFF"  # Background
+COSMAX_LAB_WHITE = "#F3F0ED"  # Secondary background (off-white)
+COSMAX_FROST_GREY = "#C1C6C7"  # Secondary elements, table headers
+COSMAX_CREAM = "#D4CEC1"  # Secondary data series, neutral accents
+
 # ==================== SESSION STATE INIT ====================
 for key in [
     "data",
@@ -48,11 +56,13 @@ for key in [
     "excluded_samples",
     "selected_efficacy",
     "hk_gene",
+    "condition_colors",
 ]:
     if key not in st.session_state:
         st.session_state[key] = (
             {}
-            if key in ["sample_mapping", "analysis_templates", "graphs"]
+            if key
+            in ["sample_mapping", "analysis_templates", "graphs", "condition_colors"]
             else (set() if "excluded" in key else None)
         )
 
@@ -1378,6 +1388,7 @@ class GraphGenerator:
         efficacy_config: dict = None,
         sample_order: list = None,
         per_sample_overrides: dict = None,
+        condition_colors: dict = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -1458,6 +1469,8 @@ class GraphGenerator:
             custom_key = f"{gene}_{condition}"
             if custom_key in settings.get("bar_colors_per_sample", {}):
                 bar_colors.append(settings["bar_colors_per_sample"][custom_key])
+            elif condition_colors and condition in condition_colors:
+                bar_colors.append(condition_colors[condition])
             elif group in DEFAULT_GROUP_COLORS:
                 bar_colors.append(DEFAULT_GROUP_COLORS[group])
             else:
@@ -1753,11 +1766,12 @@ class ReportGenerator:
         layout: str = "one_per_slide",
         include_title_slide: bool = True,
         include_summary: bool = True,
+        method_text: str = "",
     ) -> bytes:
         try:
             from pptx import Presentation
             from pptx.util import Inches, Pt
-            from pptx.dml.color import RgbColor
+            from pptx.dml.color import RGBColor
             from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
         except ImportError:
             raise ImportError(
@@ -1776,7 +1790,9 @@ class ReportGenerator:
         if layout == "one_per_slide":
             for gene, fig in graphs.items():
                 gene_data = processed_data.get(gene)
-                ReportGenerator._add_gene_slide(prs, blank_layout, gene, fig, gene_data)
+                ReportGenerator._add_gene_slide(
+                    prs, blank_layout, gene, fig, gene_data, method_text
+                )
         elif layout == "two_per_slide":
             gene_list = list(graphs.items())
             for i in range(0, len(gene_list), 2):
@@ -1801,19 +1817,41 @@ class ReportGenerator:
     def _add_title_slide(prs, analysis_params: dict):
         from pptx.util import Inches, Pt
         from pptx.enum.text import PP_ALIGN
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.dml.color import RGBColor
 
         slide = prs.slides.add_slide(prs.slide_layouts[6])
 
+        # Set slide background to white
+        background = slide.background
+        fill = background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # White
+
+        # Add logo placeholder in top-left corner
+        logo_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(2), Inches(0.8)
+        )
+        logo_frame = logo_box.text_frame
+        logo_frame.word_wrap = True
+        logo_para = logo_frame.paragraphs[0]
+        logo_para.text = "[Add Logo Here]"
+        logo_para.font.size = Pt(12)
+        logo_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)  # Frost Grey
+
+        # Main title
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(2.5), Inches(12.33), Inches(1)
         )
         title_frame = title_box.text_frame
         title_para = title_frame.paragraphs[0]
         title_para.text = "qPCR Gene Expression Analysis"
-        title_para.font.size = Pt(44)
+        title_para.font.size = Pt(54)
         title_para.font.bold = True
+        title_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)  # Black
         title_para.alignment = PP_ALIGN.CENTER
 
+        # Subtitle with efficacy type
         subtitle_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(3.8), Inches(12.33), Inches(0.5)
         )
@@ -1821,9 +1859,11 @@ class ReportGenerator:
         subtitle_para = subtitle_frame.paragraphs[0]
         efficacy = analysis_params.get("Efficacy_Type", "Analysis")
         subtitle_para.text = f"{efficacy} Efficacy Study"
-        subtitle_para.font.size = Pt(28)
+        subtitle_para.font.size = Pt(32)
+        subtitle_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)  # Black
         subtitle_para.alignment = PP_ALIGN.CENTER
 
+        # Info box with date, HK gene, and reference sample
         info_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(5.5), Inches(12.33), Inches(1)
         )
@@ -1834,17 +1874,40 @@ class ReportGenerator:
         ref = analysis_params.get("Reference_Sample", "N/A")
         info_para.text = f"Date: {date}  |  HK Gene: {hk}  |  Reference: {ref}"
         info_para.font.size = Pt(14)
+        info_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)  # Frost Grey
         info_para.alignment = PP_ALIGN.CENTER
+
+        # Add Cosmax Red accent bar at bottom (full width, 0.5" height)
+        accent_bar = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(0), Inches(7.0), Inches(13.333), Inches(0.5)
+        )
+        accent_bar.fill.solid()
+        accent_bar.fill.fore_color.rgb = RGBColor(0xEA, 0x1D, 0x22)  # Cosmax Red
+        accent_bar.line.fill.background()  # No border
 
     @staticmethod
     def _add_gene_slide(
-        prs, layout, gene: str, fig: go.Figure, gene_data: pd.DataFrame = None
+        prs,
+        layout,
+        gene: str,
+        fig: go.Figure,
+        gene_data: pd.DataFrame = None,
+        method_text: str = "",
     ):
         from pptx.util import Inches, Pt
         from pptx.enum.text import PP_ALIGN
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.dml.color import RGBColor
 
         slide = prs.slides.add_slide(layout)
 
+        # Set slide background to white
+        background = slide.background
+        fill = background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # White
+
+        # Gene title (Black, bold)
         title_box = slide.shapes.add_textbox(
             Inches(0.3), Inches(0.2), Inches(12.73), Inches(0.6)
         )
@@ -1853,7 +1916,24 @@ class ReportGenerator:
         title_para.text = f"{gene} Expression"
         title_para.font.size = Pt(28)
         title_para.font.bold = True
+        title_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)  # Black
         title_para.alignment = PP_ALIGN.LEFT
+
+        # Method text (if provided) - Frost Grey, small font
+        graph_top = Inches(0.9)
+        if method_text:
+            method_box = slide.shapes.add_textbox(
+                Inches(0.3), Inches(0.7), Inches(12.73), Inches(0.4)
+            )
+            method_frame = method_box.text_frame
+            method_frame.word_wrap = True
+            method_para = method_frame.paragraphs[0]
+            method_para.text = method_text
+            method_para.font.size = Pt(11)
+            method_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)  # Frost Grey
+            method_para.alignment = PP_ALIGN.LEFT
+            # Adjust graph position if method text is present
+            graph_top = Inches(1.2)
 
         fig_copy = go.Figure(fig)
         fig_copy.update_layout(
@@ -1867,7 +1947,7 @@ class ReportGenerator:
         img_stream = io.BytesIO(img_bytes)
 
         left = Inches(0.5)
-        top = Inches(0.9)
+        top = graph_top
         width = Inches(9.5)
         slide.shapes.add_picture(img_stream, left, top, width=width)
 
@@ -1899,6 +1979,14 @@ class ReportGenerator:
                 p_str = f"p={pval:.3f}" if pd.notna(pval) else ""
                 para2.text = f"  {fc_str} {sig}"
                 para2.font.size = Pt(9)
+
+        # Add Cosmax Red accent bar at bottom (full width, 0.5" height)
+        accent_bar = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(0), Inches(7.0), Inches(13.333), Inches(0.5)
+        )
+        accent_bar.fill.solid()
+        accent_bar.fill.fore_color.rgb = RGBColor(0xEA, 0x1D, 0x22)  # Cosmax Red
+        accent_bar.line.fill.background()  # No border
 
     @staticmethod
     def _add_dual_gene_slide(prs, layout, gene_pairs: list, processed_data: dict):
@@ -3649,6 +3737,113 @@ with tab4:
                 "🎨 Edit Bar Colors", key=f"edit_mode_{current_gene}"
             )
 
+        # ==================== CONDITION COLOR PICKER ====================
+        if "condition_colors" not in st.session_state:
+            st.session_state.condition_colors = {}
+
+        # Extract unique conditions from sample_mapping
+        unique_conditions = set()
+        if st.session_state.sample_mapping:
+            for sample, info in st.session_state.sample_mapping.items():
+                if info.get("include", True):
+                    condition = info.get("condition", sample)
+                    unique_conditions.add(condition)
+
+        if unique_conditions:
+            with st.expander("🎨 Condition Colors", expanded=False):
+                st.markdown(
+                    """
+                <style>
+                .condition-color-card {
+                    background: #f8f9fa;
+                    border: 1px solid #e9ecef;
+                    border-radius: 8px;
+                    padding: 12px;
+                    margin-bottom: 8px;
+                }
+                .condition-color-title {
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #333;
+                    margin-bottom: 8px;
+                }
+                </style>
+                """,
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("#### Set Colors by Condition")
+                st.caption(
+                    "These colors apply to all bars with the same condition across all genes"
+                )
+
+                # Display color picker for each unique condition
+                sorted_conditions = sorted(list(unique_conditions))
+                n_cols = min(len(sorted_conditions), 3)
+                color_cols = st.columns(n_cols)
+
+                for idx, condition in enumerate(sorted_conditions):
+                    # Get default color from first sample with this condition
+                    default_color = "#D3D3D3"
+                    for sample, info in st.session_state.sample_mapping.items():
+                        if info.get("condition", sample) == condition:
+                            group = info.get("group", "Treatment")
+                            default_color = DEFAULT_GROUP_COLORS.get(group, "#D3D3D3")
+                            break
+
+                    # Get current color or use default
+                    current_color = st.session_state.condition_colors.get(
+                        condition, default_color
+                    )
+
+                    with color_cols[idx % n_cols]:
+                        with st.container():
+                            display_name = (
+                                condition
+                                if len(condition) <= 18
+                                else condition[:15] + "..."
+                            )
+                            st.markdown(
+                                f"""
+                            <div class='condition-color-card'>
+                                <div class='condition-color-title' title='{condition}'>{display_name}</div>
+                            </div>
+                            """,
+                                unsafe_allow_html=True,
+                            )
+
+                            selected_color = st.color_picker(
+                                "Color",
+                                current_color,
+                                key=f"condition_color_{condition}",
+                                help=f"Color for condition: {condition}",
+                            )
+                            st.session_state.condition_colors[condition] = (
+                                selected_color
+                            )
+
+                st.markdown("---")
+                button_cols = st.columns(2)
+
+                with button_cols[0]:
+                    if st.button(
+                        "✅ Apply to All Graphs",
+                        key="apply_condition_colors",
+                        use_container_width=True,
+                    ):
+                        st.success("Condition colors applied! Regenerating graphs...")
+                        st.rerun()
+
+                with button_cols[1]:
+                    if st.button(
+                        "🔄 Reset to Defaults",
+                        key="reset_condition_colors",
+                        use_container_width=True,
+                    ):
+                        st.session_state.condition_colors = {}
+                        st.info("Condition colors reset to defaults")
+                        st.rerun()
+
         if f"{current_gene}_bar_settings" not in st.session_state:
             st.session_state[f"{current_gene}_bar_settings"] = {}
         if "bar_colors_per_sample" not in st.session_state.graph_settings:
@@ -3860,6 +4055,7 @@ with tab4:
             efficacy_config,
             sample_order=st.session_state.get("sample_order"),
             per_sample_overrides=None,
+            condition_colors=st.session_state.get("condition_colors", {}),
         )
 
         st.plotly_chart(fig, width="stretch", key=f"main_fig_{current_gene}")
@@ -3898,6 +4094,7 @@ with tab4:
                     gs,
                     efficacy_config,
                     sample_order=st.session_state.get("sample_order"),
+                    condition_colors=st.session_state.get("condition_colors", {}),
                 )
 
                 with all_gene_cols[idx % len(all_gene_cols)]:
@@ -4395,6 +4592,19 @@ with tab6:
                 "Include summary slide", value=True, key="ppt_summary"
             )
 
+            st.markdown("#### Method/Experiment Info")
+            default_method = (
+                f"{st.session_state.get('selected_efficacy', '')} Efficacy Study"
+            )
+            method_text = st.text_area(
+                "Enter method/experiment information (appears on all gene slides):",
+                value=st.session_state.get("ppt_method_text", default_method),
+                height=80,
+                key="ppt_method_text_input",
+                help="This text will appear at the top of each gene slide",
+            )
+            st.session_state.ppt_method_text = method_text
+
         with col_options:
             st.markdown("#### Preview")
 
@@ -4476,6 +4686,7 @@ with tab6:
                             layout=layout_option,
                             include_title_slide=include_title,
                             include_summary=include_summary,
+                            method_text=st.session_state.get("ppt_method_text", ""),
                         )
 
                         st.session_state["ppt_bytes"] = ppt_bytes
@@ -4488,6 +4699,74 @@ with tab6:
                     )
                 except Exception as e:
                     st.error(f"❌ Error generating presentation: {str(e)}")
+
+        # One-click Generate & Download option
+        st.markdown("---")
+        st.markdown("##### ⚡ Quick Export (One-Click)")
+
+        if st.button(
+            "🚀 Generate & Download (One-Click)",
+            key="one_click_ppt",
+            use_container_width=True,
+            help="Generate and immediately show download button",
+        ):
+            try:
+                with st.spinner("Generating presentation..."):
+                    analysis_params = {
+                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "Efficacy_Type": st.session_state.get(
+                            "selected_efficacy", "qPCR Analysis"
+                        ),
+                        "Housekeeping_Gene": st.session_state.get("hk_gene", "N/A"),
+                        "Reference_Sample": st.session_state.get(
+                            "analysis_ref_condition", "N/A"
+                        ),
+                        "Compare_To": st.session_state.get(
+                            "analysis_cmp_condition", "N/A"
+                        ),
+                        "Genes_Analyzed": len(st.session_state.processed_data),
+                    }
+
+                    ppt_bytes = ReportGenerator.create_presentation(
+                        graphs=st.session_state.graphs,
+                        processed_data=st.session_state.processed_data,
+                        analysis_params=analysis_params,
+                        layout=layout_option,
+                        include_title_slide=include_title,
+                        include_summary=include_summary,
+                        method_text=st.session_state.get("ppt_method_text", ""),
+                    )
+
+                    st.session_state["ppt_bytes"] = ppt_bytes
+                    st.session_state["ppt_ready_for_download"] = True
+                    st.success("✅ Ready! Click download below.")
+                    st.rerun()
+            except ImportError as e:
+                st.error(f"❌ Import error: {str(e)}")
+                st.info(
+                    "💡 If on Streamlit Cloud, try rebooting the app to reinstall dependencies."
+                )
+            except Exception as e:
+                st.error(f"❌ Error generating presentation: {str(e)}")
+
+        # Show download button if ready from one-click
+        if st.session_state.get("ppt_ready_for_download"):
+            efficacy = st.session_state.get("selected_efficacy", "qPCR")
+            filename = f"qPCR_{efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
+            st.download_button(
+                label="📥 Download Generated PPTX",
+                data=st.session_state["ppt_bytes"],
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                type="primary",
+                use_container_width=True,
+                key="one_click_download",
+            )
+            # Reset flag after showing
+            st.session_state["ppt_ready_for_download"] = False
+
+        st.markdown("---")
+        st.markdown("##### 📋 Standard Export (Two-Step)")
 
         if "ppt_bytes" in st.session_state and st.session_state["ppt_bytes"]:
             with gen_col2:
