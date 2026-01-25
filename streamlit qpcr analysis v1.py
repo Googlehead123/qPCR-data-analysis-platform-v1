@@ -3446,7 +3446,7 @@ with tab2:
                     key="ttest_type",
                     help="Welch's is recommended - more robust when group variances differ",
                 )
-                st.session_state.ttest_type = ttest_type
+                # Note: Widget with key="ttest_type" auto-syncs to session state
 
             with stat_col2:
                 error_bar_type = st.radio(
@@ -3459,7 +3459,7 @@ with tab2:
                     key="error_bar_type",
                     help="SEM shows precision of mean estimate; SD shows data variability",
                 )
-                st.session_state.error_bar_type = error_bar_type
+                # Note: Widget with key="error_bar_type" auto-syncs to session state
 
             # Visual summary
             st.markdown("---")
