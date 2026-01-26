@@ -2194,6 +2194,228 @@ class ReportGenerator:
                     para2.font.size = Pt(10)
 
 
+# ==================== PPT GENERATOR (NEW) ====================
+class PPTGenerator:
+    NAVY_BLUE = (27, 54, 93)  # #1B365D
+    WHITE = (255, 255, 255)
+
+    @staticmethod
+    def _get_color_rgb(rgb_tuple):
+        from pptx.dml.color import RGBColor
+
+        return RGBColor(*rgb_tuple)
+
+    @staticmethod
+    def create_title_slide(prs, analysis_params):
+        from pptx.util import Inches, Pt
+        from pptx.enum.text import PP_ALIGN
+        from pptx.dml.color import RGBColor
+
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
+
+        # Background
+        background = slide.background
+        fill = background.fill
+        fill.solid()
+        fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.WHITE)
+
+        # Title "유전자 발현 분석" (Gene Expression Analysis)
+        title_box = slide.shapes.add_textbox(
+            Inches(1), Inches(2.5), Inches(11.33), Inches(1)
+        )
+        tf = title_box.text_frame
+        p = tf.paragraphs[0]
+        p.text = "유전자 발현 분석 (Gene Expression Analysis)"
+        p.font.size = Pt(40)
+        p.font.bold = True
+        p.font.name = "Malgun Gothic"
+        p.alignment = PP_ALIGN.CENTER
+
+        # Subtitle (Efficacy Type)
+        subtitle_box = slide.shapes.add_textbox(
+            Inches(1), Inches(3.8), Inches(11.33), Inches(0.5)
+        )
+        tf = subtitle_box.text_frame
+        p = tf.paragraphs[0]
+        efficacy = analysis_params.get("Efficacy_Type", "Analysis")
+        p.text = f"{efficacy} Efficacy Test"
+        p.font.size = Pt(28)
+        p.font.name = "Malgun Gothic"
+        p.alignment = PP_ALIGN.CENTER
+
+        # Date and Info
+        info_box = slide.shapes.add_textbox(
+            Inches(1), Inches(5.0), Inches(11.33), Inches(1)
+        )
+        tf = info_box.text_frame
+        p = tf.paragraphs[0]
+        date = analysis_params.get("Date", "")
+        p.text = f"Date: {date}"
+        p.font.size = Pt(18)
+        p.font.name = "Arial"
+        p.alignment = PP_ALIGN.CENTER
+
+        # Logo Placeholder (Bottom Right)
+        # X: 11.5, Y: 6.5 approx
+        logo_box = slide.shapes.add_textbox(
+            Inches(11.5), Inches(6.5), Inches(1.5), Inches(0.5)
+        )
+        tf = logo_box.text_frame
+        p = tf.paragraphs[0]
+        p.text = "[Logo]"
+        p.font.size = Pt(12)
+        p.font.color.rgb = RGBColor(200, 200, 200)
+        p.alignment = PP_ALIGN.RIGHT
+
+    @staticmethod
+    def create_gene_slide(prs, gene, fig, gene_data, analysis_params):
+        from pptx.util import Inches, Pt
+        from pptx.enum.text import PP_ALIGN
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.dml.color import RGBColor
+
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+        # Background
+        background = slide.background
+        fill = background.fill
+        fill.solid()
+        fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.WHITE)
+
+        # Title
+        title_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.3), Inches(9.0), Inches(0.8)
+        )
+        tf = title_box.text_frame
+        p = tf.paragraphs[0]
+        p.text = f"{gene} Expression"
+        p.font.size = Pt(32)
+        p.font.bold = True
+        p.font.name = "Malgun Gothic"
+
+        # Navy Blue Line
+        line = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(1.1), Inches(9.0), Inches(0.05)
+        )
+        line.fill.solid()
+        line.fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.NAVY_BLUE)
+        line.line.fill.background()
+
+        # Graph
+        try:
+            # Convert fig to image
+            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=800)
+            image_stream = io.BytesIO(img_bytes)
+            slide.shapes.add_picture(
+                image_stream,
+                Inches(0.5),
+                Inches(1.5),
+                width=Inches(6.0),
+                height=Inches(4.0),
+            )
+        except Exception as e:
+            err_box = slide.shapes.add_textbox(
+                Inches(0.5), Inches(1.5), Inches(6.0), Inches(4.0)
+            )
+            err_box.text = f"Graph Error: {str(e)}"
+
+        # Data Table
+        if gene_data is not None and not gene_data.empty:
+            rows = len(gene_data) + 1
+            cols = 4  # Sample, Condition, Fold Change, P-value
+            table_height = Inches(0.3 * rows)
+            table_shape = slide.shapes.add_table(
+                rows, cols, Inches(0.5), Inches(5.8), Inches(6.0), table_height
+            )
+            table = table_shape.table
+
+            # Headers
+            headers = ["시료명 (Sample)", "Condition", "Fold Change", "P-value"]
+            for i, h in enumerate(headers):
+                cell = table.cell(0, i)
+                cell.text = h
+                cell.text_frame.paragraphs[0].font.size = Pt(10)
+                cell.text_frame.paragraphs[0].font.bold = True
+
+            # Data
+            for i, row in enumerate(gene_data.itertuples()):
+                r = i + 1
+                # Handle potential missing columns gracefully
+                sample_val = getattr(row, "Original_Sample", getattr(row, "Sample", ""))
+                cond_val = getattr(row, "Condition", "")
+                fc_val = getattr(
+                    row, "Fold_Change", getattr(row, "Relative_Expression", 0)
+                )
+                pval = getattr(row, "p_value", None)
+                sig = getattr(row, "significance", "")
+
+                table.cell(r, 0).text = str(sample_val)
+                table.cell(r, 1).text = str(cond_val)
+                table.cell(r, 2).text = f"{fc_val:.2f}" if pd.notna(fc_val) else "-"
+                table.cell(r, 3).text = f"{pval:.4f} {sig}" if pd.notna(pval) else "-"
+
+                for j in range(4):
+                    table.cell(r, j).text_frame.paragraphs[0].font.size = Pt(9)
+
+        # Metadata Box
+        meta_box = slide.shapes.add_textbox(
+            Inches(7.0), Inches(1.5), Inches(2.5), Inches(5.0)
+        )
+        tf = meta_box.text_frame
+        tf.word_wrap = True
+
+        def add_meta_line(text, bold=False):
+            p = tf.add_paragraph()
+            p.text = text
+            p.font.size = Pt(11)
+            p.font.bold = bold
+
+        add_meta_line("Analysis Parameters", bold=True)
+        add_meta_line(f"HK Gene: {analysis_params.get('Housekeeping_Gene', '-')}")
+        add_meta_line(f"Ref Sample: {analysis_params.get('Reference_Sample', '-')}")
+        add_meta_line(f"Compare: {analysis_params.get('Compare_To', '-')}")
+        add_meta_line("")
+        add_meta_line("통계적 유의성 (Significance)", bold=True)
+        add_meta_line("* p < 0.05")
+        add_meta_line("** p < 0.01")
+        add_meta_line("*** p < 0.001")
+
+        # Logo Placeholder
+        logo_box = slide.shapes.add_textbox(
+            Inches(11.5), Inches(6.5), Inches(1.5), Inches(0.5)
+        )
+        tf = logo_box.text_frame
+        p = tf.paragraphs[0]
+        p.text = "[Logo]"
+        p.font.size = Pt(12)
+        p.font.color.rgb = RGBColor(200, 200, 200)
+        p.alignment = PP_ALIGN.RIGHT
+
+    @staticmethod
+    def generate_presentation(graphs, processed_data, analysis_params):
+        try:
+            from pptx import Presentation
+            from pptx.util import Inches
+        except ImportError:
+            st.error("python-pptx not installed")
+            return None
+
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+
+        PPTGenerator.create_title_slide(prs, analysis_params)
+
+        for gene, fig in graphs.items():
+            gene_data = processed_data.get(gene)
+            PPTGenerator.create_gene_slide(prs, gene, fig, gene_data, analysis_params)
+
+        output = io.BytesIO()
+        prs.save(output)
+        output.seek(0)
+        return output.getvalue()
+
+
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(
     raw_data: pd.DataFrame,
@@ -4208,6 +4430,45 @@ with tab5:
                     file_name=f"qPCR_graphs_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
                     mime="text/html",
                     type="primary",
+                )
+
+        st.markdown("---")
+        st.subheader("📑 PowerPoint Report")
+        st.caption(
+            "Generate a slide deck with title, gene slides, and summary (Navy Blue Template)"
+        )
+
+        ppt_col1, ppt_col2 = st.columns([1, 2])
+
+        with ppt_col1:
+            if st.button(
+                "🚀 Generate PPT",
+                type="primary",
+                use_container_width=True,
+                key="gen_ppt_tab5",
+            ):
+                with st.spinner("Generating PowerPoint..."):
+                    ppt_bytes = PPTGenerator.generate_presentation(
+                        st.session_state.graphs,
+                        st.session_state.processed_data,
+                        analysis_params,
+                    )
+                    if ppt_bytes:
+                        st.session_state["ppt_export"] = ppt_bytes
+                        st.success("Generated!")
+                    else:
+                        st.error("Failed to generate PPT")
+
+        with ppt_col2:
+            if "ppt_export" in st.session_state:
+                st.download_button(
+                    label="📥 Download PowerPoint (.pptx)",
+                    data=st.session_state["ppt_export"],
+                    file_name=f"qPCR_Report_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    type="primary",
+                    use_container_width=True,
+                    key="dl_ppt_tab5",
                 )
 
         st.markdown("---")
