@@ -3393,6 +3393,148 @@ with tab_qc:
                     styled_stats = rep_stats.style.apply(highlight_status, axis=1)
                     st.dataframe(styled_stats, height=400, use_container_width=True)
 
+            st.markdown("---")
+
+            # ==================== INDIVIDUAL WELL SELECTION ====================
+            st.subheader("📊 Individual Well Selection")
+            st.caption(
+                "Include or exclude individual CT values. Filter by gene to focus on specific targets. "
+                "Each well's selection is independent and persists when changing filters."
+            )
+
+            # Gene filter
+            filter_col1, filter_col2 = st.columns([1, 3])
+            with filter_col1:
+                available_genes = sorted(data["Target"].unique().tolist())
+                selected_gene_filter_qc = st.selectbox(
+                    "Filter by Gene",
+                    options=["All Genes"] + available_genes,
+                    key="qc_summary_gene_filter",
+                )
+
+            # Prepare data for display
+            wells_df = data[["Well", "Sample", "Target", "CT"]].copy()
+            wells_df = wells_df.sort_values(["Target", "Sample", "Well"])
+
+            # Apply gene filter if selected
+            if selected_gene_filter_qc != "All Genes":
+                wells_df = wells_df[wells_df["Target"] == selected_gene_filter_qc]
+
+            # Add Include column based on current exclusion state
+            wells_df["Include"] = ~wells_df["Well"].isin(
+                st.session_state.excluded_wells
+            )
+
+            # Reorder columns for display
+            wells_df = wells_df[["Include", "Well", "Sample", "Target", "CT"]]
+
+            st.markdown(
+                f"**Showing {len(wells_df)} wells** (Total excluded: {len(st.session_state.excluded_wells)})"
+            )
+
+            # Data editor for well selection
+            edited_wells_df = st.data_editor(
+                wells_df,
+                column_config={
+                    "Include": st.column_config.CheckboxColumn(
+                        "Include",
+                        help="Uncheck to exclude this well from analysis",
+                        default=True,
+                    ),
+                    "Well": st.column_config.TextColumn(
+                        "Well Position", disabled=True, width="small"
+                    ),
+                    "Sample": st.column_config.TextColumn("Sample", disabled=True),
+                    "Target": st.column_config.TextColumn(
+                        "Gene/Target", disabled=True, width="medium"
+                    ),
+                    "CT": st.column_config.NumberColumn(
+                        "CT Value", format="%.2f", disabled=True, width="small"
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=400,
+                key="qc_summary_well_editor",
+            )
+
+            # Process changes - update excluded_wells set
+            if edited_wells_df is not None:
+                for idx, row in edited_wells_df.iterrows():
+                    well = row["Well"]
+                    include = row["Include"]
+
+                    # If unchecked (not include) and not already excluded -> add to excluded set
+                    if not include and well not in st.session_state.excluded_wells:
+                        st.session_state.excluded_wells_history.append(
+                            st.session_state.excluded_wells.copy()
+                        )
+                        st.session_state.excluded_wells.add(well)
+                    # If checked (include) and currently excluded -> remove from excluded set
+                    elif include and well in st.session_state.excluded_wells:
+                        st.session_state.excluded_wells_history.append(
+                            st.session_state.excluded_wells.copy()
+                        )
+                        st.session_state.excluded_wells.discard(well)
+
+            # Batch action buttons
+            st.markdown("### Quick Actions")
+            action_cols = st.columns(4)
+
+            with action_cols[0]:
+                if st.button(
+                    "✅ Include All Visible",
+                    help="Include all wells currently shown in the table",
+                    use_container_width=True,
+                ):
+                    st.session_state.excluded_wells_history.append(
+                        st.session_state.excluded_wells.copy()
+                    )
+                    visible_wells = wells_df["Well"].tolist()
+                    for well in visible_wells:
+                        st.session_state.excluded_wells.discard(well)
+                    st.rerun()
+
+            with action_cols[1]:
+                if st.button(
+                    "❌ Exclude All Visible",
+                    help="Exclude all wells currently shown in the table",
+                    use_container_width=True,
+                ):
+                    st.session_state.excluded_wells_history.append(
+                        st.session_state.excluded_wells.copy()
+                    )
+                    visible_wells = wells_df["Well"].tolist()
+                    for well in visible_wells:
+                        st.session_state.excluded_wells.add(well)
+                    st.rerun()
+
+            with action_cols[2]:
+                if st.button(
+                    "🔄 Include All Wells",
+                    help="Clear all exclusions (reset to include everything)",
+                    use_container_width=True,
+                ):
+                    st.session_state.excluded_wells_history.append(
+                        st.session_state.excluded_wells.copy()
+                    )
+                    st.session_state.excluded_wells = set()
+                    st.rerun()
+
+            with action_cols[3]:
+                can_undo = len(st.session_state.excluded_wells_history) > 0
+                if st.button(
+                    "↩️ Undo",
+                    help="Undo last change to well exclusions",
+                    use_container_width=True,
+                    disabled=not can_undo,
+                ):
+                    if st.session_state.excluded_wells_history:
+                        st.session_state.excluded_wells = (
+                            st.session_state.excluded_wells_history.pop()
+                        )
+                        st.rerun()
+
         # ==================== TAB 3: FLAGGED WELLS (LEGACY VIEW) ====================
         with qc_tab3:
             st.subheader("Auto-Flagged Wells")
