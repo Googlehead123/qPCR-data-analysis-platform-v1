@@ -1006,6 +1006,110 @@ def is_cell_selected(session_state, gene: str, sample: str) -> bool:
     return selected[0] == gene and selected[1] == sample
 
 
+# ==================== QC GRID UI HELPERS ====================
+def build_grid_matrix(triplicate_data: pd.DataFrame) -> dict:
+    """Transform triplicate DataFrame into nested grid structure.
+
+    Converts raw triplicate-level qPCR data into a nested dictionary structure
+    suitable for grid rendering: {gene: {sample: cell_data}}.
+
+    Each cell contains aggregated statistics (mean_ct, cv, status, n) for a
+    gene-sample combination.
+
+    Args:
+        triplicate_data: DataFrame from QualityControl.get_triplicate_data()
+                        with columns: Sample, Target, n, Mean_CT, SD, CV_pct,
+                        Range, Status, Severity
+
+    Returns:
+        Nested dictionary: {gene: {sample: {"mean_ct": float, "cv": float,
+                                            "status": str, "n": int}}}
+                          Returns empty dict if input is empty.
+    """
+    if triplicate_data.empty:
+        return {}
+
+    matrix = {}
+
+    # Group by Target (gene) and Sample
+    for (gene, sample), group in triplicate_data.groupby(["Target", "Sample"]):
+        # Get the first row (all rows in group have same aggregated stats)
+        row = group.iloc[0]
+
+        # Extract cell data
+        cell_data = {
+            "mean_ct": float(row["Mean_CT"]),
+            "cv": float(row["CV_pct"]),
+            "status": str(row["Status"]),
+            "n": int(row["n"]),
+        }
+
+        # Build nested structure
+        if gene not in matrix:
+            matrix[gene] = {}
+
+        matrix[gene][sample] = cell_data
+
+    return matrix
+
+
+def get_cell_status_color(status: str) -> str:
+    """Map status string to CSS color code for cell styling.
+
+    Determines the background color for a grid cell based on its quality status:
+    - "OK" → green (#d4edda)
+    - Warnings ("High CV", "Low n", "High range" ≤ 2.0) → yellow (#fff3cd)
+    - Errors ("Has outlier", "High range" > 2.0) → red (#f8d7da)
+
+    Args:
+        status: Status string from get_health_status() (e.g., "OK",
+               "High CV (5.2%)", "Has outlier", "High range (1.5)")
+
+    Returns:
+        CSS color code as hex string (e.g., "#d4edda")
+    """
+    if status == "OK":
+        return "#d4edda"  # green
+    elif "Has outlier" in status:
+        return "#f8d7da"  # red - critical error
+    elif "High range" in status:
+        # Extract numeric value from "High range (X.X)"
+        try:
+            match = re.search(r"High range \(([0-9.]+)\)", status)
+            if match:
+                range_value = float(match.group(1))
+                if range_value > 2.0:
+                    return "#f8d7da"  # red - critical
+                else:
+                    return "#fff3cd"  # yellow - warning
+        except (ValueError, AttributeError):
+            pass
+        return "#fff3cd"  # default to yellow for High range
+    elif "High CV" in status or "Low n" in status:
+        return "#fff3cd"  # yellow - warning
+    else:
+        return ""  # no color for unknown status
+
+
+def get_cell_display_text(cell_data: dict) -> str:
+    """Format cell data into compact display string for grid rendering.
+
+    Creates a concise text representation of cell statistics suitable for
+    display in a grid cell. Format: "n=X, CV=Y.Z%"
+
+    Args:
+        cell_data: Dictionary with keys: mean_ct, cv, status, n
+                  (from build_grid_matrix output)
+
+    Returns:
+        Formatted string like "n=3, CV=2.1%"
+    """
+    n = cell_data.get("n", 0)
+    cv = cell_data.get("cv", 0.0)
+
+    return f"n={n}, CV={cv:.1f}%"
+
+
 # ==================== ANALYSIS ENGINE ====================
 class AnalysisEngine:
     @staticmethod
