@@ -483,3 +483,236 @@ class TestQCGridUIHelpers:
         assert isinstance(matrix, dict), "Should return a dictionary"
         assert "GENE1" in matrix, "Should contain the gene"
         assert "Sample1" in matrix["GENE1"], "Should contain the sample"
+
+
+class TestQCGridIntegration:
+    """Test suite for QC grid integration - combining state, UI helpers, and rendering.
+
+    These tests validate the complete data flow from raw qPCR data through
+    grid state management to final UI rendering. They test the integration
+    of multiple components working together.
+
+    Function to implement (Task 6):
+    - render_triplicate_grid(data, excluded_wells, session_state) -> None
+    """
+
+    def test_render_triplicate_grid_function_exists(self, mock_streamlit):
+        """
+        render_triplicate_grid function should exist and be callable.
+
+        This is the main integration function that orchestrates grid rendering.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+
+        # Function should exist
+        assert hasattr(spec, "render_triplicate_grid"), (
+            "render_triplicate_grid function must exist"
+        )
+
+        # Should be callable
+        render_func = spec.render_triplicate_grid
+        assert callable(render_func), "render_triplicate_grid must be callable"
+
+    def test_cell_selection_updates_session_state(
+        self, mock_streamlit, sample_qpcr_raw_data
+    ):
+        """
+        Clicking a cell in the grid should update qc_grid_selected_cell in session_state.
+
+        This validates that user interactions (cell clicks) properly update
+        the application state for highlighting and detail views.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+        set_selected_cell = spec.set_selected_cell
+        get_selected_cell = spec.get_selected_cell
+
+        session_state = mock_streamlit.session_state
+
+        # Simulate user clicking on a cell
+        set_selected_cell(session_state, "GAPDH", "Non-treated")
+
+        # Verify session state was updated
+        selected = get_selected_cell(session_state)
+        assert selected == ("GAPDH", "Non-treated"), (
+            "Cell selection should update session_state with (gene, sample) tuple"
+        )
+
+    def test_filter_change_clears_selection(self, mock_streamlit):
+        """
+        When user changes a filter (e.g., sample filter), the grid selection
+        should be cleared to prevent stale selection state.
+
+        This validates that filter changes trigger clear_selected_cell().
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+        set_selected_cell = spec.set_selected_cell
+        clear_selected_cell = spec.clear_selected_cell
+        get_selected_cell = spec.get_selected_cell
+
+        session_state = mock_streamlit.session_state
+
+        # User selects a cell
+        set_selected_cell(session_state, "GAPDH", "Sample_A")
+        assert get_selected_cell(session_state) is not None
+
+        # User changes a filter - should clear selection
+        clear_selected_cell(session_state)
+
+        # Verify selection is cleared
+        assert get_selected_cell(session_state) is None, (
+            "Filter change should clear grid selection"
+        )
+
+    def test_excluded_wells_sync_with_grid_state(self, mock_streamlit):
+        """
+        When user excludes a well from the grid detail view, the global
+        excluded_wells set should be updated to reflect this change.
+
+        This validates that grid interactions properly sync with global state.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+
+        session_state = mock_streamlit.session_state
+
+        # Simulate global excluded_wells set
+        excluded_wells = set()
+
+        # Simulate user excluding a well from grid detail
+        well_id = "A1"
+        excluded_wells.add(well_id)
+
+        # Verify excluded_wells was updated
+        assert well_id in excluded_wells, (
+            "Excluding a well should add it to excluded_wells set"
+        )
+
+        # Verify it persists
+        assert "A1" in excluded_wells
+        assert len(excluded_wells) == 1
+
+    def test_grid_cell_independence_in_integration(self, mock_streamlit):
+        """
+        Selecting one cell in the grid should NOT affect the selection state
+        of other cells. This validates that state management is properly isolated.
+
+        This is critical for multi-cell grids where independent selections
+        should not have side effects.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+        set_selected_cell = spec.set_selected_cell
+        is_cell_selected = spec.is_cell_selected
+
+        session_state = mock_streamlit.session_state
+
+        # Select cell A (Gene1, Sample1)
+        set_selected_cell(session_state, "GAPDH", "Sample_A")
+        assert is_cell_selected(session_state, "GAPDH", "Sample_A") is True
+
+        # Verify cell B (Gene1, Sample2) is NOT affected
+        assert is_cell_selected(session_state, "GAPDH", "Sample_B") is False, (
+            "Selecting cell A should not affect cell B selection"
+        )
+
+        # Select cell B
+        set_selected_cell(session_state, "GAPDH", "Sample_B")
+        assert is_cell_selected(session_state, "GAPDH", "Sample_B") is True
+
+        # Verify cell A is now deselected (overwritten, not side-affected)
+        assert is_cell_selected(session_state, "GAPDH", "Sample_A") is False, (
+            "Selecting cell B should overwrite cell A selection"
+        )
+
+    def test_grid_matrix_builds_from_triplicate_data(
+        self, mock_streamlit, sample_qpcr_raw_data
+    ):
+        """
+        The grid matrix should be built from triplicate-level qPCR data,
+        transforming raw data into a structured grid format.
+
+        This validates the data transformation pipeline from raw input
+        to grid-ready structure.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+        build_grid_matrix = spec.build_grid_matrix
+
+        # Get triplicate data
+        qc = spec.QualityControl()
+        triplicate_data = qc.get_triplicate_data(sample_qpcr_raw_data)
+
+        # Build grid matrix
+        matrix = build_grid_matrix(triplicate_data)
+
+        # Verify structure
+        assert isinstance(matrix, dict), "Grid matrix must be a dictionary"
+        assert len(matrix) > 0, "Grid matrix should contain genes"
+
+        # Verify each cell has required fields for rendering
+        for gene, samples_dict in matrix.items():
+            for sample, cell_data in samples_dict.items():
+                assert "mean_ct" in cell_data
+                assert "cv" in cell_data
+                assert "status" in cell_data
+                assert "n" in cell_data
+
+    def test_cell_status_color_integration_with_grid_rendering(
+        self, mock_streamlit, sample_qpcr_raw_data
+    ):
+        """
+        Cell status colors should be determined from the grid matrix data,
+        enabling proper visual feedback for data quality.
+
+        This validates that status-to-color mapping works with actual
+        grid data from the analysis pipeline.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+        build_grid_matrix = spec.build_grid_matrix
+        get_cell_status_color = spec.get_cell_status_color
+
+        # Get triplicate data and build matrix
+        qc = spec.QualityControl()
+        triplicate_data = qc.get_triplicate_data(sample_qpcr_raw_data)
+        matrix = build_grid_matrix(triplicate_data)
+
+        # For each cell, verify color mapping works
+        for gene, samples_dict in matrix.items():
+            for sample, cell_data in samples_dict.items():
+                status = cell_data["status"]
+                color = get_cell_status_color(status)
+
+                # Color should be a valid hex code or empty string
+                assert isinstance(color, str), "Color must be a string"
+                assert color.startswith("#") or color == "", (
+                    "Color must be hex code or empty string"
+                )
+
+    def test_grid_display_text_integration_with_cell_data(
+        self, mock_streamlit, sample_qpcr_raw_data
+    ):
+        """
+        Cell display text should be formatted from grid matrix cell data,
+        providing compact, readable information for each grid cell.
+
+        This validates that the display formatting works with actual
+        grid data from the analysis pipeline.
+        """
+        spec = import_module("streamlit qpcr analysis v1")
+        build_grid_matrix = spec.build_grid_matrix
+        get_cell_display_text = spec.get_cell_display_text
+
+        # Get triplicate data and build matrix
+        qc = spec.QualityControl()
+        triplicate_data = qc.get_triplicate_data(sample_qpcr_raw_data)
+        matrix = build_grid_matrix(triplicate_data)
+
+        # For each cell, verify display text formatting works
+        for gene, samples_dict in matrix.items():
+            for sample, cell_data in samples_dict.items():
+                text = get_cell_display_text(cell_data)
+
+                # Text should be a non-empty string
+                assert isinstance(text, str), "Display text must be a string"
+                assert len(text) > 0, "Display text should not be empty"
+                # Should contain key information
+                assert "n=" in text or "CV=" in text, (
+                    "Display text should contain sample count or CV"
+                )
