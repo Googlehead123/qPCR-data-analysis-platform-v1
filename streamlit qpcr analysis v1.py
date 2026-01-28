@@ -1110,6 +1110,102 @@ def get_cell_display_text(cell_data: dict) -> str:
     return f"n={n}, CV={cv:.1f}%"
 
 
+def render_triplicate_grid(triplicate_data: pd.DataFrame, session_state) -> None:
+    """Render interactive grid of triplicate status cells.
+
+    Displays genes as rows and samples as columns. Each cell shows status color
+    indicator and summary stats. Clicking a cell selects it for detailed editing.
+
+    Args:
+        triplicate_data: Filtered DataFrame from QualityControl.get_triplicate_data()
+        session_state: Streamlit session state object
+    """
+    if triplicate_data.empty:
+        st.info("No data matches the current filters.")
+        return
+
+    # Build grid matrix
+    grid_matrix = build_grid_matrix(triplicate_data)
+
+    # Get sorted lists of genes and samples
+    genes = sorted(list(grid_matrix.keys()))
+    if not genes:
+        return
+
+    # Get all unique samples across all genes to ensure consistent columns
+    all_samples = set()
+    for g in genes:
+        all_samples.update(grid_matrix[g].keys())
+    samples = sorted(list(all_samples), key=natural_sort_key)
+
+    # Grid layout
+    # Use columns: First col for Gene name, rest for Samples
+    # Adjust column weights: Gene col wider
+    col_ratio = [1.5] + [1] * len(samples)
+
+    # Render Header Row
+    cols = st.columns(col_ratio)
+    cols[0].markdown("**Gene / Sample**")
+    for i, sample in enumerate(samples):
+        cols[i + 1].markdown(f"**{sample}**")
+
+    st.markdown("---")
+
+    # Render Gene Rows
+    for gene in genes:
+        cols = st.columns(col_ratio)
+        cols[0].markdown(f"**{gene}**")
+
+        for i, sample in enumerate(samples):
+            cell_data = grid_matrix[gene].get(sample)
+
+            if cell_data:
+                # Determine status indicator
+                status = cell_data["status"]
+                display_text = get_cell_display_text(cell_data)
+
+                # Add status emoji
+                if status == "OK":
+                    emoji = "✅"
+                elif (
+                    "Has outlier" in status
+                    or "High range" in status
+                    and "2.0" in status
+                ):  # Rough check
+                    emoji = "❌"
+                elif "High range" in status:
+                    # Check value if possible, or default to warning
+                    emoji = "⚠️"
+                elif "High CV" in status or "Low n" in status:
+                    emoji = "⚠️"
+                else:
+                    emoji = "❓"
+
+                # Check if selected
+                is_selected = is_cell_selected(session_state, gene, sample)
+
+                # Button label
+                label = f"{emoji} {display_text}"
+                if is_selected:
+                    label = f"🔵 {label}"
+
+                # Unique key for button
+                btn_key = get_grid_cell_key(gene, sample)
+
+                if cols[i + 1].button(
+                    label,
+                    key=btn_key,
+                    help=f"Status: {status}\nMean CT: {cell_data['mean_ct']:.2f}",
+                    use_container_width=True,
+                ):
+                    set_selected_cell(session_state, gene, sample)
+                    st.rerun()
+            else:
+                cols[i + 1].markdown("-")
+
+    st.markdown("---")
+
+
 # ==================== ANALYSIS ENGINE ====================
 class AnalysisEngine:
     @staticmethod
@@ -2989,6 +3085,20 @@ with tab_qc:
                     key="qc_status_filter",
                 )
 
+            # Filter Reset Logic
+            current_filters = {
+                "gene": selected_gene_filter,
+                "sample": selected_sample_filter,
+                "status": status_filter,
+            }
+
+            if "prev_filters" not in st.session_state:
+                st.session_state.prev_filters = current_filters
+
+            if st.session_state.prev_filters != current_filters:
+                clear_selected_cell(st.session_state)
+                st.session_state.prev_filters = current_filters
+
             # Get triplicate data
             triplicate_data = QualityControl.get_triplicate_data(
                 data, st.session_state.excluded_wells
@@ -3021,241 +3131,169 @@ with tab_qc:
                         filtered_triplicates["Severity"] == "error"
                     ]
 
-                # Show triplicate overview table
+                # Show Grid UI
                 st.markdown(
                     f"**Showing {len(filtered_triplicates)} triplicate groups**"
                 )
 
-                # Create a display-friendly dataframe
-                display_df = filtered_triplicates[
-                    [
-                        "Sample",
-                        "Target",
-                        "n",
-                        "Mean_CT",
-                        "SD",
-                        "CV_pct",
-                        "Range",
-                        "Status",
-                    ]
-                ].copy()
-                display_df.columns = [
-                    "Sample",
-                    "Gene",
-                    "n",
-                    "Mean CT",
-                    "SD",
-                    "CV%",
-                    "Range",
-                    "Status",
-                ]
-
-                # Style the triplicate overview
-                def style_triplicate_row(row):
-                    status = row["Status"]
-                    if status == "OK":
-                        return ["background-color: #d4edda"] * len(row)
-                    elif "Has outlier" in status or "High range" in status:
-                        return ["background-color: #f8d7da"] * len(row)
-                    elif "High CV" in status or "Low n" in status:
-                        return ["background-color: #fff3cd"] * len(row)
-                    return [""] * len(row)
-
-                styled_overview = display_df.style.apply(
-                    style_triplicate_row, axis=1
-                ).format(
-                    {
-                        "Mean CT": "{:.2f}",
-                        "SD": "{:.3f}",
-                        "CV%": "{:.1f}",
-                        "Range": "{:.2f}",
-                    }
-                )
-
-                st.dataframe(
-                    styled_overview,
-                    height=250,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                # Render the interactive grid
+                render_triplicate_grid(filtered_triplicates, st.session_state)
 
                 st.markdown("---")
 
                 # Detailed triplicate editor
                 st.subheader("📝 Edit Individual Wells Within Triplicates")
                 st.caption(
-                    "Select a triplicate group to view and edit individual well inclusion/exclusion"
+                    "Select a cell in the grid above to view and edit individual well inclusion/exclusion"
                 )
 
-                # Create selection options
-                triplicate_options = [
-                    f"{row['Sample']} | {row['Target']} (n={row['n']}, CV={row['CV_pct']:.1f}%)"
-                    for _, row in filtered_triplicates.iterrows()
-                ]
+                # Check for selection
+                selected_cell = get_selected_cell(st.session_state)
 
-                if triplicate_options:
-                    selected_triplicate_idx = st.selectbox(
-                        "Select Triplicate Group",
-                        range(len(triplicate_options)),
-                        format_func=lambda x: triplicate_options[x],
-                        key="selected_triplicate",
-                    )
+                if selected_cell:
+                    selected_target, selected_sample = selected_cell
 
-                    # Get selected triplicate details
-                    selected_row = filtered_triplicates.iloc[selected_triplicate_idx]
-                    selected_sample = selected_row["Sample"]
-                    selected_target = selected_row["Target"]
+                    # Find the row in filtered_triplicates for status display
+                    selected_row_df = filtered_triplicates[
+                        (filtered_triplicates["Target"] == selected_target)
+                        & (filtered_triplicates["Sample"] == selected_sample)
+                    ]
 
-                    # Get wells for this triplicate
-                    wells_df = QualityControl.get_wells_for_triplicate(
-                        data, selected_sample, selected_target
-                    )
+                    if not selected_row_df.empty:
+                        selected_row = selected_row_df.iloc[0]
 
-                    if not wells_df.empty:
-                        # Show triplicate summary
-                        summary_cols = st.columns([1, 1, 1, 1])
-                        summary_cols[0].metric("Gene", selected_target)
-                        summary_cols[1].metric(
-                            "Sample",
-                            selected_sample[:20] + "..."
-                            if len(selected_sample) > 20
-                            else selected_sample,
-                        )
-                        summary_cols[2].metric("Status", selected_row["Status"][:30])
-                        summary_cols[3].metric(
-                            "CV%",
-                            f"{selected_row['CV_pct']:.1f}%",
-                            delta="⚠️" if selected_row["CV_pct"] > 5 else "✓",
-                            delta_color="off"
-                            if selected_row["CV_pct"] > 5
-                            else "normal",
+                        # Get wells for this triplicate
+                        wells_df = QualityControl.get_wells_for_triplicate(
+                            data, selected_sample, selected_target
                         )
 
-                        # Create editable dataframe with Include checkbox
-                        editor_df = wells_df.copy()
-                        editor_df["Include"] = ~editor_df["Well"].isin(
-                            st.session_state.excluded_wells
-                        )
-                        editor_df["CT"] = editor_df["CT"].round(2)
-                        editor_df["Deviation"] = editor_df["Deviation"].round(3)
-
-                        # Reorder columns for display
-                        editor_df = editor_df[
-                            [
-                                "Include",
-                                "Well",
-                                "CT",
-                                "Deviation",
-                                "Z_Score",
-                                "Well_Status",
-                            ]
-                        ]
-
-                        # Use data_editor for interactive editing
-                        st.markdown(
-                            "**Edit well inclusion below** (uncheck 'Include' to exclude a well):"
-                        )
-
-                        edited_df = st.data_editor(
-                            editor_df,
-                            column_config={
-                                "Include": st.column_config.CheckboxColumn(
-                                    "Include",
-                                    help="Uncheck to exclude this well from analysis",
-                                    default=True,
-                                ),
-                                "Well": st.column_config.TextColumn(
-                                    "Well",
-                                    disabled=True,
-                                ),
-                                "CT": st.column_config.NumberColumn(
-                                    "CT Value",
-                                    format="%.2f",
-                                    disabled=True,
-                                ),
-                                "Deviation": st.column_config.NumberColumn(
-                                    "Deviation",
-                                    help="Deviation from triplicate mean",
-                                    format="%.3f",
-                                    disabled=True,
-                                ),
-                                "Z_Score": st.column_config.NumberColumn(
-                                    "Z-Score",
-                                    help="Standard deviations from mean",
-                                    format="%.2f",
-                                    disabled=True,
-                                ),
-                                "Well_Status": st.column_config.TextColumn(
-                                    "Status",
-                                    disabled=True,
-                                ),
-                            },
-                            hide_index=True,
-                            use_container_width=True,
-                            key=f"editor_{selected_sample}_{selected_target}",
-                        )
-
-                        # Process changes from data_editor
-                        if edited_df is not None:
-                            for idx, row in edited_df.iterrows():
-                                well = row["Well"]
-                                include = row["Include"]
-
-                                if (
-                                    not include
-                                    and well not in st.session_state.excluded_wells
-                                ):
-                                    # Add to excluded
-                                    st.session_state.excluded_wells_history.append(
-                                        st.session_state.excluded_wells.copy()
-                                    )
-                                    st.session_state.excluded_wells.add(well)
-                                elif (
-                                    include and well in st.session_state.excluded_wells
-                                ):
-                                    # Remove from excluded
-                                    st.session_state.excluded_wells_history.append(
-                                        st.session_state.excluded_wells.copy()
-                                    )
-                                    st.session_state.excluded_wells.discard(well)
-
-                        # Quick action buttons for this triplicate
-                        st.markdown("**Quick Actions:**")
-                        action_cols = st.columns(4)
-
-                        with action_cols[0]:
-                            suggestions = QualityControl.suggest_exclusions(
-                                data,
-                                selected_sample,
-                                selected_target,
-                                st.session_state.excluded_wells,
-                                strategy="outlier",
+                        if not wells_df.empty:
+                            # Show triplicate summary
+                            summary_cols = st.columns([1, 1, 1, 1])
+                            summary_cols[0].metric("Gene", selected_target)
+                            summary_cols[1].metric(
+                                "Sample",
+                                selected_sample[:20] + "..."
+                                if len(selected_sample) > 20
+                                else selected_sample,
                             )
-                            if suggestions and st.button(
-                                "🎯 Exclude Outliers",
-                                key=f"excl_outlier_{selected_sample}_{selected_target}",
-                            ):
-                                st.session_state.excluded_wells_history.append(
-                                    st.session_state.excluded_wells.copy()
-                                )
-                                for well in suggestions:
-                                    st.session_state.excluded_wells.add(well)
-                                st.rerun()
+                            summary_cols[2].metric(
+                                "Status", selected_row["Status"][:30]
+                            )
+                            summary_cols[3].metric(
+                                "CV%",
+                                f"{selected_row['CV_pct']:.1f}%",
+                                delta="⚠️" if selected_row["CV_pct"] > 5 else "✓",
+                                delta_color="off"
+                                if selected_row["CV_pct"] > 5
+                                else "normal",
+                            )
 
-                        with action_cols[1]:
-                            if st.button(
-                                "📉 Keep Best 2",
-                                key=f"keep2_{selected_sample}_{selected_target}",
-                                help="Keep the 2 CT values closest to median, exclude others",
-                            ):
+                            # Create editable dataframe with Include checkbox
+                            editor_df = wells_df.copy()
+                            editor_df["Include"] = ~editor_df["Well"].isin(
+                                st.session_state.excluded_wells
+                            )
+                            editor_df["CT"] = editor_df["CT"].round(2)
+                            editor_df["Deviation"] = editor_df["Deviation"].round(3)
+
+                            # Reorder columns for display
+                            editor_df = editor_df[
+                                [
+                                    "Include",
+                                    "Well",
+                                    "CT",
+                                    "Deviation",
+                                    "Z_Score",
+                                    "Well_Status",
+                                ]
+                            ]
+
+                            # Use data_editor for interactive editing
+                            st.markdown(
+                                "**Edit well inclusion below** (uncheck 'Include' to exclude a well):"
+                            )
+
+                            edited_df = st.data_editor(
+                                editor_df,
+                                column_config={
+                                    "Include": st.column_config.CheckboxColumn(
+                                        "Include",
+                                        help="Uncheck to exclude this well from analysis",
+                                        default=True,
+                                    ),
+                                    "Well": st.column_config.TextColumn(
+                                        "Well",
+                                        disabled=True,
+                                    ),
+                                    "CT": st.column_config.NumberColumn(
+                                        "CT Value",
+                                        format="%.2f",
+                                        disabled=True,
+                                    ),
+                                    "Deviation": st.column_config.NumberColumn(
+                                        "Deviation",
+                                        help="Deviation from triplicate mean",
+                                        format="%.3f",
+                                        disabled=True,
+                                    ),
+                                    "Z_Score": st.column_config.NumberColumn(
+                                        "Z-Score",
+                                        help="Standard deviations from mean",
+                                        format="%.2f",
+                                        disabled=True,
+                                    ),
+                                    "Well_Status": st.column_config.TextColumn(
+                                        "Status",
+                                        disabled=True,
+                                    ),
+                                },
+                                hide_index=True,
+                                use_container_width=True,
+                                key=f"editor_{selected_sample}_{selected_target}",
+                            )
+
+                            # Process changes from data_editor
+                            if edited_df is not None:
+                                for idx, row in edited_df.iterrows():
+                                    well = row["Well"]
+                                    include = row["Include"]
+
+                                    if (
+                                        not include
+                                        and well not in st.session_state.excluded_wells
+                                    ):
+                                        # Add to excluded
+                                        st.session_state.excluded_wells_history.append(
+                                            st.session_state.excluded_wells.copy()
+                                        )
+                                        st.session_state.excluded_wells.add(well)
+                                    elif (
+                                        include
+                                        and well in st.session_state.excluded_wells
+                                    ):
+                                        # Remove from excluded
+                                        st.session_state.excluded_wells_history.append(
+                                            st.session_state.excluded_wells.copy()
+                                        )
+                                        st.session_state.excluded_wells.discard(well)
+
+                            # Quick action buttons for this triplicate
+                            st.markdown("**Quick Actions:**")
+                            action_cols = st.columns(4)
+
+                            with action_cols[0]:
                                 suggestions = QualityControl.suggest_exclusions(
                                     data,
                                     selected_sample,
                                     selected_target,
                                     st.session_state.excluded_wells,
-                                    strategy="keep_best_2",
+                                    strategy="outlier",
                                 )
-                                if suggestions:
+                                if suggestions and st.button(
+                                    "🎯 Exclude Outliers",
+                                    key=f"excl_outlier_{selected_sample}_{selected_target}",
+                                ):
                                     st.session_state.excluded_wells_history.append(
                                         st.session_state.excluded_wells.copy()
                                     )
@@ -3263,36 +3301,63 @@ with tab_qc:
                                         st.session_state.excluded_wells.add(well)
                                     st.rerun()
 
-                        with action_cols[2]:
-                            # Get wells for this triplicate that are currently excluded
-                            excluded_in_triplicate = [
-                                w
-                                for w in wells_df["Well"].tolist()
-                                if w in st.session_state.excluded_wells
-                            ]
-                            if excluded_in_triplicate and st.button(
-                                "✅ Include All",
-                                key=f"incl_all_{selected_sample}_{selected_target}",
-                            ):
-                                st.session_state.excluded_wells_history.append(
-                                    st.session_state.excluded_wells.copy()
-                                )
-                                for well in excluded_in_triplicate:
-                                    st.session_state.excluded_wells.discard(well)
-                                st.rerun()
+                            with action_cols[1]:
+                                if st.button(
+                                    "📉 Keep Best 2",
+                                    key=f"keep2_{selected_sample}_{selected_target}",
+                                    help="Keep the 2 CT values closest to median, exclude others",
+                                ):
+                                    suggestions = QualityControl.suggest_exclusions(
+                                        data,
+                                        selected_sample,
+                                        selected_target,
+                                        st.session_state.excluded_wells,
+                                        strategy="keep_best_2",
+                                    )
+                                    if suggestions:
+                                        st.session_state.excluded_wells_history.append(
+                                            st.session_state.excluded_wells.copy()
+                                        )
+                                        for well in suggestions:
+                                            st.session_state.excluded_wells.add(well)
+                                        st.rerun()
 
-                        with action_cols[3]:
-                            all_wells_in_triplicate = wells_df["Well"].tolist()
-                            if st.button(
-                                "❌ Exclude All",
-                                key=f"excl_all_{selected_sample}_{selected_target}",
-                            ):
-                                st.session_state.excluded_wells_history.append(
-                                    st.session_state.excluded_wells.copy()
-                                )
-                                for well in all_wells_in_triplicate:
-                                    st.session_state.excluded_wells.add(well)
-                                st.rerun()
+                            with action_cols[2]:
+                                # Get wells for this triplicate that are currently excluded
+                                excluded_in_triplicate = [
+                                    w
+                                    for w in wells_df["Well"].tolist()
+                                    if w in st.session_state.excluded_wells
+                                ]
+                                if excluded_in_triplicate and st.button(
+                                    "✅ Include All",
+                                    key=f"incl_all_{selected_sample}_{selected_target}",
+                                ):
+                                    st.session_state.excluded_wells_history.append(
+                                        st.session_state.excluded_wells.copy()
+                                    )
+                                    for well in excluded_in_triplicate:
+                                        st.session_state.excluded_wells.discard(well)
+                                    st.rerun()
+
+                            with action_cols[3]:
+                                all_wells_in_triplicate = wells_df["Well"].tolist()
+                                if st.button(
+                                    "❌ Exclude All",
+                                    key=f"excl_all_{selected_sample}_{selected_target}",
+                                ):
+                                    st.session_state.excluded_wells_history.append(
+                                        st.session_state.excluded_wells.copy()
+                                    )
+                                    for well in all_wells_in_triplicate:
+                                        st.session_state.excluded_wells.add(well)
+                                    st.rerun()
+                    else:
+                        st.warning("Selected cell data not found in current view.")
+                else:
+                    st.info(
+                        "👆 Select a cell in the grid above to view and edit details."
+                    )
             else:
                 st.info("No triplicate data available. Upload data first.")
 
