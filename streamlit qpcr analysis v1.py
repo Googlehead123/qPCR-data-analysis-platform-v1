@@ -2144,9 +2144,8 @@ class ReportGenerator:
     ) -> bytes:
         try:
             from pptx import Presentation
-            from pptx.util import Inches, Pt
+            from pptx.util import Inches, Emu
             from pptx.dml.color import RGBColor
-            from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
         except ImportError:
             raise ImportError(
                 "python-pptx is required. Install with: pip install python-pptx"
@@ -2158,29 +2157,33 @@ class ReportGenerator:
 
         blank_layout = prs.slide_layouts[6]
 
-        if include_title_slide:
-            ReportGenerator._add_title_slide(prs, analysis_params)
+        # Simple export: one graph per slide, centered on blank white background
+        for gene, fig in graphs.items():
+            slide = prs.slides.add_slide(blank_layout)
 
-        if layout == "one_per_slide":
-            for gene, fig in graphs.items():
-                gene_data = processed_data.get(gene)
-                ReportGenerator._add_gene_slide(
-                    prs, blank_layout, gene, fig, gene_data, method_text
-                )
-        elif layout == "two_per_slide":
-            gene_list = list(graphs.items())
-            for i in range(0, len(gene_list), 2):
-                pair = gene_list[i : i + 2]
-                ReportGenerator._add_dual_gene_slide(
-                    prs, blank_layout, pair, processed_data
-                )
-        elif layout == "grid":
-            ReportGenerator._add_grid_slide(prs, blank_layout, graphs)
+            # White background
+            bg = slide.background
+            fill = bg.fill
+            fill.solid()
+            fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
-        if include_summary:
-            ReportGenerator._add_summary_slide(
-                prs, blank_layout, processed_data, analysis_params
+            # Render graph to image
+            fig_copy = go.Figure(fig)
+            fig_copy.update_layout(
+                width=1100,
+                height=600,
+                margin=dict(l=80, r=80, t=60, b=80),
+                font=dict(size=14),
             )
+            img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
+            img_stream = io.BytesIO(img_bytes)
+
+            # Center the image on the slide
+            img_width = Inches(10.0)
+            img_height = Inches(5.5)
+            left = int((prs.slide_width - img_width) / 2)
+            top = int((prs.slide_height - img_height) / 2)
+            slide.shapes.add_picture(img_stream, left, top, width=img_width, height=img_height)
 
         output = io.BytesIO()
         prs.save(output)
@@ -2741,6 +2744,7 @@ class PPTGenerator:
         try:
             from pptx import Presentation
             from pptx.util import Inches
+            from pptx.dml.color import RGBColor
         except ImportError:
             st.error("python-pptx not installed")
             return None
@@ -2749,11 +2753,30 @@ class PPTGenerator:
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
 
-        PPTGenerator.create_title_slide(prs, analysis_params)
-
+        # Simple export: one graph centered on blank white slide
         for gene, fig in graphs.items():
-            gene_data = processed_data.get(gene)
-            PPTGenerator.create_gene_slide(prs, gene, fig, gene_data, analysis_params)
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+            bg = slide.background
+            fill = bg.fill
+            fill.solid()
+            fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+            fig_copy = go.Figure(fig)
+            fig_copy.update_layout(
+                width=1100,
+                height=600,
+                margin=dict(l=80, r=80, t=60, b=80),
+                font=dict(size=14),
+            )
+            img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
+            img_stream = io.BytesIO(img_bytes)
+
+            img_width = Inches(10.0)
+            img_height = Inches(5.5)
+            left = int((prs.slide_width - img_width) / 2)
+            top = int((prs.slide_height - img_height) / 2)
+            slide.shapes.add_picture(img_stream, left, top, width=img_width, height=img_height)
 
         output = io.BytesIO()
         prs.save(output)
@@ -3106,350 +3129,145 @@ with tab_qc:
             ]
         )
 
-        # ==================== TAB 1: TRIPLICATE CT VALUE BROWSER ====================
+        # ==================== TAB 1: WELL SELECTION BROWSER ====================
         with qc_tab1:
-            st.subheader("Browse & Edit CT Values by Triplicate")
+            st.subheader("Per-Well Selection Browser")
             st.caption(
-                "Scan through all CT values organized by Gene and Sample. Select individual wells to include or exclude from analysis."
+                "Select or exclude individual wells for every gene-sample combination independently. "
+                "Each triplicate group is shown with its wells so you can toggle inclusion directly."
             )
 
             # Filter controls
-            filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1])
+            filter_col1, filter_col2 = st.columns([1, 1])
 
             all_genes = sorted(data["Target"].unique())
             all_samples = sorted(data["Sample"].unique(), key=natural_sort_key)
 
             with filter_col1:
                 selected_gene_filter = st.selectbox(
-                    "🧬 Filter by Gene", ["All Genes"] + all_genes, key="qc_gene_filter"
+                    "Filter by Gene", ["All Genes"] + all_genes, key="qc_gene_filter"
                 )
 
             with filter_col2:
                 selected_sample_filter = st.selectbox(
-                    "🧪 Filter by Sample",
+                    "Filter by Sample",
                     ["All Samples"] + all_samples,
                     key="qc_sample_filter",
                 )
 
-            with filter_col3:
-                status_filter = st.selectbox(
-                    "🏷️ Filter by Status",
-                    ["All", "OK Only", "Warnings Only", "Errors Only"],
-                    key="qc_status_filter",
+            # Build a combined dataframe of all wells with gene-sample context
+            wells_all = data[["Well", "Sample", "Target", "CT"]].copy()
+            wells_all = wells_all.sort_values(["Target", "Sample", "Well"])
+
+            # Apply filters
+            if selected_gene_filter != "All Genes":
+                wells_all = wells_all[wells_all["Target"] == selected_gene_filter]
+            if selected_sample_filter != "All Samples":
+                wells_all = wells_all[wells_all["Sample"] == selected_sample_filter]
+
+            if wells_all.empty:
+                st.info("No wells match the current filters.")
+            else:
+                # Get genes to display
+                display_genes = sorted(wells_all["Target"].unique())
+
+                # Count excluded
+                total_excluded = sum(
+                    len(ws) for ws in st.session_state.excluded_wells.values()
                 )
-
-            # Filter Reset Logic
-            current_filters = {
-                "gene": selected_gene_filter,
-                "sample": selected_sample_filter,
-                "status": status_filter,
-            }
-
-            if "prev_filters" not in st.session_state:
-                st.session_state.prev_filters = current_filters
-
-            if st.session_state.prev_filters != current_filters:
-                clear_selected_cell(st.session_state)
-                st.session_state.prev_filters = current_filters
-
-            # Get triplicate data
-            # Use helper to get all excluded wells
-            triplicate_data = QualityControl.get_triplicate_data(
-                data, get_all_excluded_wells()
-            )
-
-            if not triplicate_data.empty:
-                # Apply filters
-                filtered_triplicates = triplicate_data.copy()
-
-                if selected_gene_filter != "All Genes":
-                    filtered_triplicates = filtered_triplicates[
-                        filtered_triplicates["Target"] == selected_gene_filter
-                    ]
-
-                if selected_sample_filter != "All Samples":
-                    filtered_triplicates = filtered_triplicates[
-                        filtered_triplicates["Sample"] == selected_sample_filter
-                    ]
-
-                if status_filter == "OK Only":
-                    filtered_triplicates = filtered_triplicates[
-                        filtered_triplicates["Status"] == "OK"
-                    ]
-                elif status_filter == "Warnings Only":
-                    filtered_triplicates = filtered_triplicates[
-                        filtered_triplicates["Severity"] == "warning"
-                    ]
-                elif status_filter == "Errors Only":
-                    filtered_triplicates = filtered_triplicates[
-                        filtered_triplicates["Severity"] == "error"
-                    ]
-
-                # Show Grid UI
                 st.markdown(
-                    f"**Showing {len(filtered_triplicates)} triplicate groups**"
+                    f"**{len(wells_all)} wells across {len(display_genes)} genes** | "
+                    f"Excluded: {total_excluded}"
                 )
 
-                # Render the interactive grid
-                render_triplicate_grid(filtered_triplicates, st.session_state)
+                # Global quick actions
+                action_cols = st.columns(3)
+                with action_cols[0]:
+                    if st.button("Include All Visible", key="qc_incl_all_visible", use_container_width=True):
+                        st.session_state.excluded_wells_history.append(
+                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                        )
+                        for _, r in wells_all.iterrows():
+                            include_well(r["Well"], r["Target"], r["Sample"])
+                        st.rerun()
+                with action_cols[1]:
+                    if st.button("Exclude All Visible", key="qc_excl_all_visible", use_container_width=True):
+                        st.session_state.excluded_wells_history.append(
+                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                        )
+                        for _, r in wells_all.iterrows():
+                            exclude_well(r["Well"], r["Target"], r["Sample"])
+                        st.rerun()
+                with action_cols[2]:
+                    can_undo = len(st.session_state.excluded_wells_history) > 0
+                    if st.button("Undo Last Change", key="qc_undo_browser", use_container_width=True, disabled=not can_undo):
+                        if st.session_state.excluded_wells_history:
+                            st.session_state.excluded_wells = st.session_state.excluded_wells_history.pop()
+                            st.rerun()
 
                 st.markdown("---")
 
-                # Detailed triplicate editor
-                st.subheader("📝 Edit Individual Wells Within Triplicates")
-                st.caption(
-                    "Select a cell in the grid above to view and edit individual well inclusion/exclusion"
-                )
+                # Render per-gene expandable sections
+                for gene in display_genes:
+                    gene_wells = wells_all[wells_all["Target"] == gene]
+                    gene_samples = sorted(gene_wells["Sample"].unique(), key=natural_sort_key)
 
-                # Check for selection
-                selected_cell = get_selected_cell(st.session_state)
+                    # Count excluded for this gene
+                    gene_excluded = sum(
+                        1 for _, r in gene_wells.iterrows()
+                        if is_well_excluded(r["Well"], gene, r["Sample"])
+                    )
+                    gene_label = f"{gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)" if gene_excluded > 0 else f"{gene}  ({len(gene_wells)} wells)"
 
-                if selected_cell:
-                    selected_target, selected_sample = selected_cell
+                    with st.expander(gene_label, expanded=(selected_gene_filter != "All Genes")):
+                        # Build editable dataframe for this gene
+                        gene_editor_df = gene_wells.copy()
+                        gene_editor_df["Include"] = gene_editor_df.apply(
+                            lambda r: not is_well_excluded(r["Well"], gene, r["Sample"]),
+                            axis=1,
+                        )
+                        # Compute triplicate mean and deviation per sample
+                        sample_means = gene_wells.groupby("Sample")["CT"].transform("mean")
+                        gene_editor_df["Deviation"] = (gene_editor_df["CT"] - sample_means).round(3)
+                        gene_editor_df["CT"] = gene_editor_df["CT"].round(2)
 
-                    # Find the row in filtered_triplicates for status display
-                    selected_row_df = filtered_triplicates[
-                        (filtered_triplicates["Target"] == selected_target)
-                        & (filtered_triplicates["Sample"] == selected_sample)
-                    ]
+                        # Reorder
+                        gene_editor_df = gene_editor_df[["Include", "Well", "Sample", "CT", "Deviation"]]
 
-                    if not selected_row_df.empty:
-                        selected_row = selected_row_df.iloc[0]
-
-                        # Get wells for this triplicate
-                        wells_df = QualityControl.get_wells_for_triplicate(
-                            data, selected_sample, selected_target
+                        edited_gene_df = st.data_editor(
+                            gene_editor_df,
+                            column_config={
+                                "Include": st.column_config.CheckboxColumn(
+                                    "Include",
+                                    help="Uncheck to exclude this well",
+                                    default=True,
+                                ),
+                                "Well": st.column_config.TextColumn("Well", disabled=True, width="small"),
+                                "Sample": st.column_config.TextColumn("Sample", disabled=True),
+                                "CT": st.column_config.NumberColumn("CT", format="%.2f", disabled=True, width="small"),
+                                "Deviation": st.column_config.NumberColumn("Dev", format="%.3f", disabled=True, width="small"),
+                            },
+                            hide_index=True,
+                            use_container_width=True,
+                            key=f"well_editor_{gene}",
                         )
 
-                        if not wells_df.empty:
-                            # Show triplicate summary
-                            summary_cols = st.columns([1, 1, 1, 1])
-                            summary_cols[0].metric("Gene", selected_target)
-                            summary_cols[1].metric(
-                                "Sample",
-                                selected_sample[:20] + "..."
-                                if len(selected_sample) > 20
-                                else selected_sample,
-                            )
-                            summary_cols[2].metric(
-                                "Status", selected_row["Status"][:30]
-                            )
-                            summary_cols[3].metric(
-                                "CV%",
-                                f"{selected_row['CV_pct']:.1f}%",
-                                delta="⚠️" if selected_row["CV_pct"] > 5 else "✓",
-                                delta_color="off"
-                                if selected_row["CV_pct"] > 5
-                                else "normal",
-                            )
-
-                            # Create editable dataframe with Include checkbox
-                            editor_df = wells_df.copy()
-                            editor_df["Include"] = editor_df["Well"].apply(
-                                lambda w: not is_well_excluded(
-                                    w, selected_target, selected_sample
-                                )
-                            )
-                            editor_df["CT"] = editor_df["CT"].round(2)
-                            editor_df["Deviation"] = editor_df["Deviation"].round(3)
-
-                            # Reorder columns for display
-                            editor_df = editor_df[
-                                [
-                                    "Include",
-                                    "Well",
-                                    "CT",
-                                    "Deviation",
-                                    "Z_Score",
-                                    "Well_Status",
-                                ]
-                            ]
-
-                            # Use data_editor for interactive editing
-                            st.markdown(
-                                "**Edit well inclusion below** (uncheck 'Include' to exclude a well):"
-                            )
-
-                            edited_df = st.data_editor(
-                                editor_df,
-                                column_config={
-                                    "Include": st.column_config.CheckboxColumn(
-                                        "Include",
-                                        help="Uncheck to exclude this well from analysis",
-                                        default=True,
-                                    ),
-                                    "Well": st.column_config.TextColumn(
-                                        "Well",
-                                        disabled=True,
-                                    ),
-                                    "CT": st.column_config.NumberColumn(
-                                        "CT Value",
-                                        format="%.2f",
-                                        disabled=True,
-                                    ),
-                                    "Deviation": st.column_config.NumberColumn(
-                                        "Deviation",
-                                        help="Deviation from triplicate mean",
-                                        format="%.3f",
-                                        disabled=True,
-                                    ),
-                                    "Z_Score": st.column_config.NumberColumn(
-                                        "Z-Score",
-                                        help="Standard deviations from mean",
-                                        format="%.2f",
-                                        disabled=True,
-                                    ),
-                                    "Well_Status": st.column_config.TextColumn(
-                                        "Status",
-                                        disabled=True,
-                                    ),
-                                },
-                                hide_index=True,
-                                use_container_width=True,
-                                key=f"editor_{selected_sample}_{selected_target}",
-                            )
-
-                            # Process changes from data_editor
-                            if edited_df is not None:
-                                for idx, row in edited_df.iterrows():
-                                    well = row["Well"]
-                                    include = row["Include"]
-
-                                    if not include and not is_well_excluded(
-                                        well, selected_target, selected_sample
-                                    ):
-                                        # Add to excluded
-                                        st.session_state.excluded_wells_history.append(
-                                            {
-                                                k: v.copy()
-                                                for k, v in st.session_state.excluded_wells.items()
-                                            }
-                                        )
-                                        exclude_well(
-                                            well, selected_target, selected_sample
-                                        )
-                                    elif include and is_well_excluded(
-                                        well, selected_target, selected_sample
-                                    ):
-                                        # Remove from excluded
-                                        st.session_state.excluded_wells_history.append(
-                                            {
-                                                k: v.copy()
-                                                for k, v in st.session_state.excluded_wells.items()
-                                            }
-                                        )
-                                        include_well(
-                                            well, selected_target, selected_sample
-                                        )
-
-                            # Quick action buttons for this triplicate
-                            st.markdown("**Quick Actions:**")
-                            action_cols = st.columns(4)
-
-                            with action_cols[0]:
-                                suggestions = QualityControl.suggest_exclusions(
-                                    data,
-                                    selected_sample,
-                                    selected_target,
-                                    get_excluded_wells_for_analysis(
-                                        selected_target, selected_sample
-                                    ),
-                                    strategy="outlier",
-                                )
-                                if suggestions and st.button(
-                                    "🎯 Exclude Outliers",
-                                    key=f"excl_outlier_{selected_sample}_{selected_target}",
-                                ):
+                        # Process changes
+                        if edited_gene_df is not None:
+                            for idx, row in edited_gene_df.iterrows():
+                                well = row["Well"]
+                                sample = row["Sample"]
+                                include = row["Include"]
+                                if not include and not is_well_excluded(well, gene, sample):
                                     st.session_state.excluded_wells_history.append(
-                                        {
-                                            k: v.copy()
-                                            for k, v in st.session_state.excluded_wells.items()
-                                        }
+                                        {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                                     )
-                                    for well in suggestions:
-                                        exclude_well(
-                                            well, selected_target, selected_sample
-                                        )
-                                    st.rerun()
-
-                            with action_cols[1]:
-                                if st.button(
-                                    "📉 Keep Best 2",
-                                    key=f"keep2_{selected_sample}_{selected_target}",
-                                    help="Keep the 2 CT values closest to median, exclude others",
-                                ):
-                                    suggestions = QualityControl.suggest_exclusions(
-                                        data,
-                                        selected_sample,
-                                        selected_target,
-                                        get_excluded_wells_for_analysis(
-                                            selected_target, selected_sample
-                                        ),
-                                        strategy="keep_best_2",
-                                    )
-                                    if suggestions:
-                                        st.session_state.excluded_wells_history.append(
-                                            {
-                                                k: v.copy()
-                                                for k, v in st.session_state.excluded_wells.items()
-                                            }
-                                        )
-                                        for well in suggestions:
-                                            exclude_well(
-                                                well, selected_target, selected_sample
-                                            )
-                                        st.rerun()
-
-                            with action_cols[2]:
-                                # Get wells for this triplicate that are currently excluded
-                                excluded_in_triplicate = [
-                                    w
-                                    for w in wells_df["Well"].tolist()
-                                    if is_well_excluded(
-                                        w, selected_target, selected_sample
-                                    )
-                                ]
-                                if excluded_in_triplicate and st.button(
-                                    "✅ Include All",
-                                    key=f"incl_all_{selected_sample}_{selected_target}",
-                                ):
+                                    exclude_well(well, gene, sample)
+                                elif include and is_well_excluded(well, gene, sample):
                                     st.session_state.excluded_wells_history.append(
-                                        {
-                                            k: v.copy()
-                                            for k, v in st.session_state.excluded_wells.items()
-                                        }
+                                        {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                                     )
-                                    for well in excluded_in_triplicate:
-                                        include_well(
-                                            well, selected_target, selected_sample
-                                        )
-                                    st.rerun()
-
-                            with action_cols[3]:
-                                all_wells_in_triplicate = wells_df["Well"].tolist()
-                                if st.button(
-                                    "❌ Exclude All",
-                                    key=f"excl_all_{selected_sample}_{selected_target}",
-                                ):
-                                    st.session_state.excluded_wells_history.append(
-                                        {
-                                            k: v.copy()
-                                            for k, v in st.session_state.excluded_wells.items()
-                                        }
-                                    )
-                                    for well in all_wells_in_triplicate:
-                                        exclude_well(
-                                            well, selected_target, selected_sample
-                                        )
-                                    st.rerun()
-                    else:
-                        st.warning("Selected cell data not found in current view.")
-                else:
-                    st.info(
-                        "👆 Select a cell in the grid above to view and edit details."
-                    )
-            else:
-                st.info("No triplicate data available. Upload data first.")
+                                    include_well(well, gene, sample)
 
         # ==================== TAB 2: PLATE HEATMAP ====================
         with qc_tab2:
@@ -5431,148 +5249,19 @@ with tab6:
     )
 
     if st.session_state.graphs and st.session_state.processed_data and pptx_available:
-        st.subheader("🎨 Presentation Settings")
-
-        col_layout, col_options = st.columns(2)
-
-        with col_layout:
-            st.markdown("#### Slide Layout")
-            layout_option = st.radio(
-                "Choose how to arrange graphs:",
-                ["one_per_slide", "two_per_slide", "grid"],
-                format_func=lambda x: {
-                    "one_per_slide": "📊 One graph per slide (best for presentations)",
-                    "two_per_slide": "📊📊 Two graphs per slide (compact)",
-                    "grid": "📋 All graphs on one slide (overview)",
-                }[x],
-                key="ppt_layout",
-            )
-
-            st.markdown("#### Slide Content")
-            include_title = st.checkbox(
-                "Include title slide", value=True, key="ppt_title"
-            )
-            include_summary = st.checkbox(
-                "Include summary slide", value=True, key="ppt_summary"
-            )
-
-            st.markdown("#### Method/Experiment Info")
-            default_method = (
-                f"{st.session_state.get('selected_efficacy', '')} Efficacy Study"
-            )
-            method_text = st.text_area(
-                "Enter method/experiment information (appears on all gene slides):",
-                value=st.session_state.get("ppt_method_text", default_method),
-                height=80,
-                key="ppt_method_text_input",
-                help="This text will appear at the top of each gene slide",
-            )
-            st.session_state.ppt_method_text = method_text
-
-        with col_options:
-            st.markdown("#### Preview")
-
-            n_genes = len(st.session_state.graphs)
-
-            if layout_option == "one_per_slide":
-                n_slides = (
-                    n_genes
-                    + (1 if include_title else 0)
-                    + (1 if include_summary else 0)
-                )
-                st.info(
-                    f"📄 **{n_slides} slides** will be generated:\n"
-                    f"- {'1 title slide' if include_title else ''}\n"
-                    f"- {n_genes} gene slides\n"
-                    f"- {'1 summary slide' if include_summary else ''}"
-                )
-            elif layout_option == "two_per_slide":
-                gene_slides = (n_genes + 1) // 2
-                n_slides = (
-                    gene_slides
-                    + (1 if include_title else 0)
-                    + (1 if include_summary else 0)
-                )
-                st.info(
-                    f"📄 **{n_slides} slides** will be generated:\n"
-                    f"- {'1 title slide' if include_title else ''}\n"
-                    f"- {gene_slides} gene slides (2 per slide)\n"
-                    f"- {'1 summary slide' if include_summary else ''}"
-                )
-            else:
-                n_slides = (
-                    1 + (1 if include_title else 0) + (1 if include_summary else 0)
-                )
-                st.info(
-                    f"📄 **{n_slides} slides** will be generated:\n"
-                    f"- {'1 title slide' if include_title else ''}\n"
-                    f"- 1 overview slide (all genes)\n"
-                    f"- {'1 summary slide' if include_summary else ''}"
-                )
-
-            st.markdown("#### Genes to Include")
-            gene_list = list(st.session_state.graphs.keys())
-            st.write(", ".join([f"**{g}**" for g in gene_list]))
+        n_genes = len(st.session_state.graphs)
+        gene_list = list(st.session_state.graphs.keys())
+        st.info(
+            f"**{n_genes} slides** will be generated (one graph per blank white slide): "
+            + ", ".join([f"**{g}**" for g in gene_list])
+        )
 
         st.markdown("---")
-
-        st.subheader("📥 Generate & Download")
-
-        gen_col1, gen_col2, gen_col3 = st.columns([2, 1, 1])
-
-        with gen_col1:
-            if st.button(
-                "🚀 Generate PowerPoint Presentation",
-                type="primary",
-                use_container_width=True,
-            ):
-                try:
-                    with st.spinner("Generating presentation..."):
-                        analysis_params = {
-                            "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "Efficacy_Type": st.session_state.get(
-                                "selected_efficacy", "qPCR Analysis"
-                            ),
-                            "Housekeeping_Gene": st.session_state.get("hk_gene", "N/A"),
-                            "Reference_Sample": st.session_state.get(
-                                "analysis_ref_condition", "N/A"
-                            ),
-                            "Compare_To": st.session_state.get(
-                                "analysis_cmp_condition", "N/A"
-                            ),
-                            "Genes_Analyzed": len(st.session_state.processed_data),
-                        }
-
-                        ppt_bytes = ReportGenerator.create_presentation(
-                            graphs=st.session_state.graphs,
-                            processed_data=st.session_state.processed_data,
-                            analysis_params=analysis_params,
-                            layout=layout_option,
-                            include_title_slide=include_title,
-                            include_summary=include_summary,
-                            method_text=st.session_state.get("ppt_method_text", ""),
-                        )
-
-                        st.session_state["ppt_bytes"] = ppt_bytes
-                        st.success("✅ Presentation generated successfully!")
-
-                except ImportError as e:
-                    st.error(f"❌ Import error: {str(e)}")
-                    st.info(
-                        "💡 If on Streamlit Cloud, try rebooting the app to reinstall dependencies."
-                    )
-                except Exception as e:
-                    st.error(f"❌ Error generating presentation: {str(e)}")
-
-        # One-click Generate & Download option
-        st.markdown("---")
-        st.markdown("##### ⚡ Quick Export (One-Click)")
 
         if st.button(
-            "🚀 Generate & Download (One-Click)",
-            key="one_click_ppt",
+            "Generate PowerPoint",
+            type="primary",
             use_container_width=True,
-            help="Generate and immediately show download button",
         ):
             try:
                 with st.spinner("Generating presentation..."):
@@ -5595,23 +5284,16 @@ with tab6:
                         graphs=st.session_state.graphs,
                         processed_data=st.session_state.processed_data,
                         analysis_params=analysis_params,
-                        layout=layout_option,
-                        include_title_slide=include_title,
-                        include_summary=include_summary,
-                        method_text=st.session_state.get("ppt_method_text", ""),
                     )
 
                     st.session_state["ppt_bytes"] = ppt_bytes
                     st.session_state["ppt_ready_for_download"] = True
-                    st.success("✅ Ready! Click download below.")
+                    st.success("Presentation generated.")
                     st.rerun()
             except ImportError as e:
-                st.error(f"❌ Import error: {str(e)}")
-                st.info(
-                    "💡 If on Streamlit Cloud, try rebooting the app to reinstall dependencies."
-                )
+                st.error(f"Import error: {str(e)}")
             except Exception as e:
-                st.error(f"❌ Error generating presentation: {str(e)}")
+                st.error(f"Error generating presentation: {str(e)}")
 
         # Show download button if ready from one-click
         if st.session_state.get("ppt_ready_for_download"):
