@@ -4555,7 +4555,8 @@ with tab4:
 
         with toolbar_cols[4]:
             edit_mode = st.checkbox(
-                "🎨 Edit Bar Colors", key=f"edit_mode_{current_gene}"
+                "🎨 Edit Bar Colors", key=f"edit_mode_{current_gene}",
+                help="Check this to customize colors for individual bars within each gene graph"
             )
 
         # ==================== CONDITION COLOR PICKER ====================
@@ -4571,7 +4572,7 @@ with tab4:
                     unique_conditions.add(condition)
 
         if unique_conditions:
-            with st.expander("🎨 Condition Colors", expanded=False):
+            with st.expander("🎨 Condition Colors (applies to all genes)", expanded=True):
                 st.markdown(
                     """
                 <style>
