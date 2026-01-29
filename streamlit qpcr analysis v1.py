@@ -3330,6 +3330,25 @@ with tab_qc:
                                     )
                                     include_well(well, gene, sample)
 
+                        # Display per-sample statistics
+                        st.markdown("**Per-Sample Statistics:**")
+                        for sample in gene_samples:
+                            sample_wells = edited_gene_df[edited_gene_df["Sample"] == sample]
+                            included_wells = sample_wells[sample_wells["Include"] == True]
+                            n_included = len(included_wells)
+                            
+                            if n_included == 0:
+                                st.caption(f"  • {sample}: ⚠️ No wells included")
+                            elif n_included == 1:
+                                ct_values = pd.to_numeric(included_wells["CT"], errors='coerce')
+                                mean_ct = ct_values.mean()
+                                st.caption(f"  • {sample}: n=1, Mean CT={mean_ct:.2f}, SD=N/A")
+                            else:
+                                ct_values = pd.to_numeric(included_wells["CT"], errors='coerce')
+                                mean_ct = ct_values.mean()
+                                ct_sd = ct_values.std(ddof=1)
+                                st.caption(f"  • {sample}: n={n_included}, Mean CT={mean_ct:.2f}, SD={ct_sd:.3f}")
+
         # ==================== TAB 2: PLATE HEATMAP ====================
         with qc_tab2:
             st.subheader("96-Well Plate Overview")
