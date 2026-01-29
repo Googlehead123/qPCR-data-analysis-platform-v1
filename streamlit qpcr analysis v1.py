@@ -2077,7 +2077,7 @@ class GraphGenerator:
         # Get gene-specific settings
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get("bar_gap", 0.15))
         gene_margins = settings.get(
-            f"{gene}_margins", {"l": 80, "r": 80, "t": 100, "b": 100}
+            f"{gene}_margins", {"l": 80, "r": 80, "t": 100, "b": 160}
         )
         gene_bg_color = settings.get(
             f"{gene}_bg_color", settings.get("plot_bgcolor", "#FFFFFF")
@@ -2155,7 +2155,7 @@ class GraphGenerator:
                 l=gene_margins.get("l", 80),
                 r=gene_margins.get("r", 80),
                 t=gene_margins.get("t", 100),
-                b=gene_margins.get("b", 120),
+                b=gene_margins.get("b", 160),
             ),
         )
 
@@ -5147,6 +5147,7 @@ with tab5:
                             height=img_height,
                             font=dict(size=14),
                             title=dict(font=dict(size=18)),
+                            margin=dict(b=180),
                         )
 
                         if "PNG" in img_format:
@@ -5217,7 +5218,7 @@ with tab5:
                                 )
                                 fig_copy = go.Figure(fig)
                                 fig_copy.update_layout(
-                                    width=img_width, height=img_height
+                                    width=img_width, height=img_height, margin=dict(b=180)
                                 )
 
                                 png_bytes = fig_copy.to_image(
@@ -5308,7 +5309,7 @@ with tab5:
                                 )
                                 fig_copy = go.Figure(fig)
                                 fig_copy.update_layout(
-                                    width=img_width, height=img_height
+                                    width=img_width, height=img_height, margin=dict(b=180)
                                 )
 
                                 png_bytes = fig_copy.to_image(
