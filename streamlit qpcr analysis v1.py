@@ -1769,6 +1769,13 @@ class AnalysisEngine:
 
                 st.session_state.processed_data = gene_dict
 
+                # Store exclusion snapshot for auto-rerun detection
+                st.session_state['_exclusion_snapshot'] = {
+                    'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
+                    'excluded_samples': sorted(st.session_state.get('excluded_samples', set())),
+                    'ttest_type': st.session_state.get('ttest_type', 'welch')
+                }
+
             st.success(
                 "✅ Full analysis complete. Go to the Graphs tab to visualize results."
             )
@@ -4309,6 +4316,11 @@ with tab2:
 
             st.markdown("---")
 
+            # Store analysis parameters for auto-rerun
+            st.session_state['_last_ref_sample_key'] = ref_sample_key
+            st.session_state['_last_cmp_sample_key'] = cmp_sample_key
+            st.session_state['_last_cmp_sample_key_2'] = cmp_sample_key_2 if use_second_comparison else None
+
             # Run button
             if st.button("▶️ Run Full Analysis Now", type="primary", width="stretch"):
                 ok = AnalysisEngine.run_full_analysis(
@@ -4329,6 +4341,24 @@ with tab2:
 
 # ==================== TAB 3: ANALYSIS ====================
 with tab3:
+    # Auto-rerun if exclusion state changed since last analysis
+    if (st.session_state.get('processed_data') and
+        '_exclusion_snapshot' in st.session_state and
+        '_last_ref_sample_key' in st.session_state):
+
+        current_snapshot = {
+            'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
+            'excluded_samples': sorted(st.session_state.get('excluded_samples', set())),
+            'ttest_type': st.session_state.get('ttest_type', 'welch')
+        }
+
+        if current_snapshot != st.session_state['_exclusion_snapshot']:
+            AnalysisEngine.run_full_analysis(
+                st.session_state['_last_ref_sample_key'],
+                st.session_state['_last_cmp_sample_key'],
+                st.session_state.get('_last_cmp_sample_key_2'),
+            )
+
     st.header("Step 3: Analysis Results")
 
     if st.session_state.processed_data:
