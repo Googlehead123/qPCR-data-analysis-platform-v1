@@ -5496,20 +5496,19 @@ with tab6:
         st.markdown("##### 📋 Standard Export (Two-Step)")
 
         if "ppt_bytes" in st.session_state and st.session_state["ppt_bytes"]:
-            with gen_col2:
-                efficacy = st.session_state.get("selected_efficacy", "qPCR")
-                filename = (
-                    f"qPCR_{efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
-                )
+            efficacy = st.session_state.get("selected_efficacy", "qPCR")
+            filename = (
+                f"qPCR_{efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
+            )
 
-                st.download_button(
-                    label="📥 Download PPTX",
-                    data=st.session_state["ppt_bytes"],
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    type="primary",
-                    use_container_width=True,
-                )
+            st.download_button(
+                label="📥 Download PPTX",
+                data=st.session_state["ppt_bytes"],
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                type="primary",
+                use_container_width=True,
+            )
 
         st.markdown("---")
 
