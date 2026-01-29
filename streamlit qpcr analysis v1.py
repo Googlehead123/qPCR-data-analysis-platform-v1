@@ -1346,24 +1346,32 @@ class AnalysisEngine:
                 hk_ct_mean = hk_ct_values.mean()
                 delta_ct = target_ct_mean - hk_ct_mean
 
-                # Get reference ΔCt (ref_sample)
+                # Get reference ΔCt (ref_sample) — must also respect exclusions
                 ref_target = target_data[target_data["Condition"] == ref_sample]
                 ref_hk = data[
                     (data["Condition"] == ref_sample) & (data["Target"] == hk_gene)
                 ]
 
+                # Apply per-gene-sample exclusion to reference wells too
+                if excluded_wells_dict is not None and len(ref_target) > 0:
+                    ref_sample_name = ref_target["Sample"].iloc[0]
+                    ref_target_excluded = excluded_wells_dict.get((target, ref_sample_name), set())
+                    ref_target = ref_target[~ref_target["Well"].isin(ref_target_excluded)]
+
+                if excluded_wells_dict is not None and len(ref_hk) > 0:
+                    ref_hk_sample_name = ref_hk["Sample"].iloc[0]
+                    ref_hk_excluded = excluded_wells_dict.get((hk_gene, ref_hk_sample_name), set())
+                    ref_hk = ref_hk[~ref_hk["Well"].isin(ref_hk_excluded)]
+
                 if len(ref_target) > 0 and len(ref_hk) > 0:
                     ref_delta_ct = ref_target["CT"].mean() - ref_hk["CT"].mean()
                 else:
                     # CRITICAL: Missing reference data - skip this sample instead of using 0
-                    # Using ref_delta_ct = 0 would produce completely wrong fold changes
-                    # Log warning and skip this condition
                     if condition == ref_sample:
                         # This IS the reference - use own delta_ct as reference (fold change = 1)
                         ref_delta_ct = delta_ct
                     else:
                         # Reference sample missing - cannot calculate relative expression
-                        # Skip this entry rather than produce incorrect results
                         continue
 
                 ddct = delta_ct - ref_delta_ct
@@ -1375,16 +1383,12 @@ class AnalysisEngine:
                 n_hk = len(hk_ct_values)
 
                 target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else 0
-                hk_sem = hk_sd / np.sqrt(n_hk) if n_hk > 1 else 0
 
-                # Simple SEM/SD calculation - combined error from target and HK genes
-                # Using root-sum-of-squares for independent measurements
-                combined_sem = np.sqrt(target_sem**2 + hk_sem**2)
-                sem = combined_sem
-
-                # Simple SD calculation - combined from target and HK genes
-                combined_sd = np.sqrt(target_sd**2 + hk_sd**2)
-                sd = combined_sd
+                # SD and SEM reflect target gene CT variation only.
+                # HK gene variability is tracked separately (HK_Ct_SD) but
+                # should not inflate the error bars on relative expression graphs.
+                sd = target_sd
+                sem = target_sem
 
                 # Get original sample name and group
                 original_sample = cond_data["Sample"].iloc[0]
@@ -3181,12 +3185,13 @@ with tab_qc:
         st.markdown("---")
 
         # ==================== MAIN QC INTERFACE WITH TABS ====================
-        qc_tab1, qc_tab2, qc_tab3, qc_tab4 = st.tabs(
+        qc_tab1, qc_tab2, qc_tab3, qc_tab4, qc_tab5 = st.tabs(
             [
                 "🔬 Triplicate Browser",
                 "🧪 Plate Heatmap",
                 "⚠️ Flagged Wells",
                 "🔧 Settings",
+                "📋 Summary Check",
             ]
         )
 
@@ -3727,6 +3732,123 @@ with tab_qc:
                 use_container_width=True,
             ):
                 st.rerun()
+
+        # ==================== TAB 5: SUMMARY CHECK ====================
+        with qc_tab5:
+            st.subheader("Pre-Analysis Summary Check")
+            st.caption(
+                "Verify which wells will be used in analysis for each gene-sample combination. "
+                "Review this before running analysis to confirm exclusions are correct."
+            )
+
+            all_genes_summary = sorted(data["Target"].unique())
+            all_samples_summary = sorted(data["Sample"].unique(), key=natural_sort_key)
+
+            # Detect housekeeping gene (from session state or common names)
+            hk_gene_name = st.session_state.get("hk_gene", None)
+
+            summary_rows = []
+            for gene in all_genes_summary:
+                is_hk = False
+                if hk_gene_name and gene.upper() == hk_gene_name.upper():
+                    is_hk = True
+
+                for sample in all_samples_summary:
+                    gene_sample_wells = data[
+                        (data["Target"] == gene) & (data["Sample"] == sample)
+                    ]
+                    if gene_sample_wells.empty:
+                        continue
+
+                    total_wells = len(gene_sample_wells)
+                    well_ids = gene_sample_wells["Well"].tolist()
+
+                    # Get excluded wells for this gene-sample
+                    excluded_set = st.session_state.excluded_wells.get(
+                        (gene, sample), set()
+                    )
+                    excluded_ids = [w for w in well_ids if w in excluded_set]
+                    included_ids = [w for w in well_ids if w not in excluded_set]
+
+                    n_included = len(included_ids)
+                    n_excluded = len(excluded_ids)
+
+                    # Compute stats on included wells only
+                    included_cts = gene_sample_wells[
+                        gene_sample_wells["Well"].isin(included_ids)
+                    ]["CT"]
+                    mean_ct = included_cts.mean() if n_included > 0 else None
+                    sd_ct = (
+                        included_cts.std() if n_included > 1 else 0.0
+                    )
+
+                    summary_rows.append(
+                        {
+                            "Gene": gene,
+                            "Role": "HK" if is_hk else "Target",
+                            "Sample": sample,
+                            "Total Wells": total_wells,
+                            "Included": n_included,
+                            "Excluded": n_excluded,
+                            "Included Wells": ", ".join(included_ids),
+                            "Excluded Wells": ", ".join(excluded_ids) if excluded_ids else "—",
+                            "Mean CT": round(mean_ct, 2) if mean_ct is not None else "—",
+                            "CT SD": round(sd_ct, 3) if sd_ct is not None else "—",
+                        }
+                    )
+
+            if summary_rows:
+                summary_df = pd.DataFrame(summary_rows)
+
+                # Highlight rows with exclusions or low replicate count
+                total_exclusions = summary_df["Excluded"].sum()
+                low_rep = summary_df[summary_df["Included"] < 2]
+
+                sum_col1, sum_col2, sum_col3 = st.columns(3)
+                sum_col1.metric("Gene-Sample Groups", len(summary_df))
+                sum_col2.metric(
+                    "Total Well-Exclusions",
+                    int(total_exclusions),
+                    delta=f"-{int(total_exclusions)}" if total_exclusions > 0 else None,
+                    delta_color="inverse" if total_exclusions > 0 else "off",
+                )
+                sum_col3.metric(
+                    "Low Replicate (n<2)",
+                    len(low_rep),
+                    delta="⚠️ check" if len(low_rep) > 0 else None,
+                    delta_color="off",
+                )
+
+                if len(low_rep) > 0:
+                    st.warning(
+                        f"⚠️ {len(low_rep)} gene-sample group(s) have fewer than 2 included wells. "
+                        "Statistics (SD, SEM, p-values) will be unreliable or zero."
+                    )
+
+                # Display per-gene sections
+                for gene in all_genes_summary:
+                    gene_rows = summary_df[summary_df["Gene"] == gene]
+                    if gene_rows.empty:
+                        continue
+
+                    gene_excl = gene_rows["Excluded"].sum()
+                    gene_label = f"{gene}  (HK)" if gene_rows.iloc[0]["Role"] == "HK" else gene
+                    if gene_excl > 0:
+                        gene_label += f"  — {int(gene_excl)} exclusion(s)"
+
+                    with st.expander(gene_label, expanded=(gene_excl > 0)):
+                        display_cols = [
+                            "Sample", "Included", "Excluded",
+                            "Included Wells", "Excluded Wells",
+                            "Mean CT", "CT SD",
+                        ]
+                        st.dataframe(
+                            gene_rows[display_cols].reset_index(drop=True),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+            else:
+                st.info("No data available. Upload and parse data first.")
 
         # ==================== BOTTOM STATUS BAR ====================
         st.markdown("---")

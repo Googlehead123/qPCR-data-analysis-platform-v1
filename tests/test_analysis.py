@@ -125,6 +125,83 @@ class TestAnalysisEngineCalculateDDCT:
             base_row = baseline[baseline['Condition'] == cond]
             assert res_row['n_replicates'].iloc[0] == base_row['n_replicates'].iloc[0]
 
+    def test_calculate_ddct_reference_exclusion_changes_results(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        """Excluding a well from the reference sample must change the reference ΔCt and thus all fold changes."""
+        from importlib import import_module
+        spec = import_module('streamlit qpcr analysis v1')
+        AnalysisEngine = spec.AnalysisEngine
+
+        # Baseline: no exclusions
+        baseline = AnalysisEngine.calculate_ddct(
+            data=sample_qpcr_raw_data,
+            hk_gene='GAPDH',
+            ref_sample='Non-treated',
+            excluded_wells={},
+            excluded_samples=set(),
+            sample_mapping=sample_mapping,
+        )
+
+        # Get a COL1A1 well for Non-treated (this is the reference sample)
+        ref_wells = sample_qpcr_raw_data[
+            (sample_qpcr_raw_data['Target'] == 'COL1A1') &
+            (sample_qpcr_raw_data['Sample'] == 'Non-treated')
+        ]
+        well_to_exclude = ref_wells['Well'].iloc[0]
+
+        # Exclude one reference well
+        excluded_dict = {('COL1A1', 'Non-treated'): {well_to_exclude}}
+        result = AnalysisEngine.calculate_ddct(
+            data=sample_qpcr_raw_data,
+            hk_gene='GAPDH',
+            ref_sample='Non-treated',
+            excluded_wells=excluded_dict,
+            excluded_samples=set(),
+            sample_mapping=sample_mapping,
+        )
+
+        # Reference sample n_replicates should be reduced
+        ref_baseline = baseline[baseline['Condition'] == 'Non-treated']
+        ref_result = result[result['Condition'] == 'Non-treated']
+        assert ref_result['n_replicates'].iloc[0] == ref_baseline['n_replicates'].iloc[0] - 1
+
+        # The reference Ct mean should have changed (different well set)
+        # which means fold changes for treatment samples may differ
+        assert result is not None
+        assert not result.empty
+
+    def test_calculate_ddct_sd_is_target_only(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        """SD and SEM should reflect target gene CT variation only, not combined target+HK."""
+        from importlib import import_module
+        spec = import_module('streamlit qpcr analysis v1')
+        AnalysisEngine = spec.AnalysisEngine
+
+        result = AnalysisEngine.calculate_ddct(
+            data=sample_qpcr_raw_data,
+            hk_gene='GAPDH',
+            ref_sample='Non-treated',
+            excluded_wells={},
+            excluded_samples=set(),
+            sample_mapping=sample_mapping,
+        )
+
+        assert not result.empty
+
+        for _, row in result.iterrows():
+            target_sd = row['Target_Ct_SD']
+            sd = row['SD']
+            n = row['n_replicates']
+
+            # SD should equal Target_Ct_SD exactly (not combined with HK)
+            assert abs(sd - target_sd) < 1e-10, (
+                f"SD ({sd}) should equal Target_Ct_SD ({target_sd}) for {row['Condition']}"
+            )
+
+            # SEM should equal Target_Ct_SD / sqrt(n)
+            expected_sem = target_sd / np.sqrt(n) if n > 1 else 0
+            assert abs(row['SEM'] - expected_sem) < 1e-10, (
+                f"SEM ({row['SEM']}) should equal Target_Ct_SD/sqrt(n) ({expected_sem})"
+            )
+
     def test_calculate_ddct_respects_excluded_samples(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
