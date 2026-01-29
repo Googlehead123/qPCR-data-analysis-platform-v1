@@ -31,9 +31,9 @@ DEFAULT_GROUP_COLORS = {
     "Baseline": "#FFFFFF",
     "Non-treated": "#FFFFFF",
     "Control": "#FFFFFF",
-    "Negative Control": "#9E9E9E",
-    "Inducer": "#9E9E9E",
-    "Positive Control": "#9E9E9E",
+    "Negative Control": "#FFFFFF",
+    "Inducer": "#333333",
+    "Positive Control": "#333333",
     "Treatment": "#D3D3D3",
 }
 
@@ -2058,6 +2058,10 @@ class GraphGenerator:
             zeroline=True,
             zerolinewidth=1,
             zerolinecolor="black",
+            showline=True,
+            linewidth=1,
+            linecolor="black",
+            mirror=False,
             range=[0, y_max_auto],
             fixedrange=False,
         )
@@ -2118,16 +2122,7 @@ class GraphGenerator:
         )
 
         fig.update_layout(
-            title=dict(
-                text=f"{gene} Expression",
-                font=dict(
-                    size=settings.get("title_size", 20), family="Arial", color="#333333"
-                ),
-                x=0.5,
-                xanchor="center",
-                y=0.98,
-                yanchor="top",
-            ),
+            title=None,
             xaxis=dict(
                 title=None,
                 showgrid=False,
