@@ -1268,16 +1268,28 @@ class AnalysisEngine:
         data: pd.DataFrame,
         hk_gene: str,
         ref_sample: str,
-        excluded_wells: set,
+        excluded_wells,
         excluded_samples: set,
         sample_mapping: dict,
     ) -> pd.DataFrame:
-        """Gene-by-gene ΔΔCt calculation with housekeeping normalization"""
+        """Gene-by-gene ΔΔCt calculation with housekeeping normalization.
 
-        # Filter data
-        data = data[
-            ~data["Well"].isin(excluded_wells) & ~data["Sample"].isin(excluded_samples)
-        ].copy()
+        Args:
+            excluded_wells: Either a dict {(gene, sample): set_of_wells} for
+                per-gene-sample exclusions, or a flat set of well IDs for
+                backward compatibility.
+        """
+
+        # Normalize excluded_wells: support both dict (per-gene-sample) and flat set
+        if isinstance(excluded_wells, dict):
+            excluded_wells_dict = excluded_wells
+        else:
+            # Legacy flat set — exclude these wells globally
+            excluded_wells_dict = None
+            data = data[~data["Well"].isin(excluded_wells or set())].copy()
+
+        # Filter excluded samples
+        data = data[~data["Sample"].isin(excluded_samples)].copy()
 
         # Apply sample name mapping
         data["Condition"] = data["Sample"].map(
@@ -1302,9 +1314,25 @@ class AnalysisEngine:
                 if len(cond_data) == 0:
                     continue
 
+                # Per-gene-sample well exclusion: filter target wells
+                if excluded_wells_dict is not None:
+                    sample_name = cond_data["Sample"].iloc[0]
+                    target_excluded = excluded_wells_dict.get((target, sample_name), set())
+                    cond_data = cond_data[~cond_data["Well"].isin(target_excluded)]
+                    if len(cond_data) == 0:
+                        continue
+
                 hk_data = data[
                     (data["Condition"] == condition) & (data["Target"] == hk_gene)
                 ]
+
+                # Per-gene-sample well exclusion: filter HK wells using HK gene key
+                if excluded_wells_dict is not None:
+                    hk_sample_name = hk_data["Sample"].iloc[0] if len(hk_data) > 0 else None
+                    if hk_sample_name:
+                        hk_excluded = excluded_wells_dict.get((hk_gene, hk_sample_name), set())
+                        hk_data = hk_data[~hk_data["Well"].isin(hk_excluded)]
+
                 if len(hk_data) == 0:
                     continue
 
@@ -1404,11 +1432,14 @@ class AnalysisEngine:
         hk_gene: str = None,
         sample_mapping: dict = None,
         ttest_type: str = "welch",
+        excluded_wells=None,
     ) -> pd.DataFrame:
         """T-test comparing each condition to compare_condition (and optionally compare_condition_2).
 
         Args:
             ttest_type: "welch" for Welch's t-test (unequal variance), "student" for Student's t-test (equal variance)
+            excluded_wells: Either a dict {(gene, sample): set_of_wells} for
+                per-gene-sample exclusions, or a flat set of well IDs, or None.
         """
 
         # Use session_state fallbacks
@@ -1419,6 +1450,15 @@ class AnalysisEngine:
             if sample_mapping is not None
             else st.session_state.get("sample_mapping", {})
         )
+
+        # Normalize excluded_wells
+        if isinstance(excluded_wells, dict):
+            excluded_wells_dict = excluded_wells
+        else:
+            excluded_wells_dict = None
+            # Legacy flat set: pre-filter raw_data globally
+            if excluded_wells and raw_data is not None:
+                raw_data = raw_data[~raw_data["Well"].isin(excluded_wells)].copy()
 
         if raw_data is None or hk_gene is None:
             return processed
@@ -1441,11 +1481,30 @@ class AnalysisEngine:
             if t_rows.empty:
                 continue
 
+            # Per-gene-sample well exclusion for target gene
+            if excluded_wells_dict is not None:
+                exclude_mask = t_rows.apply(
+                    lambda r: r["Well"] in excluded_wells_dict.get((target, r["Sample"]), set()),
+                    axis=1,
+                )
+                t_rows = t_rows[~exclude_mask]
+                if t_rows.empty:
+                    continue
+
             t_rows["Condition"] = t_rows["Sample"].map(
                 lambda s: sample_mapping.get(s, {}).get("condition", s)
             )
 
             hk_rows = raw_data[raw_data["Target"] == hk_gene].copy()
+
+            # Per-gene-sample well exclusion for HK gene
+            if excluded_wells_dict is not None:
+                hk_exclude_mask = hk_rows.apply(
+                    lambda r: r["Well"] in excluded_wells_dict.get((hk_gene, r["Sample"]), set()),
+                    axis=1,
+                )
+                hk_rows = hk_rows[~hk_exclude_mask]
+
             hk_rows["Condition"] = hk_rows["Sample"].map(
                 lambda s: sample_mapping.get(s, {}).get("condition", s)
             )
@@ -1664,7 +1723,7 @@ class AnalysisEngine:
                     data,
                     hk_gene,
                     ref_condition,
-                    st.session_state.get("excluded_wells", set()),
+                    st.session_state.get("excluded_wells", {}),
                     st.session_state.get("excluded_samples", set()),
                     mapping,
                 )
@@ -1686,6 +1745,7 @@ class AnalysisEngine:
                         hk_gene=hk_gene,
                         sample_mapping=mapping,
                         ttest_type=ttest_type,
+                        excluded_wells=st.session_state.get("excluded_wells", {}),
                     )
                 except TypeError:
                     processed_with_stats = AnalysisEngine.calculate_statistics(
@@ -2864,9 +2924,10 @@ with st.sidebar:
     if st.session_state.get("data") is not None:
         st.success(f"✅ {len(st.session_state.data)} wells loaded")
 
-        excluded = len(st.session_state.get("excluded_wells", set()))
+        excluded_dict = st.session_state.get("excluded_wells", {})
+        excluded = sum(len(ws) for ws in excluded_dict.values()) if isinstance(excluded_dict, dict) else len(excluded_dict)
         if excluded > 0:
-            st.warning(f"⚠️ {excluded} wells excluded")
+            st.warning(f"⚠️ {excluded} well-exclusions active")
 
         if st.session_state.get("processed_data"):
             st.success(f"✅ {len(st.session_state.processed_data)} genes analyzed")
@@ -4762,7 +4823,7 @@ with tab5:
             "Housekeeping_Gene": st.session_state.hk_gene,
             "Reference_Sample": st.session_state.get("analysis_ref_condition", "N/A"),
             "Compare_To": st.session_state.get("analysis_cmp_condition", "N/A"),
-            "Excluded_Wells": len(st.session_state.excluded_wells),
+            "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
         }
@@ -4907,7 +4968,7 @@ with tab5:
                 "analysis_params": analysis_params,
                 "sample_mapping": st.session_state.sample_mapping,
                 "graph_settings": st.session_state.graph_settings,
-                "excluded_wells": list(st.session_state.excluded_wells),
+                "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
                 "excluded_samples": list(st.session_state.excluded_samples),
             }
 
@@ -5106,9 +5167,7 @@ with tab5:
                                     {
                                         "analysis_params": analysis_params,
                                         "sample_mapping": st.session_state.sample_mapping,
-                                        "excluded_wells": list(
-                                            st.session_state.excluded_wells
-                                        ),
+                                        "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
                                         "excluded_samples": list(
                                             st.session_state.excluded_samples
                                         ),

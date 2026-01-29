@@ -77,6 +77,54 @@ class TestAnalysisEngineCalculateDDCT:
         
         assert result is not None
 
+    def test_calculate_ddct_per_gene_sample_exclusion(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        """Excluding a well for one gene should NOT affect other genes."""
+        from importlib import import_module
+        spec = import_module('streamlit qpcr analysis v1')
+        AnalysisEngine = spec.AnalysisEngine
+
+        # Get a COL1A1 well for Non-treated
+        col1a1_nt = sample_qpcr_raw_data[
+            (sample_qpcr_raw_data['Target'] == 'COL1A1') &
+            (sample_qpcr_raw_data['Sample'] == 'Non-treated')
+        ]
+        well_to_exclude = col1a1_nt['Well'].iloc[0]
+
+        # Baseline: no exclusions
+        baseline = AnalysisEngine.calculate_ddct(
+            data=sample_qpcr_raw_data,
+            hk_gene='GAPDH',
+            ref_sample='Non-treated',
+            excluded_wells={},
+            excluded_samples=set(),
+            sample_mapping=sample_mapping,
+        )
+
+        # Exclude one well for COL1A1/Non-treated only (per-gene-sample dict)
+        excluded_dict = {('COL1A1', 'Non-treated'): {well_to_exclude}}
+        result = AnalysisEngine.calculate_ddct(
+            data=sample_qpcr_raw_data,
+            hk_gene='GAPDH',
+            ref_sample='Non-treated',
+            excluded_wells=excluded_dict,
+            excluded_samples=set(),
+            sample_mapping=sample_mapping,
+        )
+
+        assert result is not None
+        assert not result.empty
+
+        # The COL1A1 Non-treated row should have fewer replicates
+        nt_row = result[result['Condition'] == 'Non-treated']
+        baseline_nt = baseline[baseline['Condition'] == 'Non-treated']
+        assert nt_row['n_replicates'].iloc[0] == baseline_nt['n_replicates'].iloc[0] - 1
+
+        # Treatment rows should be unaffected (same replicate count)
+        for cond in ['Treatment1', 'Treatment2']:
+            res_row = result[result['Condition'] == cond]
+            base_row = baseline[baseline['Condition'] == cond]
+            assert res_row['n_replicates'].iloc[0] == base_row['n_replicates'].iloc[0]
+
     def test_calculate_ddct_respects_excluded_samples(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
