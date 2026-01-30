@@ -2614,7 +2614,7 @@ class ReportGenerator:
 
 # ==================== PPT GENERATOR (NEW) ====================
 class PPTGenerator:
-    NAVY_BLUE = (27, 54, 93)  # #1B365D
+    NAVY_BLUE = (0, 0, 0)  # Black (was navy #1B365D)
     WHITE = (255, 255, 255)
 
     @staticmethod
@@ -3190,25 +3190,86 @@ with tab_qc:
         st.markdown("---")
 
         # ==================== MAIN QC INTERFACE WITH TABS ====================
-        qc_tab1, qc_tab2, qc_tab3, qc_tab4, qc_tab5 = st.tabs(
+        qc_tab1, qc_tab2 = st.tabs(
             [
                 "🔬 Triplicate Browser",
-                "🧪 Plate Heatmap",
-                "⚠️ Flagged Wells",
-                "🔧 Settings",
-                "📋 Summary Check",
+                "📋 QC Overview",
             ]
         )
 
-        # ==================== TAB 1: WELL SELECTION BROWSER ====================
+        # ==================== TAB 1: ENHANCED TRIPLICATE BROWSER ====================
         with qc_tab1:
             st.subheader("Per-Well Selection Browser")
             st.caption(
-                "Select or exclude individual wells for every gene-sample combination independently. "
-                "Each triplicate group is shown with its wells so you can toggle inclusion directly."
+                "Browse triplicates, exclude outliers, and adjust QC settings — all in one place."
             )
 
-            # Filter controls
+            # ---- Inline QC Settings (collapsed) ----
+            with st.expander("⚙️ QC Settings", expanded=False):
+                thresh_col1, thresh_col2 = st.columns(2)
+                with thresh_col1:
+                    new_ct_high = st.number_input(
+                        "High CT Threshold",
+                        min_value=25.0, max_value=45.0,
+                        value=float(QualityControl.CT_HIGH_THRESHOLD),
+                        step=0.5,
+                        help="Wells with CT above this are flagged as low expression",
+                        key="qc_settings_ct_high",
+                    )
+                    QualityControl.CT_HIGH_THRESHOLD = new_ct_high
+
+                    new_ct_low = st.number_input(
+                        "Low CT Threshold",
+                        min_value=5.0, max_value=20.0,
+                        value=float(QualityControl.CT_LOW_THRESHOLD),
+                        step=0.5,
+                        help="Wells with CT below this are flagged as unusually high expression",
+                        key="qc_settings_ct_low",
+                    )
+                    QualityControl.CT_LOW_THRESHOLD = new_ct_low
+
+                with thresh_col2:
+                    new_cv = st.number_input(
+                        "CV% Threshold",
+                        min_value=1.0, max_value=20.0,
+                        value=float(QualityControl.CV_THRESHOLD * 100),
+                        step=0.5,
+                        help="Replicates with CV above this are flagged as high variability",
+                        key="qc_settings_cv",
+                    )
+                    QualityControl.CV_THRESHOLD = new_cv / 100
+
+                    new_hk_var = st.number_input(
+                        "HK Variation Threshold",
+                        min_value=0.5, max_value=3.0,
+                        value=float(QualityControl.HK_VARIATION_THRESHOLD),
+                        step=0.1,
+                        help="Housekeeping gene deviation threshold across samples",
+                        key="qc_settings_hk_var",
+                    )
+                    QualityControl.HK_VARIATION_THRESHOLD = new_hk_var
+
+                if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
+                    st.rerun()
+
+            # ---- Flagged Wells Alert Banner ----
+            qc_results = QualityControl.detect_outliers(data, hk_gene)
+            flagged = qc_results[qc_results["Flagged"]].copy()
+
+            if len(flagged) > 0:
+                flag_col1, flag_col2 = st.columns([3, 1])
+                with flag_col1:
+                    st.warning(f"⚠️ **{len(flagged)} wells** auto-flagged by QC algorithms (CT thresholds, CV%, Grubbs test)")
+                with flag_col2:
+                    if st.button("🚫 Auto-Exclude Flagged", use_container_width=True, key="qc_auto_exclude_flagged"):
+                        st.session_state.excluded_wells_history.append(
+                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                        )
+                        for _, row in flagged.iterrows():
+                            exclude_well(row["Well"], row["Target"], row["Sample"])
+                        st.rerun()
+
+            # ---- Filter Controls ----
             filter_col1, filter_col2 = st.columns([1, 1])
 
             all_genes = sorted(data["Target"].unique())
@@ -3278,8 +3339,7 @@ with tab_qc:
 
                 st.markdown("---")
 
-                # ---- Health Status Grid ----
-                # Build triplicate stats for the currently visible genes/samples
+                # ---- Health Status Grid (expanded by default) ----
                 _tri_data = QualityControl.get_triplicate_data(data, get_all_excluded_wells())
 
                 # Filter triplicate data to match current gene/sample filters
@@ -3309,11 +3369,24 @@ with tab_qc:
                         unsafe_allow_html=True,
                     )
 
-                    # Render the interactive grid
-                    with st.expander("🔍 Health Status Grid", expanded=False):
+                    # Build a lookup for per-gene severity from triplicate data
+                    _gene_severity = {}
+                    for _g in _tri_data["Target"].unique():
+                        _g_data = _tri_data[_tri_data["Target"] == _g]
+                        if (_g_data["Severity"] == "error").any():
+                            _gene_severity[_g] = "❌"
+                        elif (_g_data["Severity"] == "warning").any():
+                            _gene_severity[_g] = "⚠️"
+                        else:
+                            _gene_severity[_g] = "✅"
+
+                    # Render the interactive grid (expanded by default)
+                    with st.expander("🔍 Health Status Grid", expanded=True):
                         render_triplicate_grid(_tri_data, st.session_state)
 
                     st.markdown("---")
+                else:
+                    _gene_severity = {}
 
                 # Render per-gene expandable sections
                 for gene in display_genes:
@@ -3325,7 +3398,10 @@ with tab_qc:
                         1 for _, r in gene_wells.iterrows()
                         if is_well_excluded(r["Well"], gene, r["Sample"])
                     )
-                    gene_label = f"{gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)" if gene_excluded > 0 else f"{gene}  ({len(gene_wells)} wells)"
+
+                    # Status indicator for gene
+                    gene_status = _gene_severity.get(gene, "")
+                    gene_label = f"{gene_status} {gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)" if gene_excluded > 0 else f"{gene_status} {gene}  ({len(gene_wells)} wells)"
 
                     with st.expander(gene_label, expanded=(selected_gene_filter != "All Genes")):
                         # Build editable dataframe for this gene
@@ -3377,33 +3453,36 @@ with tab_qc:
                                     )
                                     include_well(well, gene, sample)
 
-                        # Display per-sample statistics
+                        # Display per-sample statistics with CV%
                         st.markdown("**Per-Sample Statistics:**")
                         for sample in gene_samples:
                             sample_wells = edited_gene_df[edited_gene_df["Sample"] == sample]
                             included_wells = sample_wells[sample_wells["Include"] == True]
                             n_included = len(included_wells)
-                            
+
                             if n_included == 0:
                                 st.caption(f"  • {sample}: ⚠️ No wells included")
                             elif n_included == 1:
                                 ct_values = pd.to_numeric(included_wells["CT"], errors='coerce')
                                 mean_ct = ct_values.mean()
-                                st.caption(f"  • {sample}: n=1, Mean CT={mean_ct:.2f}, SD=N/A")
+                                st.caption(f"  • {sample}: n=1, Mean CT={mean_ct:.2f}, SD=N/A, CV=N/A")
                             else:
                                 ct_values = pd.to_numeric(included_wells["CT"], errors='coerce')
                                 mean_ct = ct_values.mean()
                                 ct_sd = ct_values.std(ddof=1)
-                                st.caption(f"  • {sample}: n={n_included}, Mean CT={mean_ct:.2f}, SD={ct_sd:.3f}")
+                                cv_pct = (ct_sd / mean_ct * 100) if mean_ct != 0 else 0.0
+                                st.caption(f"  • {sample}: n={n_included}, Mean CT={mean_ct:.2f}, SD={ct_sd:.3f}, CV={cv_pct:.1f}%")
 
-        # ==================== TAB 2: PLATE HEATMAP ====================
+        # ==================== TAB 2: QC OVERVIEW (CONSOLIDATED) ====================
         with qc_tab2:
-            st.subheader("96-Well Plate Overview")
+            st.subheader("QC Overview")
+            st.caption("Plate heatmap, auto-flagged wells, and pre-analysis summary at a glance.")
 
+            # ---- Section 1: Plate Heatmap ----
+            st.markdown("### 🧪 Plate Heatmap")
             heatmap_col1, heatmap_col2 = st.columns([2, 1])
 
             with heatmap_col1:
-                # Use helper to get all excluded wells for heatmap
                 plate_fig = QualityControl.create_plate_heatmap(
                     data, value_col="CT", excluded_wells=get_all_excluded_wells()
                 )
@@ -3413,10 +3492,9 @@ with tab_qc:
                 )
 
             with heatmap_col2:
-                st.markdown("### Replicate Statistics")
+                st.markdown("**Replicate Statistics**")
                 rep_stats = QualityControl.get_replicate_stats(data)
                 if not rep_stats.empty:
-
                     def highlight_status(row):
                         if row["Status"] == "High CV":
                             return ["background-color: #fff3cd"] * len(row)
@@ -3431,381 +3509,54 @@ with tab_qc:
 
             st.markdown("---")
 
-            # ==================== INDIVIDUAL WELL SELECTION ====================
-            st.subheader("📊 Individual Well Selection")
-            st.caption(
-                "Include or exclude individual CT values. Filter by gene to focus on specific targets. "
-                "Each well's selection is independent and persists when changing filters."
-            )
+            # ---- Section 2: Flagged Wells (read-only) ----
+            st.markdown("### ⚠️ Flagged Wells")
 
-            # Gene filter
-            filter_col1, filter_col2 = st.columns([1, 3])
-            with filter_col1:
-                available_genes = sorted(data["Target"].unique().tolist())
-                selected_gene_filter_qc = st.selectbox(
-                    "Filter by Gene",
-                    options=["All Genes"] + available_genes,
-                    key="qc_summary_gene_filter",
-                )
+            qc_results_overview = QualityControl.detect_outliers(data, hk_gene)
+            flagged_overview = qc_results_overview[qc_results_overview["Flagged"]].copy()
 
-            # Prepare data for display
-            wells_df = data[["Well", "Sample", "Target", "CT"]].copy()
-            wells_df = wells_df.sort_values(["Target", "Sample", "Well"])
-
-            # Apply gene filter if selected
-            if selected_gene_filter_qc != "All Genes":
-                wells_df = wells_df[wells_df["Target"] == selected_gene_filter_qc]
-
-            # Add Include column based on current exclusion state
-            wells_df["Include"] = wells_df.apply(
-                lambda r: not is_well_excluded(r["Well"], r["Target"], r["Sample"]),
-                axis=1,
-            )
-
-            # Reorder columns for display
-            wells_df = wells_df[["Include", "Well", "Sample", "Target", "CT"]]
-
-            # Count total excluded wells across all gene-sample combinations
-            total_excluded = sum(
-                len(wells_set) for wells_set in st.session_state.excluded_wells.values()
-            )
-            st.markdown(
-                f"**Showing {len(wells_df)} wells** (Total excluded: {total_excluded})"
-            )
-
-            # Data editor for well selection
-            edited_wells_df = st.data_editor(
-                wells_df,
-                column_config={
-                    "Include": st.column_config.CheckboxColumn(
-                        "Include",
-                        help="Uncheck to exclude this well from analysis",
-                        default=True,
-                    ),
-                    "Well": st.column_config.TextColumn(
-                        "Well Position", disabled=True, width="small"
-                    ),
-                    "Sample": st.column_config.TextColumn("Sample", disabled=True),
-                    "Target": st.column_config.TextColumn(
-                        "Gene/Target", disabled=True, width="medium"
-                    ),
-                    "CT": st.column_config.NumberColumn(
-                        "CT Value", format="%.2f", disabled=True, width="small"
-                    ),
-                },
-                hide_index=True,
-                use_container_width=True,
-                height=400,
-                key="qc_summary_well_editor",
-            )
-
-            # Process changes - update excluded_wells dict with per-gene-sample exclusions
-            if edited_wells_df is not None:
-                for idx, row in edited_wells_df.iterrows():
-                    well = row["Well"]
-                    gene = row["Target"]
-                    sample = row["Sample"]
-                    include = row["Include"]
-
-                    # If unchecked (not include) and not already excluded -> add to excluded set
-                    if not include and not is_well_excluded(well, gene, sample):
-                        st.session_state.excluded_wells_history.append(
-                            {
-                                k: v.copy()
-                                for k, v in st.session_state.excluded_wells.items()
-                            }
-                        )
-                        exclude_well(well, gene, sample)
-                    # If checked (include) and currently excluded -> remove from excluded set
-                    elif include and is_well_excluded(well, gene, sample):
-                        st.session_state.excluded_wells_history.append(
-                            {
-                                k: v.copy()
-                                for k, v in st.session_state.excluded_wells.items()
-                            }
-                        )
-                        include_well(well, gene, sample)
-
-            # Batch action buttons
-            st.markdown("### Quick Actions")
-            action_cols = st.columns(4)
-
-            with action_cols[0]:
-                if st.button(
-                    "✅ Include All Visible",
-                    help="Include all wells currently shown in the table",
-                    use_container_width=True,
-                ):
-                    st.session_state.excluded_wells_history.append(
-                        {
-                            k: v.copy()
-                            for k, v in st.session_state.excluded_wells.items()
-                        }
-                    )
-                    for idx, row in wells_df.iterrows():
-                        well = row["Well"]
-                        gene = row["Target"]
-                        sample = row["Sample"]
-                        include_well(well, gene, sample)
-                    st.rerun()
-
-            with action_cols[1]:
-                if st.button(
-                    "❌ Exclude All Visible",
-                    help="Exclude all wells currently shown in the table",
-                    use_container_width=True,
-                ):
-                    st.session_state.excluded_wells_history.append(
-                        {
-                            k: v.copy()
-                            for k, v in st.session_state.excluded_wells.items()
-                        }
-                    )
-                    for idx, row in wells_df.iterrows():
-                        well = row["Well"]
-                        gene = row["Target"]
-                        sample = row["Sample"]
-                        exclude_well(well, gene, sample)
-                    st.rerun()
-
-            with action_cols[2]:
-                if st.button(
-                    "🔄 Include All Wells",
-                    help="Clear all exclusions (reset to include everything)",
-                    use_container_width=True,
-                ):
-                    st.session_state.excluded_wells_history.append(
-                        {
-                            k: v.copy()
-                            for k, v in st.session_state.excluded_wells.items()
-                        }
-                    )
-                    st.session_state.excluded_wells = {}
-                    st.rerun()
-
-            with action_cols[3]:
-                can_undo = len(st.session_state.excluded_wells_history) > 0
-                if st.button(
-                    "↩️ Undo",
-                    help="Undo last change to well exclusions",
-                    use_container_width=True,
-                    disabled=not can_undo,
-                ):
-                    if st.session_state.excluded_wells_history:
-                        st.session_state.excluded_wells = (
-                            st.session_state.excluded_wells_history.pop()
-                        )
-                        st.rerun()
-
-        # ==================== TAB 3: FLAGGED WELLS (LEGACY VIEW) ====================
-        with qc_tab3:
-            st.subheader("Auto-Flagged Wells")
-            st.caption(
-                "Wells automatically flagged by QC algorithms (CT thresholds, CV%, Grubbs test)"
-            )
-
-            qc_results = QualityControl.detect_outliers(data, hk_gene)
-            flagged = qc_results[qc_results["Flagged"]].copy()
-
-            if len(flagged) > 0:
-                st.warning(f"Found {len(flagged)} wells with potential issues")
-
-                # Create a more compact display using data_editor
-                flagged_display = flagged[
-                    ["Well", "Sample", "Target", "CT", "Issues", "Severity"]
-                ].copy()
-                flagged_display["Exclude"] = flagged_display.apply(
-                    lambda r: is_well_excluded(r["Well"], r["Target"], r["Sample"]),
-                    axis=1,
-                )
-                flagged_display = flagged_display[
-                    ["Exclude", "Well", "Sample", "Target", "CT", "Issues", "Severity"]
-                ]
-
-                edited_flagged = st.data_editor(
-                    flagged_display,
-                    column_config={
-                        "Exclude": st.column_config.CheckboxColumn(
-                            "Exclude",
-                            help="Check to exclude this well from analysis",
-                            default=False,
-                        ),
-                        "CT": st.column_config.NumberColumn(
-                            "CT", format="%.2f", disabled=True
-                        ),
-                        "Well": st.column_config.TextColumn("Well", disabled=True),
-                        "Sample": st.column_config.TextColumn("Sample", disabled=True),
-                        "Target": st.column_config.TextColumn("Target", disabled=True),
-                        "Issues": st.column_config.TextColumn("Issues", disabled=True),
-                        "Severity": st.column_config.TextColumn(
-                            "Severity", disabled=True
-                        ),
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="flagged_wells_editor",
-                )
-
-                # Process changes
-                if edited_flagged is not None:
-                    for idx, row in edited_flagged.iterrows():
-                        well = row["Well"]
-                        gene = row["Target"]
-                        sample = row["Sample"]
-                        exclude = row["Exclude"]
-
-                        if exclude and not is_well_excluded(well, gene, sample):
-                            st.session_state.excluded_wells_history.append(
-                                {
-                                    k: v.copy()
-                                    for k, v in st.session_state.excluded_wells.items()
-                                }
-                            )
-                            exclude_well(well, gene, sample)
-                        elif not exclude and is_well_excluded(well, gene, sample):
-                            st.session_state.excluded_wells_history.append(
-                                {
-                                    k: v.copy()
-                                    for k, v in st.session_state.excluded_wells.items()
-                                }
-                            )
-                            include_well(well, gene, sample)
-
-                # Batch action buttons
-                batch_cols = st.columns(3)
-                with batch_cols[0]:
+            if len(flagged_overview) > 0:
+                flag_ov_col1, flag_ov_col2 = st.columns([3, 1])
+                with flag_ov_col1:
+                    st.warning(f"Found {len(flagged_overview)} wells with potential issues")
+                with flag_ov_col2:
                     if st.button(
-                        "❌ Exclude All Flagged",
-                        type="secondary",
+                        "🚫 Exclude All Flagged",
                         use_container_width=True,
+                        key="qc_overview_exclude_flagged",
                     ):
                         st.session_state.excluded_wells_history.append(
-                            {
-                                k: v.copy()
-                                for k, v in st.session_state.excluded_wells.items()
-                            }
+                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                         )
-                        for _, row in flagged.iterrows():
+                        for _, row in flagged_overview.iterrows():
                             exclude_well(row["Well"], row["Target"], row["Sample"])
                         st.rerun()
 
-                with batch_cols[1]:
-                    if st.button("✅ Clear All Exclusions", use_container_width=True):
-                        st.session_state.excluded_wells_history.append(
-                            {
-                                k: v.copy()
-                                for k, v in st.session_state.excluded_wells.items()
-                            }
-                        )
-                        st.session_state.excluded_wells = {}
-                        st.rerun()
-
-                with batch_cols[2]:
-                    can_undo = len(st.session_state.excluded_wells_history) > 0
-                    if st.button(
-                        "↩️ Undo Last Change",
-                        use_container_width=True,
-                        disabled=not can_undo,
-                    ):
-                        if st.session_state.excluded_wells_history:
-                            st.session_state.excluded_wells = (
-                                st.session_state.excluded_wells_history.pop()
-                            )
-                            st.rerun()
+                flagged_display = flagged_overview[
+                    ["Well", "Sample", "Target", "CT", "Issues", "Severity"]
+                ].copy()
+                st.dataframe(
+                    flagged_display,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "CT": st.column_config.NumberColumn("CT", format="%.2f"),
+                    },
+                )
             else:
-                st.success(
-                    "✅ No quality issues detected! All wells pass QC thresholds."
-                )
-
-        # ==================== TAB 4: QC SETTINGS ====================
-        with qc_tab4:
-            st.subheader("QC Threshold Settings")
-            st.caption("Adjust thresholds for outlier detection algorithms")
-
-            thresh_col1, thresh_col2 = st.columns(2)
-
-            with thresh_col1:
-                st.markdown("### CT Value Thresholds")
-                new_ct_high = st.number_input(
-                    "High CT Threshold",
-                    min_value=25.0,
-                    max_value=45.0,
-                    value=float(QualityControl.CT_HIGH_THRESHOLD),
-                    step=0.5,
-                    help="Wells with CT above this are flagged as low expression",
-                )
-                QualityControl.CT_HIGH_THRESHOLD = new_ct_high
-
-                new_ct_low = st.number_input(
-                    "Low CT Threshold",
-                    min_value=5.0,
-                    max_value=20.0,
-                    value=float(QualityControl.CT_LOW_THRESHOLD),
-                    step=0.5,
-                    help="Wells with CT below this are flagged as unusually high expression",
-                )
-                QualityControl.CT_LOW_THRESHOLD = new_ct_low
-
-            with thresh_col2:
-                st.markdown("### Variability Thresholds")
-                new_cv = st.number_input(
-                    "CV% Threshold",
-                    min_value=1.0,
-                    max_value=20.0,
-                    value=float(QualityControl.CV_THRESHOLD * 100),
-                    step=0.5,
-                    help="Replicates with CV above this are flagged as high variability",
-                )
-                QualityControl.CV_THRESHOLD = new_cv / 100
-
-                new_hk_var = st.number_input(
-                    "HK Variation Threshold",
-                    min_value=0.5,
-                    max_value=3.0,
-                    value=float(QualityControl.HK_VARIATION_THRESHOLD),
-                    step=0.1,
-                    help="Housekeeping gene deviation threshold across samples",
-                )
-                QualityControl.HK_VARIATION_THRESHOLD = new_hk_var
+                st.success("✅ No quality issues detected! All wells pass QC thresholds.")
 
             st.markdown("---")
-            st.markdown("### About QC Algorithms")
-            st.markdown(
-                """
-            | Algorithm | Description | Threshold |
-            |-----------|-------------|-----------|
-            | **CT Range Check** | Flags wells with extreme CT values | CT > {:.0f} (low expression) or CT < {:.0f} (high expression) |
-            | **CV% Check** | Flags triplicates with high coefficient of variation | CV > {:.0f}% |
-            | **Grubbs Test** | Statistical outlier detection within triplicates (n≥3) | α = {:.2f} |
-            | **HK Deviation** | Flags samples where housekeeping gene deviates from mean | Deviation > {:.1f} Ct |
-            """.format(
-                    QualityControl.CT_HIGH_THRESHOLD,
-                    QualityControl.CT_LOW_THRESHOLD,
-                    QualityControl.CV_THRESHOLD * 100,
-                    QualityControl.GRUBBS_ALPHA,
-                    QualityControl.HK_VARIATION_THRESHOLD,
-                )
-            )
 
-            if st.button(
-                "🔄 Re-run QC with New Settings",
-                type="primary",
-                use_container_width=True,
-            ):
-                st.rerun()
-
-        # ==================== TAB 5: SUMMARY CHECK ====================
-        with qc_tab5:
-            st.subheader("Pre-Analysis Summary Check")
+            # ---- Section 3: Pre-Analysis Summary ----
+            st.markdown("### 📋 Pre-Analysis Summary")
             st.caption(
-                "Verify which wells will be used in analysis for each gene-sample combination. "
-                "Review this before running analysis to confirm exclusions are correct."
+                "Verify which wells will be used in analysis for each gene-sample combination."
             )
 
             all_genes_summary = sorted(data["Target"].unique())
             all_samples_summary = sorted(data["Sample"].unique(), key=natural_sort_key)
 
-            # Detect housekeeping gene (from session state or common names)
             hk_gene_name = st.session_state.get("hk_gene", None)
 
             summary_rows = []
@@ -3824,7 +3575,6 @@ with tab_qc:
                     total_wells = len(gene_sample_wells)
                     well_ids = gene_sample_wells["Well"].tolist()
 
-                    # Get excluded wells for this gene-sample
                     excluded_set = st.session_state.excluded_wells.get(
                         (gene, sample), set()
                     )
@@ -3834,7 +3584,6 @@ with tab_qc:
                     n_included = len(included_ids)
                     n_excluded = len(excluded_ids)
 
-                    # Compute stats on included wells only
                     included_cts = gene_sample_wells[
                         gene_sample_wells["Well"].isin(included_ids)
                     ]["CT"]
@@ -3861,7 +3610,6 @@ with tab_qc:
             if summary_rows:
                 summary_df = pd.DataFrame(summary_rows)
 
-                # Highlight rows with exclusions or low replicate count
                 total_exclusions = summary_df["Excluded"].sum()
                 low_rep = summary_df[summary_df["Included"] < 2]
 
@@ -3886,7 +3634,6 @@ with tab_qc:
                         "Statistics (SD, SEM, p-values) will be unreliable or zero."
                     )
 
-                # Display per-gene sections
                 for gene in all_genes_summary:
                     gene_rows = summary_df[summary_df["Gene"] == gene]
                     if gene_rows.empty:
