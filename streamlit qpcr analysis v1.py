@@ -2241,8 +2241,8 @@ class ReportGenerator:
             fig_copy = go.Figure(fig)
             fig_copy.update_layout(
                 width=1100,
-                height=600,
-                margin=dict(l=80, r=80, t=60, b=80),
+                height=700,
+                margin=dict(l=80, r=80, t=60, b=180),
                 font=dict(size=14),
             )
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2722,7 +2722,7 @@ class PPTGenerator:
         # Graph
         try:
             # Convert fig to image
-            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=800)
+            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=900)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
@@ -2835,8 +2835,8 @@ class PPTGenerator:
             fig_copy = go.Figure(fig)
             fig_copy.update_layout(
                 width=1100,
-                height=600,
-                margin=dict(l=80, r=80, t=60, b=80),
+                height=700,
+                margin=dict(l=80, r=80, t=60, b=180),
                 font=dict(size=14),
             )
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
