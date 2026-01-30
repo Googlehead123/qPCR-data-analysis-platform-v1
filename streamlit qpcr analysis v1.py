@@ -2963,7 +2963,7 @@ with st.sidebar:
         """)
 
 # Main tabs
-tab1, tab_qc, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+tab1, tab_qc, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "📁 Upload",
         "🔍 QC Check",
@@ -2971,7 +2971,6 @@ tab1, tab_qc, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         "🔬 Analysis",
         "📊 Graphs",
         "📤 Export",
-        "📑 PPT Report",
     ]
 )
 
@@ -5430,169 +5429,6 @@ with tab5:
         st.success("✅ All export options ready!")
     else:
         st.warning("⚠️ Complete analysis first")
-
-# ==================== TAB 6: PPT REPORT ====================
-with tab6:
-    st.header("Step 6: PowerPoint Presentation Export")
-
-    pptx_available = False
-    try:
-        from pptx import Presentation as _TestPptx
-
-        pptx_available = True
-    except ImportError:
-        pass
-
-    if not pptx_available:
-        st.error(
-            "⚠️ PowerPoint export is temporarily unavailable. The python-pptx package failed to load."
-        )
-        with st.expander("🔧 Debug Info"):
-            import sys
-
-            st.code(f"Python version: {sys.version}")
-            try:
-                import pkg_resources
-
-                installed = [f"{d.key}=={d.version}" for d in pkg_resources.working_set]
-                pptx_pkgs = [
-                    p for p in installed if "pptx" in p.lower() or "lxml" in p.lower()
-                ]
-                st.write("**Relevant packages:**")
-                if pptx_pkgs:
-                    for p in pptx_pkgs:
-                        st.code(p)
-                else:
-                    st.warning("python-pptx and lxml NOT found in installed packages")
-            except Exception as e:
-                st.error(f"Could not check packages: {e}")
-    else:
-        st.success("✅ PowerPoint export ready")
-
-    st.markdown(
-        """
-    <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 12px; color: white; margin-bottom: 20px;'>
-        <h3 style='margin: 0; color: white;'>📑 Publication-Ready Presentations</h3>
-        <p style='margin: 8px 0 0 0; opacity: 0.9;'>Generate professional PowerPoint slides with your gene expression graphs</p>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-    if st.session_state.graphs and st.session_state.processed_data and pptx_available:
-        n_genes = len(st.session_state.graphs)
-        gene_list = list(st.session_state.graphs.keys())
-        st.info(
-            f"**{n_genes} slides** will be generated (one graph per blank white slide): "
-            + ", ".join([f"**{g}**" for g in gene_list])
-        )
-
-        st.markdown("---")
-
-        if st.button(
-            "Generate PowerPoint",
-            type="primary",
-            use_container_width=True,
-        ):
-            try:
-                with st.spinner("Generating presentation..."):
-                    analysis_params = {
-                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "Efficacy_Type": st.session_state.get(
-                            "selected_efficacy", "qPCR Analysis"
-                        ),
-                        "Housekeeping_Gene": st.session_state.get("hk_gene", "N/A"),
-                        "Reference_Sample": st.session_state.get(
-                            "analysis_ref_condition", "N/A"
-                        ),
-                        "Compare_To": st.session_state.get(
-                            "analysis_cmp_condition", "N/A"
-                        ),
-                        "Genes_Analyzed": len(st.session_state.processed_data),
-                    }
-
-                    ppt_bytes = ReportGenerator.create_presentation(
-                        graphs=st.session_state.graphs,
-                        processed_data=st.session_state.processed_data,
-                        analysis_params=analysis_params,
-                    )
-
-                    st.session_state["ppt_bytes"] = ppt_bytes
-                    st.session_state["ppt_ready_for_download"] = True
-                    st.success("Presentation generated.")
-                    st.rerun()
-            except ImportError as e:
-                st.error(f"Import error: {str(e)}")
-            except Exception as e:
-                st.error(f"Error generating presentation: {str(e)}")
-
-        # Show download button if ready from one-click
-        if st.session_state.get("ppt_ready_for_download"):
-            efficacy = st.session_state.get("selected_efficacy", "qPCR")
-            filename = f"qPCR_{efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
-            st.download_button(
-                label="📥 Download Generated PPTX",
-                data=st.session_state["ppt_bytes"],
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                type="primary",
-                use_container_width=True,
-                key="one_click_download",
-            )
-            # Reset flag after showing
-            st.session_state["ppt_ready_for_download"] = False
-
-        st.markdown("---")
-        st.markdown("##### 📋 Standard Export (Two-Step)")
-
-        if "ppt_bytes" in st.session_state and st.session_state["ppt_bytes"]:
-            efficacy = st.session_state.get("selected_efficacy", "qPCR")
-            filename = (
-                f"qPCR_{efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
-            )
-
-            st.download_button(
-                label="📥 Download PPTX",
-                data=st.session_state["ppt_bytes"],
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                type="primary",
-                use_container_width=True,
-            )
-
-        st.markdown("---")
-
-        with st.expander("💡 Tips for Great Presentations", expanded=False):
-            st.markdown("""
-            **Layout Recommendations:**
-            - **One per slide**: Best for formal presentations, allows detailed discussion of each gene
-            - **Two per slide**: Good for comparing related genes or showing more data in less time
-            - **Grid view**: Great for overview slides or quick reference handouts
-            
-            **After Download:**
-            1. Open in PowerPoint or Google Slides
-            2. Adjust fonts and colors to match your organization's template
-            3. Add additional context or notes as needed
-            4. Consider adding a methods slide manually for complete presentations
-            
-            **For Publications:**
-            - Individual high-resolution images can be downloaded from the Export tab
-            - SVG format is recommended for vector graphics in publications
-            """)
-
-    elif pptx_available:
-        st.info(
-            "⏳ Generate graphs first in the Graphs tab to create a PowerPoint presentation."
-        )
-
-        st.markdown("""
-        ### How to use:
-        1. **Upload** your qPCR data in the Upload tab
-        2. **Map** your samples to conditions in the Mapping tab
-        3. **Run Analysis** to calculate ΔΔCt values
-        4. **Generate Graphs** in the Graphs tab
-        5. **Return here** to create your PowerPoint presentation
-        """)
 
 # ==================== FOOTER ====================
 st.markdown("---")

@@ -50,7 +50,7 @@ def _create_mock_streamlit():
     mock_st.success = MagicMock()
     mock_st.info = MagicMock()
     mock_st.spinner = MagicMock(return_value=MockContextManager())
-    mock_st.tabs = MagicMock(return_value=[MockContextManager() for _ in range(7)])
+    mock_st.tabs = MagicMock(side_effect=lambda labels: [MockContextManager() for _ in labels])
     mock_st.sidebar = MockContextManager()
     mock_st.columns = MagicMock(return_value=[MagicMock() for _ in range(3)])
     mock_st.expander = MagicMock(return_value=MockContextManager())
