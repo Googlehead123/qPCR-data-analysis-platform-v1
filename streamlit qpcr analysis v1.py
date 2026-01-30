@@ -3278,6 +3278,43 @@ with tab_qc:
 
                 st.markdown("---")
 
+                # ---- Health Status Grid ----
+                # Build triplicate stats for the currently visible genes/samples
+                _tri_data = QualityControl.get_triplicate_data(data, get_all_excluded_wells())
+
+                # Filter triplicate data to match current gene/sample filters
+                if selected_gene_filter != "All Genes":
+                    _tri_data = _tri_data[_tri_data["Target"] == selected_gene_filter]
+                if selected_sample_filter != "All Samples":
+                    _tri_data = _tri_data[_tri_data["Sample"] == selected_sample_filter]
+
+                if not _tri_data.empty:
+                    # Health summary banner
+                    _ok_count = (_tri_data["Severity"] == "ok").sum()
+                    _warn_count = (_tri_data["Severity"] == "warning").sum()
+                    _err_count = (_tri_data["Severity"] == "error").sum()
+                    _total = len(_tri_data)
+
+                    _banner_parts = []
+                    if _ok_count > 0:
+                        _banner_parts.append(f"✅ {_ok_count} OK")
+                    if _warn_count > 0:
+                        _banner_parts.append(f"⚠️ {_warn_count} Warning")
+                    if _err_count > 0:
+                        _banner_parts.append(f"❌ {_err_count} Error")
+
+                    st.markdown(
+                        f"**Triplicate Health:** {' &nbsp;|&nbsp; '.join(_banner_parts)} &nbsp; "
+                        f"(out of {_total} gene×sample groups)",
+                        unsafe_allow_html=True,
+                    )
+
+                    # Render the interactive grid
+                    with st.expander("🔍 Health Status Grid", expanded=False):
+                        render_triplicate_grid(_tri_data, st.session_state)
+
+                    st.markdown("---")
+
                 # Render per-gene expandable sections
                 for gene in display_genes:
                     gene_wells = wells_all[wells_all["Target"] == gene]
