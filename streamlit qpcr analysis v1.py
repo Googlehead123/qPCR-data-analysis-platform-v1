@@ -2129,9 +2129,9 @@ class GraphGenerator:
         )
 
         fig.update_layout(
-            title=None,
+            title="",
             xaxis=dict(
-                title=None,
+                title="",
                 showgrid=False,
                 zeroline=False,
                 tickmode="array",
