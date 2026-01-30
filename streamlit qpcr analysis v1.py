@@ -32,8 +32,8 @@ DEFAULT_GROUP_COLORS = {
     "Non-treated": "#FFFFFF",
     "Control": "#FFFFFF",
     "Negative Control": "#FFFFFF",
-    "Inducer": "#333333",
-    "Positive Control": "#333333",
+    "Inducer": "#909090",
+    "Positive Control": "#909090",
     "Treatment": "#D3D3D3",
 }
 
@@ -2060,6 +2060,7 @@ class GraphGenerator:
             title=dict(
                 text=y_label_html,
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14)),
+                standoff=15,
             ),
             showgrid=False,
             zeroline=True,
@@ -2139,6 +2140,9 @@ class GraphGenerator:
                 ticktext=wrapped_labels,
                 tickfont=dict(size=gene_tick_size),
                 tickangle=0,
+                ticks="outside",
+                ticklen=8,
+                tickcolor="rgba(0,0,0,0)",
                 showline=False,
                 mirror=False,
                 side="bottom",
