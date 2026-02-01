@@ -3295,17 +3295,44 @@ with tab_qc:
                         with st.form(key=f"well_form_{gene}"):
                             st.caption("Check/uncheck wells to include or exclude, then click Apply.")
                             checkbox_states = {}
-                            for idx, row in gene_editor_df.iterrows():
-                                well = row["Well"]
-                                sample = row["Sample"]
-                                ct_val = row["CT"]
-                                dev_val = row["Deviation"]
-                                label = f"{well} | {sample} | CT {ct_val:.2f} | Dev {dev_val:+.3f}"
-                                checkbox_states[idx] = st.checkbox(
-                                    label,
-                                    value=row["Include"],
-                                    key=f"cb_{gene}_{well}_{sample}",
+                            for s_idx, sample_name in enumerate(gene_samples):
+                                sample_rows = gene_editor_df[gene_editor_df["Sample"] == sample_name]
+                                n_total = len(sample_rows)
+                                n_included = int(sample_rows["Include"].sum())
+                                included_cts = pd.to_numeric(
+                                    sample_rows[sample_rows["Include"] == True]["CT"], errors="coerce"
                                 )
+                                if len(included_cts) >= 2:
+                                    s_mean = included_cts.mean()
+                                    s_sd = included_cts.std(ddof=1)
+                                    s_cv = (s_sd / s_mean * 100) if s_mean != 0 else 0.0
+                                    stats_str = f"Mean {s_mean:.2f} · SD {s_sd:.3f} · CV {s_cv:.1f}%"
+                                elif len(included_cts) == 1:
+                                    stats_str = f"Mean {included_cts.mean():.2f} · SD N/A"
+                                else:
+                                    stats_str = "No wells included"
+                                st.markdown(
+                                    f'<div style="padding:8px 0 4px 0;font-weight:600;font-size:0.9rem;color:#1d1d1f;">'
+                                    f'{sample_name}'
+                                    f'<span style="font-weight:400;color:#86868b;font-size:0.8rem;margin-left:8px;">'
+                                    f'{n_included}/{n_total} included · {stats_str}</span></div>',
+                                    unsafe_allow_html=True,
+                                )
+                                for idx, row in sample_rows.iterrows():
+                                    well = row["Well"]
+                                    ct_val = row["CT"]
+                                    dev_val = row["Deviation"]
+                                    label = f"{well}  ·  CT {ct_val:.2f}  ·  Dev {dev_val:+.3f}"
+                                    checkbox_states[idx] = st.checkbox(
+                                        label,
+                                        value=row["Include"],
+                                        key=f"cb_{gene}_{well}_{sample_name}",
+                                    )
+                                if s_idx < len(gene_samples) - 1:
+                                    st.markdown(
+                                        '<hr style="margin:8px 0;border:none;border-top:1px solid #e5e5e7;">',
+                                        unsafe_allow_html=True,
+                                    )
                             submitted = st.form_submit_button("Apply Changes")
 
                         if submitted:
@@ -3331,25 +3358,7 @@ with tab_qc:
                             if changed:
                                 st.rerun()
 
-                        # Display per-sample statistics with CV%
-                        st.markdown("**Per-Sample Statistics:**")
-                        for sample in gene_samples:
-                            sample_wells = gene_editor_df[gene_editor_df["Sample"] == sample]
-                            included_wells = sample_wells[sample_wells["Include"] == True]
-                            n_included = len(included_wells)
 
-                            if n_included == 0:
-                                st.caption(f"  • {sample}: ⚠️ No wells included")
-                            elif n_included == 1:
-                                ct_values = pd.to_numeric(included_wells["CT"], errors='coerce')
-                                mean_ct = ct_values.mean()
-                                st.caption(f"  • {sample}: n=1, Mean CT={mean_ct:.2f}, SD=N/A, CV=N/A")
-                            else:
-                                ct_values = pd.to_numeric(included_wells["CT"], errors='coerce')
-                                mean_ct = ct_values.mean()
-                                ct_sd = ct_values.std(ddof=1)
-                                cv_pct = (ct_sd / mean_ct * 100) if mean_ct != 0 else 0.0
-                                st.caption(f"  • {sample}: n={n_included}, Mean CT={mean_ct:.2f}, SD={ct_sd:.3f}, CV={cv_pct:.1f}%")
 
         # ==================== TAB 2: QC OVERVIEW (CONSOLIDATED) ====================
         with qc_tab2:
