@@ -21,10 +21,143 @@ def natural_sort_key(sample_name):
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
-    page_title="qPCR Analysis Suite Pro",
+    page_title="qPCR Analysis Suite",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ==================== GLOBAL THEME ====================
+st.markdown("""
+<style>
+    /* Apple-inspired monochrome theme */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    /* Base typography */
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+    }
+
+    /* Clean headers */
+    h1, h2, h3 { font-weight: 600; letter-spacing: -0.02em; color: #1d1d1f; }
+    h1 { font-size: 2rem; }
+    h2 { font-size: 1.5rem; }
+    h3 { font-size: 1.15rem; }
+
+    /* Subtle metric cards */
+    [data-testid="stMetric"] {
+        background: #fafafa;
+        border: 1px solid #f0f0f0;
+        border-radius: 12px;
+        padding: 16px;
+    }
+    [data-testid="stMetricValue"] { font-weight: 600; color: #1d1d1f; }
+    [data-testid="stMetricLabel"] { color: #86868b; font-weight: 500; font-size: 0.85rem; }
+
+    /* Clean tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0;
+        border-bottom: 1px solid #e5e5e7;
+        background: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 12px 24px;
+        font-weight: 500;
+        font-size: 0.9rem;
+        color: #86868b;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #1d1d1f;
+        border-bottom: 2px solid #1d1d1f;
+        background: transparent;
+    }
+
+    /* Clean buttons */
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        font-size: 0.85rem;
+        border: 1px solid #e5e5e7;
+        background: #ffffff;
+        color: #1d1d1f;
+        transition: all 0.2s ease;
+        padding: 8px 16px;
+    }
+    .stButton > button:hover {
+        background: #f5f5f7;
+        border-color: #d2d2d7;
+    }
+    .stButton > button[kind="primary"] {
+        background: #1d1d1f;
+        color: #ffffff;
+        border-color: #1d1d1f;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: #424245;
+    }
+
+    /* Clean expanders */
+    .streamlit-expanderHeader {
+        font-weight: 500;
+        font-size: 0.95rem;
+        color: #1d1d1f;
+        background: transparent;
+        border: none;
+    }
+    .streamlit-expanderContent {
+        border: 1px solid #f0f0f0;
+        border-radius: 0 0 8px 8px;
+        padding: 16px;
+    }
+
+    /* Clean dataframes */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #f0f0f0;
+        border-radius: 8px;
+    }
+
+    /* Clean select boxes */
+    [data-testid="stSelectbox"] label { color: #86868b; font-weight: 500; font-size: 0.85rem; }
+
+    /* Plotly chart container */
+    [data-testid="stPlotlyChart"] {
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background: #fafafa;
+        border-right: 1px solid #f0f0f0;
+    }
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+        font-size: 1rem;
+        color: #1d1d1f;
+    }
+
+    /* Clean dividers */
+    hr { border: none; border-top: 1px solid #f0f0f0; margin: 24px 0; }
+
+    /* Form submit button */
+    .stForm [data-testid="stFormSubmitButton"] > button {
+        background: #1d1d1f;
+        color: #ffffff;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+    }
+
+    /* Success/warning/error minimal */
+    .stAlert { border-radius: 8px; border: none; }
+
+    /* Number inputs */
+    [data-testid="stNumberInput"] label { color: #86868b; font-weight: 500; font-size: 0.85rem; }
+
+    /* Caption text */
+    .stCaption { color: #86868b; }
+</style>
+""", unsafe_allow_html=True)
 
 # ==================== CONSTANTS ====================
 DEFAULT_GROUP_COLORS = {
@@ -1059,206 +1192,6 @@ def is_cell_selected(session_state, gene: str, sample: str) -> bool:
         return False
 
     return selected[0] == gene and selected[1] == sample
-
-
-# ==================== QC GRID UI HELPERS ====================
-def build_grid_matrix(triplicate_data: pd.DataFrame) -> dict:
-    """Transform triplicate DataFrame into nested grid structure.
-
-    Converts raw triplicate-level qPCR data into a nested dictionary structure
-    suitable for grid rendering: {gene: {sample: cell_data}}.
-
-    Each cell contains aggregated statistics (mean_ct, cv, status, n) for a
-    gene-sample combination.
-
-    Args:
-        triplicate_data: DataFrame from QualityControl.get_triplicate_data()
-                        with columns: Sample, Target, n, Mean_CT, SD, CV_pct,
-                        Range, Status, Severity
-
-    Returns:
-        Nested dictionary: {gene: {sample: {"mean_ct": float, "cv": float,
-                                            "status": str, "n": int}}}
-                          Returns empty dict if input is empty.
-    """
-    if triplicate_data.empty:
-        return {}
-
-    matrix = {}
-
-    # Group by Target (gene) and Sample
-    for (gene, sample), group in triplicate_data.groupby(["Target", "Sample"]):
-        # Get the first row (all rows in group have same aggregated stats)
-        row = group.iloc[0]
-
-        # Extract cell data
-        cell_data = {
-            "mean_ct": float(row["Mean_CT"]),
-            "cv": float(row["CV_pct"]),
-            "status": str(row["Status"]),
-            "n": int(row["n"]),
-        }
-
-        # Build nested structure
-        if gene not in matrix:
-            matrix[gene] = {}
-
-        matrix[gene][sample] = cell_data
-
-    return matrix
-
-
-def get_cell_status_color(status: str) -> str:
-    """Map status string to CSS color code for cell styling.
-
-    Determines the background color for a grid cell based on its quality status:
-    - "OK" → green (#d4edda)
-    - Warnings ("High CV", "Low n", "High range" ≤ 2.0) → yellow (#fff3cd)
-    - Errors ("Has outlier", "High range" > 2.0) → red (#f8d7da)
-
-    Args:
-        status: Status string from get_health_status() (e.g., "OK",
-               "High CV (5.2%)", "Has outlier", "High range (1.5)")
-
-    Returns:
-        CSS color code as hex string (e.g., "#d4edda")
-    """
-    if status == "OK":
-        return "#d4edda"  # green
-    elif "Has outlier" in status:
-        return "#f8d7da"  # red - critical error
-    elif "High range" in status:
-        # Extract numeric value from "High range (X.X)"
-        try:
-            match = re.search(r"High range \(([0-9.]+)\)", status)
-            if match:
-                range_value = float(match.group(1))
-                if range_value > 2.0:
-                    return "#f8d7da"  # red - critical
-                else:
-                    return "#fff3cd"  # yellow - warning
-        except (ValueError, AttributeError):
-            pass
-        return "#fff3cd"  # default to yellow for High range
-    elif "High CV" in status or "Low n" in status:
-        return "#fff3cd"  # yellow - warning
-    else:
-        return ""  # no color for unknown status
-
-
-def get_cell_display_text(cell_data: dict) -> str:
-    """Format cell data into compact display string for grid rendering.
-
-    Creates a concise text representation of cell statistics suitable for
-    display in a grid cell. Format: "n=X, CV=Y.Z%"
-
-    Args:
-        cell_data: Dictionary with keys: mean_ct, cv, status, n
-                  (from build_grid_matrix output)
-
-    Returns:
-        Formatted string like "n=3, CV=2.1%"
-    """
-    n = cell_data.get("n", 0)
-    cv = cell_data.get("cv", 0.0)
-
-    return f"n={n}, CV={cv:.1f}%"
-
-
-def render_triplicate_grid(triplicate_data: pd.DataFrame, session_state) -> None:
-    """Render interactive grid of triplicate status cells.
-
-    Displays genes as rows and samples as columns. Each cell shows status color
-    indicator and summary stats. Clicking a cell selects it for detailed editing.
-
-    Args:
-        triplicate_data: Filtered DataFrame from QualityControl.get_triplicate_data()
-        session_state: Streamlit session state object
-    """
-    if triplicate_data.empty:
-        st.info("No data matches the current filters.")
-        return
-
-    # Build grid matrix
-    grid_matrix = build_grid_matrix(triplicate_data)
-
-    # Get sorted lists of genes and samples
-    genes = sorted(list(grid_matrix.keys()))
-    if not genes:
-        return
-
-    # Get all unique samples across all genes to ensure consistent columns
-    all_samples = set()
-    for g in genes:
-        all_samples.update(grid_matrix[g].keys())
-    samples = sorted(list(all_samples), key=natural_sort_key)
-
-    # Grid layout
-    # Use columns: First col for Gene name, rest for Samples
-    # Adjust column weights: Gene col wider
-    col_ratio = [1.5] + [1] * len(samples)
-
-    # Render Header Row
-    cols = st.columns(col_ratio)
-    cols[0].markdown("**Gene / Sample**")
-    for i, sample in enumerate(samples):
-        cols[i + 1].markdown(f"**{sample}**")
-
-    st.markdown("---")
-
-    # Render Gene Rows
-    for gene in genes:
-        cols = st.columns(col_ratio)
-        cols[0].markdown(f"**{gene}**")
-
-        for i, sample in enumerate(samples):
-            cell_data = grid_matrix[gene].get(sample)
-
-            if cell_data:
-                # Determine status indicator
-                status = cell_data["status"]
-                display_text = get_cell_display_text(cell_data)
-
-                # Add status emoji
-                if status == "OK":
-                    emoji = "✅"
-                elif (
-                    "Has outlier" in status
-                    or "High range" in status
-                    and "2.0" in status
-                ):  # Rough check
-                    emoji = "❌"
-                elif "High range" in status:
-                    # Check value if possible, or default to warning
-                    emoji = "⚠️"
-                elif "High CV" in status or "Low n" in status:
-                    emoji = "⚠️"
-                else:
-                    emoji = "❓"
-
-                # Check if selected
-                is_selected = is_cell_selected(session_state, gene, sample)
-
-                # Button label
-                label = f"{emoji} {display_text}"
-                if is_selected:
-                    label = f"🔵 {label}"
-
-                # Unique key for button
-                btn_key = get_grid_cell_key(gene, sample)
-
-                if cols[i + 1].button(
-                    label,
-                    key=btn_key,
-                    help=f"Status: {status}\nMean CT: {cell_data['mean_ct']:.2f}",
-                    use_container_width=True,
-                ):
-                    set_selected_cell(session_state, gene, sample)
-                    st.rerun()
-            else:
-                cols[i + 1].markdown("-")
-
-    st.markdown("---")
 
 
 # ==================== ANALYSIS ENGINE ====================
@@ -2913,39 +2846,39 @@ def export_to_excel(
 
 
 # ==================== UI ====================
-st.title("🧬 qPCR Analysis Suite Pro")
-st.markdown("**Gene-by-gene analysis with efficacy-specific workflows**")
+st.title("qPCR Analysis Suite")
+st.caption("Gene-by-gene analysis with efficacy-specific workflows")
 
 # Sidebar
 with st.sidebar:
-    st.header("💬 Quick Guide")
+    st.header("Quick Guide")
     st.markdown("""
-    1. **📁 Upload** CSV files
-    2. **🔍 QC Check** - Review outliers & exclude bad wells
-    3. **🗺️ Mapping** - Assign conditions & groups
-    4. **🔬 Analysis** - Run ΔΔCt calculations
-    5. **📊 Graphs** - Customize visualizations
-    6. **📤 Export** - Download publication-ready files
+    1. **Upload** — CSV files
+    2. **QC Check** — Review outliers & exclude bad wells
+    3. **Mapping** — Assign conditions & groups
+    4. **Analysis** — Run DDCt calculations
+    5. **Graphs** — Customize visualizations
+    6. **Export** — Download publication-ready files
     """)
 
     st.markdown("---")
-    st.markdown("### ⚡ Quick Actions")
+    st.markdown("### Quick Actions")
 
     if st.session_state.get("data") is not None:
-        st.success(f"✅ {len(st.session_state.data)} wells loaded")
+        st.success(f"{len(st.session_state.data)} wells loaded")
 
         excluded_dict = st.session_state.get("excluded_wells", {})
         excluded = sum(len(ws) for ws in excluded_dict.values()) if isinstance(excluded_dict, dict) else len(excluded_dict)
         if excluded > 0:
-            st.warning(f"⚠️ {excluded} well-exclusions active")
+            st.warning(f"{excluded} well-exclusions active")
 
         if st.session_state.get("processed_data"):
-            st.success(f"✅ {len(st.session_state.processed_data)} genes analyzed")
+            st.success(f"{len(st.session_state.processed_data)} genes analyzed")
     else:
-        st.info("📁 Upload data to begin")
+        st.info("Upload data to begin")
 
     st.markdown("---")
-    with st.expander("⌨️ Navigation Tips"):
+    with st.expander("Navigation Tips"):
         st.markdown("""
         **Tab Navigation**
         - Click tab headers to switch
@@ -2965,12 +2898,12 @@ with st.sidebar:
 # Main tabs
 tab1, tab_qc, tab2, tab3, tab4, tab5 = st.tabs(
     [
-        "📁 Upload",
-        "🔍 QC Check",
-        "🗺️ Mapping",
-        "🔬 Analysis",
-        "📊 Graphs",
-        "📤 Export",
+        "Upload",
+        "QC Check",
+        "Mapping",
+        "Analysis",
+        "Graphs",
+        "Export",
     ]
 )
 
@@ -3067,10 +3000,10 @@ with tab1:
             )
             col4.metric("HK Gene", st.session_state.hk_gene)
 
-        st.subheader("📊 Data Preview")
+        st.subheader("Data Preview")
         st.dataframe(st.session_state.data.head(50), height=300)
 
-        st.subheader("⚠️ Data Validation")
+        st.subheader("Data Validation")
         warnings_found = False
 
         data = st.session_state.data
@@ -3121,15 +3054,7 @@ with tab_qc:
             st.session_state.excluded_wells_history = []
 
         # ==================== QC SUMMARY DASHBOARD ====================
-        st.markdown(
-            """
-        <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 10px; color: white; margin-bottom: 20px;'>
-            <h4 style='margin: 0; color: white;'>🔍 Comprehensive Quality Control</h4>
-            <p style='margin: 5px 0 0 0; opacity: 0.9;'>Browse all CT values, review triplicates, and exclude outliers before analysis</p>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        st.caption("Browse all CT values, review triplicates, and exclude outliers before analysis.")
 
         # Get comprehensive QC stats using helper to get all excluded wells
         qc_stats = QualityControl.get_qc_summary_stats(data, get_all_excluded_wells())
@@ -3192,8 +3117,8 @@ with tab_qc:
         # ==================== MAIN QC INTERFACE WITH TABS ====================
         qc_tab1, qc_tab2 = st.tabs(
             [
-                "🔬 Triplicate Browser",
-                "📋 QC Overview",
+                "Triplicate Browser",
+                "QC Overview",
             ]
         )
 
@@ -3205,7 +3130,7 @@ with tab_qc:
             )
 
             # ---- Inline QC Settings (collapsed) ----
-            with st.expander("⚙️ QC Settings", expanded=False):
+            with st.expander("QC Settings", expanded=False):
                 thresh_col1, thresh_col2 = st.columns(2)
                 with thresh_col1:
                     new_ct_high = st.number_input(
@@ -3261,7 +3186,7 @@ with tab_qc:
                 with flag_col1:
                     st.warning(f"⚠️ **{len(flagged)} wells** auto-flagged by QC algorithms (CT thresholds, CV%, Grubbs test)")
                 with flag_col2:
-                    if st.button("🚫 Auto-Exclude Flagged", use_container_width=True, key="qc_auto_exclude_flagged"):
+                    if st.button("Auto-Exclude Flagged", use_container_width=True, key="qc_auto_exclude_flagged"):
                         st.session_state.excluded_wells_history.append(
                             {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                         )
@@ -3339,55 +3264,6 @@ with tab_qc:
 
                 st.markdown("---")
 
-                # ---- Health Status Grid (expanded by default) ----
-                _tri_data = QualityControl.get_triplicate_data(data, get_all_excluded_wells())
-
-                # Filter triplicate data to match current gene/sample filters
-                if selected_gene_filter != "All Genes":
-                    _tri_data = _tri_data[_tri_data["Target"] == selected_gene_filter]
-                if selected_sample_filter != "All Samples":
-                    _tri_data = _tri_data[_tri_data["Sample"] == selected_sample_filter]
-
-                if not _tri_data.empty:
-                    # Health summary banner
-                    _ok_count = (_tri_data["Severity"] == "ok").sum()
-                    _warn_count = (_tri_data["Severity"] == "warning").sum()
-                    _err_count = (_tri_data["Severity"] == "error").sum()
-                    _total = len(_tri_data)
-
-                    _banner_parts = []
-                    if _ok_count > 0:
-                        _banner_parts.append(f"✅ {_ok_count} OK")
-                    if _warn_count > 0:
-                        _banner_parts.append(f"⚠️ {_warn_count} Warning")
-                    if _err_count > 0:
-                        _banner_parts.append(f"❌ {_err_count} Error")
-
-                    st.markdown(
-                        f"**Triplicate Health:** {' &nbsp;|&nbsp; '.join(_banner_parts)} &nbsp; "
-                        f"(out of {_total} gene×sample groups)",
-                        unsafe_allow_html=True,
-                    )
-
-                    # Build a lookup for per-gene severity from triplicate data
-                    _gene_severity = {}
-                    for _g in _tri_data["Target"].unique():
-                        _g_data = _tri_data[_tri_data["Target"] == _g]
-                        if (_g_data["Severity"] == "error").any():
-                            _gene_severity[_g] = "❌"
-                        elif (_g_data["Severity"] == "warning").any():
-                            _gene_severity[_g] = "⚠️"
-                        else:
-                            _gene_severity[_g] = "✅"
-
-                    # Render the interactive grid (expanded by default)
-                    with st.expander("🔍 Health Status Grid", expanded=True):
-                        render_triplicate_grid(_tri_data, st.session_state)
-
-                    st.markdown("---")
-                else:
-                    _gene_severity = {}
-
                 # Render per-gene expandable sections
                 for gene in display_genes:
                     gene_wells = wells_all[wells_all["Target"] == gene]
@@ -3399,9 +3275,7 @@ with tab_qc:
                         if is_well_excluded(r["Well"], gene, r["Sample"])
                     )
 
-                    # Status indicator for gene
-                    gene_status = _gene_severity.get(gene, "")
-                    gene_label = f"{gene_status} {gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)" if gene_excluded > 0 else f"{gene_status} {gene}  ({len(gene_wells)} wells)"
+                    gene_label = f"{gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)" if gene_excluded > 0 else f"{gene}  ({len(gene_wells)} wells)"
 
                     with st.expander(gene_label, expanded=(selected_gene_filter != "All Genes")):
                         # Build editable dataframe for this gene
@@ -3418,45 +3292,49 @@ with tab_qc:
                         # Reorder
                         gene_editor_df = gene_editor_df[["Include", "Well", "Sample", "CT", "Deviation"]]
 
-                        edited_gene_df = st.data_editor(
-                            gene_editor_df,
-                            column_config={
-                                "Include": st.column_config.CheckboxColumn(
-                                    "Include",
-                                    help="Uncheck to exclude this well",
-                                    default=True,
-                                ),
-                                "Well": st.column_config.TextColumn("Well", disabled=True, width="small"),
-                                "Sample": st.column_config.TextColumn("Sample", disabled=True),
-                                "CT": st.column_config.NumberColumn("CT", format="%.2f", disabled=True, width="small"),
-                                "Deviation": st.column_config.NumberColumn("Dev", format="%.3f", disabled=True, width="small"),
-                            },
-                            hide_index=True,
-                            use_container_width=True,
-                            key=f"well_editor_{gene}",
-                        )
-
-                        # Process changes
-                        if edited_gene_df is not None:
-                            for idx, row in edited_gene_df.iterrows():
+                        with st.form(key=f"well_form_{gene}"):
+                            st.caption("Check/uncheck wells to include or exclude, then click Apply.")
+                            checkbox_states = {}
+                            for idx, row in gene_editor_df.iterrows():
                                 well = row["Well"]
                                 sample = row["Sample"]
-                                include = row["Include"]
+                                ct_val = row["CT"]
+                                dev_val = row["Deviation"]
+                                label = f"{well} | {sample} | CT {ct_val:.2f} | Dev {dev_val:+.3f}"
+                                checkbox_states[idx] = st.checkbox(
+                                    label,
+                                    value=row["Include"],
+                                    key=f"cb_{gene}_{well}_{sample}",
+                                )
+                            submitted = st.form_submit_button("Apply Changes")
+
+                        if submitted:
+                            changed = False
+                            for idx, include in checkbox_states.items():
+                                row = gene_editor_df.loc[idx]
+                                well = row["Well"]
+                                sample = row["Sample"]
                                 if not include and not is_well_excluded(well, gene, sample):
-                                    st.session_state.excluded_wells_history.append(
-                                        {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                                    )
+                                    if not changed:
+                                        st.session_state.excluded_wells_history.append(
+                                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                                        )
+                                        changed = True
                                     exclude_well(well, gene, sample)
                                 elif include and is_well_excluded(well, gene, sample):
-                                    st.session_state.excluded_wells_history.append(
-                                        {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                                    )
+                                    if not changed:
+                                        st.session_state.excluded_wells_history.append(
+                                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                                        )
+                                        changed = True
                                     include_well(well, gene, sample)
+                            if changed:
+                                st.rerun()
 
                         # Display per-sample statistics with CV%
                         st.markdown("**Per-Sample Statistics:**")
                         for sample in gene_samples:
-                            sample_wells = edited_gene_df[edited_gene_df["Sample"] == sample]
+                            sample_wells = gene_editor_df[gene_editor_df["Sample"] == sample]
                             included_wells = sample_wells[sample_wells["Include"] == True]
                             n_included = len(included_wells)
 
@@ -3479,7 +3357,7 @@ with tab_qc:
             st.caption("Plate heatmap, auto-flagged wells, and pre-analysis summary at a glance.")
 
             # ---- Section 1: Plate Heatmap ----
-            st.markdown("### 🧪 Plate Heatmap")
+            st.markdown("### Plate Heatmap")
             heatmap_col1, heatmap_col2 = st.columns([2, 1])
 
             with heatmap_col1:
@@ -3488,8 +3366,40 @@ with tab_qc:
                 )
                 st.plotly_chart(plate_fig, use_container_width=True)
                 st.caption(
-                    "🔴 Red = High CT (low expression) | 🟢 Green = Low CT (high expression) | ❌ = Excluded"
+                    "Red = High CT (low expression) | Green = Low CT (high expression) | X = Excluded"
                 )
+
+                # Per-gene heatmap
+                all_genes = sorted(data["Target"].dropna().unique().tolist())
+                if all_genes:
+                    selected_gene = st.selectbox(
+                        "Filter heatmap by gene",
+                        options=["(All)"] + all_genes,
+                        key="heatmap_gene_select",
+                    )
+                    if selected_gene != "(All)":
+                        gene_data = data[data["Target"] == selected_gene]
+                        gene_fig = QualityControl.create_plate_heatmap(
+                            gene_data, value_col="CT", excluded_wells=get_all_excluded_wells()
+                        )
+                        gene_fig.update_layout(title=f"Plate Heatmap — {selected_gene}")
+                        st.plotly_chart(gene_fig, use_container_width=True)
+
+                # Per-sample heatmap
+                all_samples = sorted(data["Sample"].dropna().unique().tolist(), key=natural_sort_key)
+                if all_samples:
+                    selected_sample = st.selectbox(
+                        "Filter heatmap by sample",
+                        options=["(All)"] + all_samples,
+                        key="heatmap_sample_select",
+                    )
+                    if selected_sample != "(All)":
+                        sample_data = data[data["Sample"] == selected_sample]
+                        sample_fig = QualityControl.create_plate_heatmap(
+                            sample_data, value_col="CT", excluded_wells=get_all_excluded_wells()
+                        )
+                        sample_fig.update_layout(title=f"Plate Heatmap — {selected_sample}")
+                        st.plotly_chart(sample_fig, use_container_width=True)
 
             with heatmap_col2:
                 st.markdown("**Replicate Statistics**")
@@ -3510,7 +3420,7 @@ with tab_qc:
             st.markdown("---")
 
             # ---- Section 2: Flagged Wells (read-only) ----
-            st.markdown("### ⚠️ Flagged Wells")
+            st.markdown("### Flagged Wells")
 
             qc_results_overview = QualityControl.detect_outliers(data, hk_gene)
             flagged_overview = qc_results_overview[qc_results_overview["Flagged"]].copy()
@@ -3521,7 +3431,7 @@ with tab_qc:
                     st.warning(f"Found {len(flagged_overview)} wells with potential issues")
                 with flag_ov_col2:
                     if st.button(
-                        "🚫 Exclude All Flagged",
+                        "Exclude All Flagged",
                         use_container_width=True,
                         key="qc_overview_exclude_flagged",
                     ):
@@ -3549,7 +3459,7 @@ with tab_qc:
             st.markdown("---")
 
             # ---- Section 3: Pre-Analysis Summary ----
-            st.markdown("### 📋 Pre-Analysis Summary")
+            st.markdown("### Pre-Analysis Summary")
             st.caption(
                 "Verify which wells will be used in analysis for each gene-sample combination."
             )
@@ -3895,7 +3805,7 @@ with tab2:
 
         # Summary with styled cards
         st.markdown("---")
-        st.subheader("📊 Mapping Summary")
+        st.subheader("Mapping Summary")
 
         col_card1, col_card2, col_card3, col_card4 = st.columns(4)
 
@@ -3947,7 +3857,7 @@ with tab2:
 
         # Run analysis
         st.markdown("---")
-        st.subheader("🔬 Run Full Analysis (ΔΔCt + Statistics)")
+        st.subheader("Run Full Analysis (DDCt + Statistics)")
 
         # Build condition list from mapping
         condition_list = []
@@ -4091,7 +4001,7 @@ with tab2:
             col_sum1, col_sum2, col_sum3 = st.columns([1, 2, 1])
             with col_sum2:
                 summary_html = f"""
-                <div style='background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center;'>
+                <div style='background: #fafafa; padding: 20px; border-radius: 12px; text-align: center; border: 1px solid #f0f0f0;'>
                     <h4>Analysis Summary</h4>
                     <p><b>Fold Changes:</b> Relative to <code>{ref_condition}</code></p>
                     <p><b>P-values (*):</b> Compared to <code>{cmp_condition}</code></p>
@@ -4149,7 +4059,7 @@ with tab3:
     st.header("Step 3: Analysis Results")
 
     if st.session_state.processed_data:
-        st.subheader("📊 Analysis Summary")
+        st.subheader("Analysis Summary")
 
         # Summary metrics
         all_results = pd.concat(
@@ -4163,7 +4073,7 @@ with tab3:
         col3.metric("Significant (p<0.05)", f"{sig_count}/{len(all_results)}")
 
         # Show results per gene
-        st.subheader("🧬 Gene-by-Gene Results")
+        st.subheader("Gene-by-Gene Results")
 
         for gene, gene_df in st.session_state.processed_data.items():
             with st.expander(f"📍 {gene}", expanded=False):
@@ -4233,44 +4143,7 @@ with tab3:
 with tab4:
     st.header("Step 4: Individual Gene Graphs")
 
-    st.markdown(
-        """
-    <style>
-    [data-testid="stPlotlyChart"] {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        border-radius: 8px;
-        background: white;
-        padding: 10px;
-    }
-    
-    .stExpander {
-        background-color: #FAFAFA;
-        border-left: 3px solid #E0E0E0;
-        margin-bottom: 5px;
-    }
-    
-    .gene-selector-btn {
-        transition: all 0.2s ease;
-    }
-    
-    .graph-toolbar {
-        background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
-        padding: 12px 16px;
-        border-radius: 8px;
-        margin-bottom: 16px;
-    }
-    
-    .stat-highlight {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: 600;
-    }
-    </style>
-    """,
-        unsafe_allow_html=True,
-    )
+    # Graph tab styles handled by global theme
 
     if st.session_state.processed_data:
         if "graph_settings" not in st.session_state:
@@ -4306,21 +4179,9 @@ with tab4:
         if "selected_gene_idx" not in st.session_state:
             st.session_state.selected_gene_idx = 0
 
-        st.markdown(
-            """
-        <style>
-        .gene-pill { display: inline-block; padding: 8px 16px; margin: 2px; border-radius: 20px;
-                     font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        .gene-pill-active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-        .gene-pill-inactive { background: #f0f2f6; color: #333; }
-        .compact-control { background: #fafafa; padding: 8px; border-radius: 8px; margin: 4px 0; }
-        .color-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 4px; }
-        </style>
-        """,
-            unsafe_allow_html=True,
-        )
+        # Gene pill styles handled by global theme
 
-        st.markdown("### 🧬 Select Gene")
+        st.markdown("### Select Gene")
         gene_cols = st.columns(min(len(gene_list), 6))
         for idx, gene in enumerate(gene_list):
             with gene_cols[idx % len(gene_cols)]:
@@ -4409,26 +4270,7 @@ with tab4:
 
         if unique_conditions:
             with st.expander("🎨 Condition Colors (applies to all genes)", expanded=True):
-                st.markdown(
-                    """
-                <style>
-                .condition-color-card {
-                    background: #f8f9fa;
-                    border: 1px solid #e9ecef;
-                    border-radius: 8px;
-                    padding: 12px;
-                    margin-bottom: 8px;
-                }
-                .condition-color-title {
-                    font-size: 13px;
-                    font-weight: 600;
-                    color: #333;
-                    margin-bottom: 8px;
-                }
-                </style>
-                """,
-                    unsafe_allow_html=True,
-                )
+                # Condition card styles handled by global theme
 
                 st.markdown("#### Set Colors by Condition")
                 st.caption(
@@ -4521,35 +4363,8 @@ with tab4:
                 }
 
         if edit_mode:
-            with st.expander("🎨 Bar Color & Visibility Editor", expanded=True):
-                st.markdown(
-                    """
-                <style>
-                .color-editor-card {
-                    background: #f8f9fa;
-                    border: 1px solid #e9ecef;
-                    border-radius: 8px;
-                    padding: 12px;
-                    margin-bottom: 8px;
-                }
-                .color-editor-title {
-                    font-size: 13px;
-                    font-weight: 600;
-                    color: #333;
-                    margin-bottom: 4px;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                }
-                .color-editor-subtitle {
-                    font-size: 11px;
-                    color: #666;
-                    margin-bottom: 8px;
-                }
-                </style>
-                """,
-                    unsafe_allow_html=True,
-                )
+            with st.expander("Bar Color & Visibility Editor", expanded=True):
+                # Color editor styles handled by global theme
 
                 n_bars = len(gene_data)
                 n_cols = min(n_bars, 3)
@@ -4769,7 +4584,7 @@ with tab5:
     st.header("Step 5: Export All Results")
 
     if st.session_state.processed_data:
-        st.subheader("📦 Download Options")
+        st.subheader("Download Options")
 
         analysis_params = {
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -4840,7 +4655,7 @@ with tab5:
                 )
 
         st.markdown("---")
-        st.subheader("📑 PowerPoint Report")
+        st.subheader("PowerPoint Report")
         st.caption(
             "Generate a slide deck with title, gene slides, and summary (Navy Blue Template)"
         )
@@ -4879,7 +4694,7 @@ with tab5:
                 )
 
         st.markdown("---")
-        st.subheader("📋 Individual Downloads")
+        st.subheader("Individual Downloads")
 
         col1, col2, col3 = st.columns(3)
 
@@ -4942,7 +4757,7 @@ with tab5:
             )
 
         st.markdown("---")
-        st.subheader("📸 Publication-Ready Images")
+        st.subheader("Publication-Ready Images")
         st.caption("High-resolution images suitable for journals and reports")
 
         pub_col1, pub_col2, pub_col3 = st.columns(3)
@@ -5025,7 +4840,7 @@ with tab5:
                         break
 
             st.markdown("---")
-            st.subheader("📦 Batch Export (ZIP)")
+            st.subheader("Batch Export (ZIP)")
 
             batch_col1, batch_col2 = st.columns(2)
 
@@ -5218,9 +5033,8 @@ with tab5:
 st.markdown("---")
 
 footer_html = """
-<div style='text-align: center; color: #666;'>
-    <p>🧬 qPCR Analysis Suite Pro v3.1 | Gene-by-gene analysis with efficacy-specific workflows</p>
-    <p>QC Check • Outlier Detection • Publication-Ready Export • PowerPoint Reports</p>
+<div style='text-align: center; color: #86868b; padding: 24px 0; font-size: 0.85rem;'>
+    <p style='margin: 0;'>qPCR Analysis Suite v3.1</p>
 </div>
 """
 
