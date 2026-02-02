@@ -178,6 +178,9 @@ COSMAX_LAB_WHITE = "#F3F0ED"  # Secondary background (off-white)
 COSMAX_FROST_GREY = "#C1C6C7"  # Secondary elements, table headers
 COSMAX_CREAM = "#D4CEC1"  # Secondary data series, neutral accents
 
+# Font family with CJK (Korean) support for Plotly image export (kaleido)
+PLOTLY_FONT_FAMILY = "Noto Sans CJK KR, Arial, sans-serif"
+
 
 # ==================== SESSION STATE INIT ====================
 # Helper function for well exclusion management
@@ -1948,7 +1951,7 @@ class GraphGenerator:
                         y=base_y_position + (fixed_symbol_spacing * 0.2),
                         text=symbols_to_show[0],
                         showarrow=False,
-                        font=dict(size=font_sizes[0], color="black", family="Arial"),
+                        font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
                         xref="x",
                         yref="y",
                         xanchor="center",
@@ -1964,7 +1967,7 @@ class GraphGenerator:
                         + fixed_symbol_spacing,
                         text=symbols_to_show[1],
                         showarrow=False,
-                        font=dict(size=font_sizes[1], color="black", family="Arial"),
+                        font=dict(size=font_sizes[1], color="black", family=PLOTLY_FONT_FAMILY),
                         xref="x",
                         yref="y",
                         xanchor="center",
@@ -1978,7 +1981,7 @@ class GraphGenerator:
                         y=base_y_position + (fixed_symbol_spacing * 0.2),
                         text=symbols_to_show[0],
                         showarrow=False,
-                        font=dict(size=font_sizes[0], color="black", family="Arial"),
+                        font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
                         xref="x",
                         yref="y",
                         xanchor="center",
@@ -1992,7 +1995,7 @@ class GraphGenerator:
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
-                font=dict(size=settings.get(f"{gene}_ylabel_size", 14)),
+                font=dict(size=settings.get(f"{gene}_ylabel_size", 14), family=PLOTLY_FONT_FAMILY),
                 standoff=15,
             ),
             showgrid=False,
@@ -2059,7 +2062,7 @@ class GraphGenerator:
             xanchor="right",
             yanchor="top",
             showarrow=False,
-            font=dict(size=12, color="#666666", family="Arial"),
+            font=dict(size=12, color="#666666", family=PLOTLY_FONT_FAMILY),
             bgcolor="rgba(255,255,255,0.9)",
             bordercolor="#CCCCCC",
             borderwidth=1,
@@ -2087,7 +2090,7 @@ class GraphGenerator:
             ),
             yaxis=y_axis_config,
             template=settings.get("color_scheme", "plotly_white"),
-            font=dict(size=settings.get("font_size", 14)),
+            font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY),
             height=settings.get("figure_height", 600),
             width=settings.get("figure_width", 1000),
             bargap=gene_bar_gap,
@@ -2180,7 +2183,7 @@ class ReportGenerator:
                 width=1100,
                 height=700,
                 margin=dict(l=80, r=80, t=60, b=180),
-                font=dict(size=14),
+                font=dict(size=14, family=PLOTLY_FONT_FAMILY),
             )
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
             img_stream = io.BytesIO(img_bytes)
@@ -2324,7 +2327,7 @@ class ReportGenerator:
             width=1000,
             height=550,
             margin=dict(l=60, r=60, t=60, b=80),
-            font=dict(size=14),
+            font=dict(size=14, family=PLOTLY_FONT_FAMILY),
         )
 
         img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2402,7 +2405,7 @@ class ReportGenerator:
                 width=600,
                 height=450,
                 margin=dict(l=50, r=30, t=40, b=60),
-                font=dict(size=11),
+                font=dict(size=11, family=PLOTLY_FONT_FAMILY),
             )
 
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2453,8 +2456,8 @@ class ReportGenerator:
                 width=350,
                 height=280,
                 margin=dict(l=40, r=20, t=35, b=40),
-                font=dict(size=9),
-                title=dict(text=gene, font=dict(size=12)),
+                font=dict(size=9, family=PLOTLY_FONT_FAMILY),
+                title=dict(text=gene, font=dict(size=12, family=PLOTLY_FONT_FAMILY)),
             )
 
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2774,7 +2777,7 @@ class PPTGenerator:
                 width=1100,
                 height=700,
                 margin=dict(l=80, r=80, t=60, b=180),
-                font=dict(size=14),
+                font=dict(size=14, family=PLOTLY_FONT_FAMILY),
             )
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
             img_stream = io.BytesIO(img_bytes)
@@ -4805,8 +4808,8 @@ with tab5:
                         fig_copy.update_layout(
                             width=img_width,
                             height=img_height,
-                            font=dict(size=14),
-                            title=dict(font=dict(size=18)),
+                            font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+                            title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY)),
                             margin=dict(b=180),
                         )
 
@@ -4878,7 +4881,8 @@ with tab5:
                                 )
                                 fig_copy = go.Figure(fig)
                                 fig_copy.update_layout(
-                                    width=img_width, height=img_height, margin=dict(b=180)
+                                    width=img_width, height=img_height, margin=dict(b=180),
+                                    font=dict(family=PLOTLY_FONT_FAMILY),
                                 )
 
                                 png_bytes = fig_copy.to_image(
@@ -4969,7 +4973,8 @@ with tab5:
                                 )
                                 fig_copy = go.Figure(fig)
                                 fig_copy.update_layout(
-                                    width=img_width, height=img_height, margin=dict(b=180)
+                                    width=img_width, height=img_height, margin=dict(b=180),
+                                    font=dict(family=PLOTLY_FONT_FAMILY),
                                 )
 
                                 png_bytes = fig_copy.to_image(
