@@ -4272,94 +4272,6 @@ with tab4:
                 help="Check this to customize colors for individual bars within each gene graph"
             )
 
-        # ==================== CONDITION COLOR PICKER ====================
-        if "condition_colors" not in st.session_state:
-            st.session_state.condition_colors = {}
-
-        # Extract unique conditions from sample_mapping
-        unique_conditions = set()
-        if st.session_state.sample_mapping:
-            for sample, info in st.session_state.sample_mapping.items():
-                if info.get("include", True):
-                    condition = info.get("condition", sample)
-                    unique_conditions.add(condition)
-
-        if unique_conditions:
-            with st.expander("🎨 Condition Colors (applies to all genes)", expanded=True):
-                # Condition card styles handled by global theme
-
-                st.markdown("#### Set Colors by Condition")
-                st.caption(
-                    "These colors apply to all bars with the same condition across all genes"
-                )
-
-                # Display color picker for each unique condition
-                sorted_conditions = sorted(list(unique_conditions))
-                n_cols = min(len(sorted_conditions), 3)
-                color_cols = st.columns(n_cols)
-
-                for idx, condition in enumerate(sorted_conditions):
-                    # Get default color from first sample with this condition
-                    default_color = "#D3D3D3"
-                    for sample, info in st.session_state.sample_mapping.items():
-                        if info.get("condition", sample) == condition:
-                            group = info.get("group", "Treatment")
-                            default_color = DEFAULT_GROUP_COLORS.get(group, "#D3D3D3")
-                            break
-
-                    # Get current color or use default
-                    current_color = st.session_state.condition_colors.get(
-                        condition, default_color
-                    )
-
-                    with color_cols[idx % n_cols]:
-                        with st.container():
-                            display_name = (
-                                condition
-                                if len(condition) <= 18
-                                else condition[:15] + "..."
-                            )
-                            st.markdown(
-                                f"""
-                            <div class='condition-color-card'>
-                                <div class='condition-color-title' title='{condition}'>{display_name}</div>
-                            </div>
-                            """,
-                                unsafe_allow_html=True,
-                            )
-
-                            selected_color = st.color_picker(
-                                "Color",
-                                current_color,
-                                key=f"condition_color_{condition}",
-                                help=f"Color for condition: {condition}",
-                            )
-                            st.session_state.condition_colors[condition] = (
-                                selected_color
-                            )
-
-                st.markdown("---")
-                button_cols = st.columns(2)
-
-                with button_cols[0]:
-                    if st.button(
-                        "✅ Apply to All Graphs",
-                        key="apply_condition_colors",
-                        use_container_width=True,
-                    ):
-                        st.success("Condition colors applied! Regenerating graphs...")
-                        st.rerun()
-
-                with button_cols[1]:
-                    if st.button(
-                        "🔄 Reset to Defaults",
-                        key="reset_condition_colors",
-                        use_container_width=True,
-                    ):
-                        st.session_state.condition_colors = {}
-                        st.info("Condition colors reset to defaults")
-                        st.rerun()
-
         if f"{current_gene}_bar_settings" not in st.session_state:
             st.session_state[f"{current_gene}_bar_settings"] = {}
         if "bar_colors_per_sample" not in st.session_state.graph_settings:
@@ -4673,7 +4585,7 @@ with tab5:
         st.markdown("---")
         st.subheader("PowerPoint Report")
         st.caption(
-            "Generate a slide deck with title, gene slides, and summary (Navy Blue Template)"
+            "Generate a slide deck with title, gene slides, and summary"
         )
 
         ppt_col1, ppt_col2 = st.columns([1, 2])
