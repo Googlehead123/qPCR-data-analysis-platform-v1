@@ -179,7 +179,12 @@ COSMAX_FROST_GREY = "#C1C6C7"  # Secondary elements, table headers
 COSMAX_CREAM = "#D4CEC1"  # Secondary data series, neutral accents
 
 # Font family with CJK (Korean) support for Plotly image export (kaleido)
-PLOTLY_FONT_FAMILY = "Noto Sans CJK KR, Arial, sans-serif"
+# Cross-platform fallback: Linux → Windows → macOS → generic
+PLOTLY_FONT_FAMILY = (
+    "Noto Sans CJK KR, NanumGothic, Malgun Gothic, "
+    "Apple SD Gothic Neo, AppleGothic, "
+    "Arial, sans-serif"
+)
 
 
 # ==================== SESSION STATE INIT ====================

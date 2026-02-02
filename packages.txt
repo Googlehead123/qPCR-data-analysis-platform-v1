@@ -2,3 +2,4 @@ libxml2-dev
 libxslt-dev
 chromium
 chromium-driver
+fonts-noto-cjk
