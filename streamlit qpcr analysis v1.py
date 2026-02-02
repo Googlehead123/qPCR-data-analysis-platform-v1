@@ -2034,16 +2034,20 @@ class GraphGenerator:
             GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names
         ]
 
-        # P-VALUE LEGEND - Support dual comparison
-        legend_text = "<b>Significance:</b>  * p<0.05  ** p<0.01  *** p<0.001"
+        # P-VALUE LEGEND - Support dual comparison with reference names
+        cmp_ref_name = st.session_state.get("analysis_cmp_condition", "")
+        legend_ref_label = f" (vs {cmp_ref_name})" if cmp_ref_name else ""
+        legend_text = f"<b>Significance{legend_ref_label}:</b>  * p<0.05  ** p<0.01  *** p<0.001"
 
         # Check if there's a second p-value comparison in the data
         if (
             "significance_2" in gene_data_indexed.columns
             and gene_data_indexed["significance_2"].notna().any()
         ):
+            cmp_ref_name_2 = st.session_state.get("analysis_cmp_condition_2", "")
+            legend_ref_label_2 = f" (vs {cmp_ref_name_2})" if cmp_ref_name_2 else ""
             legend_text += (
-                "<br><b>2nd Comparison:</b>  # p<0.05  ## p<0.01  ### p<0.001"
+                f"<br><b>2nd Comparison{legend_ref_label_2}:</b>  # p<0.05  ## p<0.01  ### p<0.001"
             )
 
         fig.add_annotation(
