@@ -10,3 +10,4 @@ seaborn
 kaleido
 lxml>=4.9.0
 python-pptx>=0.6.21
+streamlit-sortables
