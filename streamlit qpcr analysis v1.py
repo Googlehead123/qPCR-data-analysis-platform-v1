@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy import stats
+from streamlit_sortables import sort_items
 import io
 import warnings
 import json
@@ -3685,6 +3686,67 @@ with tab2:
             if "include" not in st.session_state.sample_mapping[sample]:
                 st.session_state.sample_mapping[sample]["include"] = True
 
+        # --- Drag-and-drop sample reordering ---
+        st.markdown("#### 📋 Sample Order (Drag to Reorder)")
+        st.caption("Drag items to rearrange the display order for analysis and graphs.")
+
+        _sortable_style = """
+        .sortable-component {
+            background: transparent;
+            padding: 0;
+        }
+        .sortable-container {
+            background: transparent;
+            counter-reset: item;
+            padding: 0;
+        }
+        .sortable-container-header {
+            display: none;
+        }
+        .sortable-container-body {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: 4px 0;
+        }
+        .sortable-item {
+            background: #ffffff;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 8px 14px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #1d1d1f;
+            cursor: grab;
+            transition: all 0.15s ease;
+            user-select: none;
+        }
+        .sortable-item:hover {
+            background: #f5f5f7;
+            border-color: #c0c0c0;
+        }
+        .sortable-item::before {
+            content: counter(item) ". ";
+            counter-increment: item;
+            color: #888;
+            font-weight: 600;
+            margin-right: 6px;
+        }
+        """
+
+        sorted_samples = sort_items(
+            [{"header": "order", "items": st.session_state.sample_order}],
+            multi_containers=True,
+            custom_style=_sortable_style,
+            key="sample_order_sort",
+        )
+        new_order = sorted_samples[0]["items"] if sorted_samples else st.session_state.sample_order
+
+        if new_order != st.session_state.sample_order:
+            st.session_state.sample_order = new_order
+
+        st.markdown("---")
+
         # Header row with styled background
         st.markdown(
             """
@@ -3693,10 +3755,9 @@ with tab2:
                 <tr>
                     <th style='width: 5%; text-align: center;'>✓</th>
                     <th style='width: 10%;'>Order</th>
-                    <th style='width: 15%;'>Original</th>
-                    <th style='width: 25%;'>Condition Name</th>
-                    <th style='width: 20%;'>Group</th>
-                    <th style='width: 10%;'>Move</th>
+                    <th style='width: 20%;'>Original</th>
+                    <th style='width: 35%;'>Condition Name</th>
+                    <th style='width: 25%;'>Group</th>
                 </tr>
             </table>
         </div>
@@ -3711,8 +3772,8 @@ with tab2:
         for i, sample in enumerate(display_samples):
             # Container for each row
             with st.container():
-                col0, col_order, col1, col2, col3, col_move = st.columns(
-                    [0.5, 0.8, 1.5, 2.5, 2, 1]
+                col0, col_order, col1, col2, col3 = st.columns(
+                    [0.5, 0.8, 2, 3, 2.5]
                 )
 
                 # Include checkbox
@@ -3773,42 +3834,6 @@ with tab2:
                         label_visibility="collapsed",
                     )
                     st.session_state.sample_mapping[sample]["group"] = grp
-
-                # Move controls - FIXED: Use immutable operations to prevent race conditions
-                with col_move:
-                    btn_col1, btn_col2 = st.columns(2)
-                    with btn_col1:
-                        if i > 0:
-                            if st.button(
-                                "⬆",
-                                key=f"up_{sample}_{i}",
-                                help="Move up",
-                                width="stretch",
-                            ):
-                                # Create new list with swapped items (immutable operation)
-                                new_order = st.session_state.sample_order.copy()
-                                new_order[i], new_order[i - 1] = (
-                                    new_order[i - 1],
-                                    new_order[i],
-                                )
-                                st.session_state.sample_order = new_order
-                                st.rerun()
-                    with btn_col2:
-                        if i < len(display_samples) - 1:
-                            if st.button(
-                                "⬇",
-                                key=f"down_{sample}_{i}",
-                                help="Move down",
-                                width="stretch",
-                            ):
-                                # Create new list with swapped items (immutable operation)
-                                new_order = st.session_state.sample_order.copy()
-                                new_order[i], new_order[i + 1] = (
-                                    new_order[i + 1],
-                                    new_order[i],
-                                )
-                                st.session_state.sample_order = new_order
-                                st.rerun()
 
                 # Divider line
                 st.markdown(
