@@ -87,7 +87,6 @@ def _create_mock_streamlit():
 
 
 sys.modules["streamlit"] = _create_mock_streamlit()
-sys.modules["streamlit_sortables"] = MagicMock()
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +94,6 @@ def mock_streamlit():
     """Auto-use fixture to mock Streamlit for all tests."""
     mock_st = _create_mock_streamlit()
     sys.modules["streamlit"] = mock_st
-    sys.modules["streamlit_sortables"] = MagicMock()
 
     main_module_name = "streamlit qpcr analysis v1"
     if main_module_name in sys.modules:
