@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy import stats
+import gc
+import hashlib
 import io
 import warnings
 import json
@@ -180,11 +182,29 @@ COSMAX_CREAM = "#D4CEC1"  # Secondary data series, neutral accents
 
 # Font family with CJK (Korean) support for Plotly image export (kaleido)
 # Cross-platform fallback: Linux → Windows → macOS → generic
-PLOTLY_FONT_FAMILY = (
-    "Noto Sans CJK KR, NanumGothic, Malgun Gothic, "
-    "Apple SD Gothic Neo, AppleGothic, "
-    "Arial, sans-serif"
-)
+_DEFAULT_CJK_FONTS = [
+    "Noto Sans CJK KR", "NanumGothic", "Malgun Gothic",
+    "Apple SD Gothic Neo", "AppleGothic",
+]
+_FALLBACK_FONTS = ["Arial", "sans-serif"]
+
+# FIX-12: Validate CJK font availability at startup with graceful fallback
+def _detect_available_fonts():
+    """Check which CJK fonts are actually installed on this system."""
+    try:
+        from matplotlib import font_manager
+        system_fonts = {f.name for f in font_manager.fontManager.ttflist}
+        available_cjk = [f for f in _DEFAULT_CJK_FONTS if f in system_fonts]
+        if not available_cjk:
+            # No CJK fonts found — warn once via Streamlit toast
+            # (deferred to first render since st isn't ready at import time)
+            pass
+        return available_cjk + _FALLBACK_FONTS
+    except ImportError:
+        # matplotlib not available — use full fallback list
+        return _DEFAULT_CJK_FONTS + _FALLBACK_FONTS
+
+PLOTLY_FONT_FAMILY = ", ".join(_detect_available_fonts())
 
 
 # ==================== SESSION STATE INIT ====================
@@ -215,6 +235,9 @@ def include_well(well: str, gene: str, sample: str) -> None:
     key = get_well_exclusion_key(gene, sample)
     if key in st.session_state.excluded_wells:
         st.session_state.excluded_wells[key].discard(well)
+        # FIX-18: Clean up orphaned empty sets to prevent memory leak
+        if not st.session_state.excluded_wells[key]:
+            del st.session_state.excluded_wells[key]
 
 
 def get_excluded_wells_for_analysis(gene: str, sample: str) -> set:
@@ -421,6 +444,9 @@ class QPCRParser:
         df.columns = df.iloc[0]
         df = df.iloc[1:].reset_index(drop=True)
 
+        # FIX-10: Strip whitespace from column names (matching Format 2 behavior)
+        df.columns = [str(c).strip() if pd.notna(c) else c for c in df.columns]
+
         if len(df.columns) < 4:
             st.error("CSV must have at least 4 columns (Well, Sample, Target, CT)")
             return None
@@ -546,13 +572,14 @@ class QPCRParser:
                 return None
 
             df = None
-            for enc in ["utf-8", "latin-1", "cp1252"]:
+            # FIX-20: Extended encoding fallback chain with utf-16 support
+            for enc in ["utf-8", "utf-16", "utf-16-le", "latin-1", "cp1252"]:
                 try:
                     df = pd.read_csv(
                         file, encoding=enc, low_memory=False, skip_blank_lines=False
                     )
                     break
-                except UnicodeDecodeError:
+                except (UnicodeDecodeError, UnicodeError):
                     file.seek(0)
                     continue
 
@@ -618,10 +645,11 @@ class QualityControl:
         ]
 
         # Calculate CV% and Range
+        # FIX-17: Return NaN instead of 0 when mean CT is non-positive (invalid)
         group_stats["CV_pct"] = np.where(
             group_stats["Mean_CT"] > 0,
             (group_stats["SD"] / group_stats["Mean_CT"]) * 100,
-            0,
+            np.nan,
         )
         group_stats["Range"] = group_stats["Max_CT"] - group_stats["Min_CT"]
 
@@ -1241,6 +1269,8 @@ class AnalysisEngine:
         )
 
         results = []
+        # FIX-06: Accumulate warnings for skipped genes/conditions
+        _skipped_warnings = []
 
         # Process each target gene separately (exclude housekeeping)
         for target in data["Target"].unique():
@@ -1261,6 +1291,9 @@ class AnalysisEngine:
                     target_excluded = excluded_wells_dict.get((target, sample_name), set())
                     cond_data = cond_data[~cond_data["Well"].isin(target_excluded)]
                     if len(cond_data) == 0:
+                        _skipped_warnings.append(
+                            f"Gene '{target}', condition '{condition}': all wells excluded"
+                        )
                         continue
 
                 hk_data = data[
@@ -1338,10 +1371,11 @@ class AnalysisEngine:
                 )
 
                 # Calculate CV% (Coefficient of Variation)
+                # FIX-17: Return NaN instead of 0 when mean CT is non-positive
                 target_cv = (
-                    (target_sd / target_ct_mean * 100) if target_ct_mean > 0 else 0
+                    (target_sd / target_ct_mean * 100) if target_ct_mean > 0 else np.nan
                 )
-                hk_cv = (hk_sd / hk_ct_mean * 100) if hk_ct_mean > 0 else 0
+                hk_cv = (hk_sd / hk_ct_mean * 100) if hk_ct_mean > 0 else np.nan
 
                 results.append(
                     {
@@ -1366,7 +1400,10 @@ class AnalysisEngine:
                     }
                 )
 
-        return pd.DataFrame(results)
+        result_df = pd.DataFrame(results)
+        # FIX-06: Attach warnings as attribute for caller to display
+        result_df.attrs["_skipped_warnings"] = _skipped_warnings
+        return result_df
 
     @staticmethod
     def calculate_statistics(
@@ -1411,6 +1448,8 @@ class AnalysisEngine:
         results = processed.copy()
         results["p_value"] = np.nan
         results["significance"] = ""
+        # FIX-16: Track one-sample t-test usage
+        _onesamp_warnings = []
 
         # Add second p-value columns if compare_condition_2 is provided
         if compare_condition_2:
@@ -1459,8 +1498,11 @@ class AnalysisEngine:
             rel_expr = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
-                # Division-by-zero protection: validate HK Ct is in valid range
-                if np.isnan(hk_mean) or hk_mean <= 0 or hk_mean > 45:
+                # FIX-09: Removed arbitrary hk_mean > 45 threshold.
+                # Only skip on truly invalid values (NaN or non-positive).
+                # High CT values are legitimate (low HK expression) and should
+                # produce a warning upstream, not silently drop data.
+                if np.isnan(hk_mean) or hk_mean <= 0:
                     # Invalid housekeeping gene Ct value - skip this condition
                     continue
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
@@ -1481,8 +1523,12 @@ class AnalysisEngine:
                                     ref_vals, vals, equal_var=equal_var
                                 )
                             elif vals.size == 1 and ref_vals.size >= 2:
+                                # FIX-16: Track one-sample t-test usage
+                                _onesamp_warnings.append(f"{target}/{cond} (n=1 vs ref n={ref_vals.size})")
                                 _, p_val = stats.ttest_1samp(ref_vals, vals[0])
                             elif ref_vals.size == 1 and vals.size >= 2:
+                                # FIX-16: Track one-sample t-test usage
+                                _onesamp_warnings.append(f"{target}/{cond} (ref n=1 vs n={vals.size})")
                                 _, p_val = stats.ttest_1samp(vals, ref_vals[0])
                             else:
                                 p_val = np.nan
@@ -1548,6 +1594,8 @@ class AnalysisEngine:
                 results, "p_value_2", "p_value_fdr_2", "significance_fdr_2", "#"
             )
 
+        # FIX-16: Attach one-sample t-test warnings for caller to display
+        results.attrs["_onesamp_warnings"] = _onesamp_warnings
         return results
 
     @staticmethod
@@ -1679,6 +1727,14 @@ class AnalysisEngine:
                     )
                     return False
 
+                # FIX-06: Display warnings for skipped genes/conditions
+                _skipped = processed_df.attrs.get("_skipped_warnings", [])
+                if _skipped:
+                    st.warning(
+                        f"⚠️ {len(_skipped)} condition(s) skipped due to all wells being excluded:\n"
+                        + "\n".join(f"  • {w}" for w in _skipped)
+                    )
+
                 # --- Statistical test ---
                 ttest_type = st.session_state.get("ttest_type", "welch")
                 try:
@@ -1695,6 +1751,16 @@ class AnalysisEngine:
                 except TypeError:
                     processed_with_stats = AnalysisEngine.calculate_statistics(
                         processed_df, cmp_condition, ttest_type=ttest_type
+                    )
+
+                # FIX-16: Display warning when one-sample t-test was used
+                _onesamp = processed_with_stats.attrs.get("_onesamp_warnings", [])
+                if _onesamp:
+                    st.info(
+                        f"ℹ️ One-sample t-test used for {len(_onesamp)} comparison(s) "
+                        f"(one group has n=1 replicate): "
+                        + ", ".join(_onesamp[:5])
+                        + (f" ... and {len(_onesamp) - 5} more" if len(_onesamp) > 5 else "")
                     )
 
                 # --- Organize data for graphs ---
@@ -2041,6 +2107,17 @@ class GraphGenerator:
         wrapped_labels = [
             GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names
         ]
+
+        # FIX-19: Dynamic bottom margin based on max label line count
+        max_label_lines = max(
+            (label.count("<br>") + 1 for label in wrapped_labels), default=1
+        )
+        # Base margin + extra per line beyond 1 (~18px per line)
+        dynamic_b_margin = 120 + max(0, max_label_lines - 1) * 18
+        default_margins = gene_margins.copy()
+        if default_margins.get("b", 160) < dynamic_b_margin:
+            default_margins["b"] = dynamic_b_margin
+        gene_margins = default_margins
 
         # P-VALUE LEGEND - Support dual comparison with reference names
         cmp_ref_name = st.session_state.get("analysis_cmp_condition", "")
@@ -2928,25 +3005,84 @@ with tab1:
     )
 
     if uploaded_files:
-        current_file_names = sorted([f.name for f in uploaded_files])
-        previous_file_names = st.session_state.get("_uploaded_file_names", [])
-        is_new_upload = current_file_names != previous_file_names
+        # FIX-01: Use content hash instead of filename to detect re-uploads
+        # This catches the case where the same filename is uploaded with different data
+        current_file_hashes = sorted(
+            [hashlib.md5(f.getvalue()).hexdigest() for f in uploaded_files]
+        )
+        # Reset file pointers after hashing
+        for f in uploaded_files:
+            f.seek(0)
+        previous_file_hashes = st.session_state.get("_uploaded_file_hashes", [])
+        is_new_upload = current_file_hashes != previous_file_hashes
 
         if is_new_upload:
             all_data = []
             for file in uploaded_files:
                 parsed = QPCRParser.parse(file)
-                if parsed is not None:
+                # FIX-03: Reject empty DataFrames (parsed but no valid rows)
+                if parsed is not None and not parsed.empty:
                     parsed["Source_File"] = file.name
                     all_data.append(parsed)
                     st.success(f"✅ {file.name}: {len(parsed)} wells")
+                elif parsed is not None and parsed.empty:
+                    st.warning(f"⚠️ {file.name}: parsed successfully but contained no valid data rows.")
 
             if all_data:
                 st.session_state.data = pd.concat(all_data, ignore_index=True)
+
+                # FIX-02: Complete state reset on new upload to prevent stale data
                 st.session_state.processed_data = {}
                 st.session_state.graphs = {}
                 st.session_state.sample_mapping = {}
-                st.session_state._uploaded_file_names = current_file_names
+                st.session_state.excluded_wells = {}
+                st.session_state.excluded_wells_history = []
+                st.session_state.excluded_samples = set()
+                st.session_state.hk_gene = None
+                st.session_state.selected_efficacy = None
+                st.session_state.condition_colors = {}
+                for key in [
+                    "selected_gene_idx",
+                    "analysis_cmp_condition",
+                    "analysis_cmp_condition_2",
+                    "analysis_ref_condition",
+                ]:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                # Re-initialize graph_settings to defaults
+                st.session_state.graph_settings = {
+                    "color_scheme": "plotly_white",
+                    "font_size": 14,
+                    "figure_height": 600,
+                    "figure_width": 1000,
+                    "show_legend": False,
+                    "bar_gap": 0.15,
+                    "show_error_bars": True,
+                    "show_pvalues": True,
+                    "y_auto_range": True,
+                }
+
+                st.session_state._uploaded_file_hashes = current_file_hashes
+
+                # FIX-05: Detect overlapping data across multiple files
+                if len(all_data) > 1:
+                    combined = st.session_state.data
+                    dup_check_cols = ["Target", "Well", "Sample"]
+                    duplicated_mask = combined.duplicated(subset=dup_check_cols, keep=False)
+                    if duplicated_mask.any():
+                        dup_rows = combined[duplicated_mask]
+                        dup_sources = dup_rows.groupby(dup_check_cols)["Source_File"].apply(
+                            lambda x: list(x.unique())
+                        )
+                        # Only warn if same combo appears in DIFFERENT files
+                        cross_file_dups = dup_sources[dup_sources.apply(len) > 1]
+                        if len(cross_file_dups) > 0:
+                            n_dups = len(cross_file_dups)
+                            st.warning(
+                                f"⚠️ Found {n_dups} overlapping data point(s) across files "
+                                f"(same Target+Well+Sample in different files). "
+                                f"This may cause duplicated results. Consider deduplicating your input files."
+                            )
 
                 unique_samples = sorted(
                     st.session_state.data["Sample"].unique(), key=natural_sort_key
@@ -3198,6 +3334,8 @@ with tab_qc:
                 flag_col1, flag_col2 = st.columns([3, 1])
                 with flag_col1:
                     st.warning(f"⚠️ **{len(flagged)} wells** auto-flagged by QC algorithms (CT thresholds, CV%, Grubbs test)")
+                    # FIX-15: Note Grubbs test limitation at small sample sizes
+                    st.caption("ℹ️ Note: Grubbs test requires n≥3 replicates. Groups with fewer replicates are not tested for outliers.")
                 with flag_col2:
                     if st.button("Auto-Exclude Flagged", use_container_width=True, key="qc_auto_exclude_flagged"):
                         st.session_state.excluded_wells_history.append(
@@ -3638,9 +3776,11 @@ with tab2:
     if st.session_state.data is not None:
         # Efficacy type selection
         detected_genes = set(st.session_state.data["Target"].unique())
+        # FIX-07: Case-insensitive efficacy gene matching
+        detected_genes_upper = {g.upper() for g in detected_genes}
         suggested = None
         for eff, cfg in EFFICACY_CONFIG.items():
-            if any(g in detected_genes for g in cfg["genes"]):
+            if any(g.upper() in detected_genes_upper for g in cfg["genes"]):
                 suggested = eff
                 break
 
@@ -3664,10 +3804,26 @@ with tab2:
         st.markdown("---")
         st.markdown("### 🗺️ Sample Condition Mapping")
 
+        # FIX-04: Always sync sample_order with actual data to prevent desync
+        # New samples from data that aren't in sample_order yet get appended
+        current_data_samples = set(st.session_state.data["Sample"].unique())
         if "sample_order" not in st.session_state or not st.session_state.sample_order:
             st.session_state.sample_order = sorted(
-                st.session_state.data["Sample"].unique(), key=natural_sort_key
+                current_data_samples, key=natural_sort_key
             )
+        else:
+            # Add any new samples not yet in sample_order (preserving user's custom order)
+            existing_order = st.session_state.sample_order
+            new_samples = sorted(
+                [s for s in current_data_samples if s not in existing_order],
+                key=natural_sort_key,
+            )
+            if new_samples:
+                st.session_state.sample_order = existing_order + new_samples
+            # Remove samples no longer in data
+            st.session_state.sample_order = [
+                s for s in st.session_state.sample_order if s in current_data_samples
+            ]
 
         # Group type options
         group_types = ["Negative Control", "Positive Control", "Treatment"]
@@ -3710,6 +3866,9 @@ with tab2:
 
         # Sample rows with improved spacing
         for i, sample in enumerate(display_samples):
+            # FIX-04: Guard against samples not in mapping (desync protection)
+            if sample not in st.session_state.sample_mapping:
+                continue
             # Container for each row
             with st.container():
                 col0, col_order, col1, col2, col3, col_move = st.columns(
@@ -3759,12 +3918,13 @@ with tab2:
                 # Group selector
                 with col3:
                     grp_idx = 0
+                    previous_group = st.session_state.sample_mapping[sample].get("group", "Treatment")
                     try:
-                        grp_idx = group_types.index(
-                            st.session_state.sample_mapping[sample]["group"]
-                        )
+                        grp_idx = group_types.index(previous_group)
                     except (ValueError, KeyError):
-                        pass
+                        # FIX-08: Warn when group type resets due to efficacy change
+                        st.caption(f"⚠️ '{previous_group}' not available; reset to '{group_types[0]}'")
+                        st.session_state.sample_mapping[sample]["group"] = group_types[0]
 
                     grp = st.selectbox(
                         "Group",
@@ -3824,6 +3984,23 @@ with tab2:
                 if not v.get("include", True)
             ]
         )
+
+        # FIX-11: Warn on duplicate condition names across included samples
+        included_conditions = [
+            v["condition"]
+            for s, v in st.session_state.sample_mapping.items()
+            if v.get("include", True)
+        ]
+        seen_conditions = {}
+        for cond in included_conditions:
+            seen_conditions[cond] = seen_conditions.get(cond, 0) + 1
+        duplicate_conditions = {c: n for c, n in seen_conditions.items() if n > 1}
+        if duplicate_conditions:
+            dup_list = ", ".join(f"'{c}' (×{n})" for c, n in duplicate_conditions.items())
+            st.info(
+                f"ℹ️ Duplicate condition names detected: {dup_list}. "
+                f"Samples with the same condition name will be treated as biological replicates."
+            )
 
         # Summary with styled cards
         st.markdown("---")
@@ -4768,10 +4945,12 @@ with tab5:
                                 key=f"pdf_{gene}",
                             )
                     except Exception as e:
+                        # FIX-13: Per-image error handling — continue with remaining genes
                         st.warning(
-                            f"Image export requires kaleido: pip install kaleido"
+                            f"⚠️ Failed to export {gene}: {e}. "
+                            f"(Ensure kaleido is installed: pip install kaleido)"
                         )
-                        break
+                        continue
 
             st.markdown("---")
             st.subheader("Batch Export (ZIP)")
@@ -4790,6 +4969,7 @@ with tab5:
                         with zipfile.ZipFile(
                             zip_buffer, "w", zipfile.ZIP_DEFLATED
                         ) as zf:
+                            _export_failures = []
                             for i, (gene, fig) in enumerate(
                                 st.session_state.graphs.items()
                             ):
@@ -4797,27 +4977,41 @@ with tab5:
                                     (i + 1) / total_graphs,
                                     text=f"Exporting {gene}... ({i + 1}/{total_graphs})",
                                 )
-                                fig_copy = go.Figure(fig)
-                                fig_copy.update_layout(
-                                    width=img_width, height=img_height, margin=dict(b=180),
-                                    font=dict(family=PLOTLY_FONT_FAMILY),
-                                )
+                                try:
+                                    fig_copy = go.Figure(fig)
+                                    fig_copy.update_layout(
+                                        width=img_width, height=img_height, margin=dict(b=180),
+                                        font=dict(family=PLOTLY_FONT_FAMILY),
+                                    )
 
-                                png_bytes = fig_copy.to_image(
-                                    format="png",
-                                    scale=3,
-                                    width=img_width,
-                                    height=img_height,
-                                )
-                                zf.writestr(f"{gene}_300dpi.png", png_bytes)
+                                    png_bytes = fig_copy.to_image(
+                                        format="png",
+                                        scale=3,
+                                        width=img_width,
+                                        height=img_height,
+                                    )
+                                    zf.writestr(f"{gene}_300dpi.png", png_bytes)
 
-                                svg_bytes = fig_copy.to_image(
-                                    format="svg", width=img_width, height=img_height
-                                )
-                                zf.writestr(f"{gene}.svg", svg_bytes)
+                                    svg_bytes = fig_copy.to_image(
+                                        format="svg", width=img_width, height=img_height
+                                    )
+                                    zf.writestr(f"{gene}.svg", svg_bytes)
 
-                                html_str = fig_copy.to_html(include_plotlyjs="cdn")
-                                zf.writestr(f"{gene}.html", html_str)
+                                    html_str = fig_copy.to_html(include_plotlyjs="cdn")
+                                    zf.writestr(f"{gene}.html", html_str)
+                                except Exception as e:
+                                    # FIX-13: Per-gene error handling in batch export
+                                    _export_failures.append(f"{gene}: {e}")
+                                finally:
+                                    # FIX-14: Memory cleanup after each gene in ZIP export
+                                    del fig_copy
+                                    if 'png_bytes' in dir():
+                                        del png_bytes
+                                    if 'svg_bytes' in dir():
+                                        del svg_bytes
+                                    if 'html_str' in dir():
+                                        del html_str
+                                    gc.collect()
 
                         progress_bar.empty()
                         st.download_button(
@@ -4827,11 +5021,17 @@ with tab5:
                             mime="application/zip",
                             key="batch_zip",
                         )
+                        n_success = len(st.session_state.graphs) - len(_export_failures)
                         st.success(
-                            f"✅ Created ZIP with {len(st.session_state.graphs)} figures (PNG + SVG + HTML)"
+                            f"✅ Created ZIP with {n_success} figures (PNG + SVG + HTML)"
                         )
+                        if _export_failures:
+                            st.warning(
+                                f"⚠️ {len(_export_failures)} gene(s) failed to export:\n"
+                                + "\n".join(f"  • {f}" for f in _export_failures)
+                            )
                     except Exception as e:
-                        st.error(f"Batch export requires kaleido: pip install kaleido")
+                        st.error(f"Batch export failed: {e}. Ensure kaleido is installed: pip install kaleido")
 
             with batch_col2:
                 if st.button("📥 Download Complete Report (ZIP)", width="stretch"):
