@@ -3687,162 +3687,233 @@ with tab2:
                 st.session_state.sample_mapping[sample]["include"] = True
 
         # --- Unified Sample Mapping Panel ---
+        # Split samples by include status (included first, excluded at bottom)
+        _included_samples = [
+            s
+            for s in st.session_state.sample_order
+            if st.session_state.sample_mapping[s].get("include", True)
+        ]
+        _excluded_samples = [
+            s
+            for s in st.session_state.sample_order
+            if not st.session_state.sample_mapping[s].get("include", True)
+        ]
+
         with st.container(border=True):
             st.markdown(
-                "<div style='margin-bottom: 4px;'>"
-                "<span style='font-size: 0.8rem; color: #888;'>⠿ Drag rows to reorder</span>"
-                "</div>",
+                "<div style='margin-bottom: 2px;'>"
+                "<span style='font-size: 0.7rem; color: #aaa;'>"
+                "\u2982 Drag to reorder \u00b7 Drop to Excluded to remove from analysis"
+                "</span></div>",
                 unsafe_allow_html=True,
             )
 
-            # Build rich labels for sort_items
-            _labels = []
+            # Build compact labels for sort_items
             _label_to_sample = {}
-            for _s in st.session_state.sample_order:
+            _included_labels = []
+            for _s in _included_samples:
                 _m = st.session_state.sample_mapping[_s]
-                _inc = "\u2713" if _m.get("include", True) else "\u2717"
                 _cond = _m.get("condition", _s)
                 _grp = _m.get("group", "Treatment")
-                _lbl = f"{_inc}   {_s}   \u2192   {_cond}   \u00b7   {_grp}"
-                _labels.append(_lbl)
+                _lbl = f"{_s}  \u2192  {_cond}  \u00b7  {_grp}"
+                _included_labels.append(_lbl)
+                _label_to_sample[_lbl] = _s
+
+            _excluded_labels = []
+            for _s in _excluded_samples:
+                _m = st.session_state.sample_mapping[_s]
+                _cond = _m.get("condition", _s)
+                _grp = _m.get("group", "Treatment")
+                _lbl = f"{_s}  \u2192  {_cond}  \u00b7  {_grp}"
+                _excluded_labels.append(_lbl)
                 _label_to_sample[_lbl] = _s
 
             _sortable_style = """
-            .sortable-component {
-                background: transparent;
-                padding: 0;
-            }
-            .sortable-container {
-                background: transparent;
-                counter-reset: item;
-                padding: 0;
-            }
+            .sortable-component { background: transparent; padding: 0; }
+            .sortable-container { background: transparent; padding: 0; }
             .sortable-container-header {
-                display: none;
+                display: block;
+                font-size: 0.62rem;
+                color: #bbb;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                padding: 6px 4px 2px;
+                font-weight: 600;
             }
             .sortable-container-body {
                 display: flex;
                 flex-direction: column;
-                gap: 3px;
-                padding: 0;
+                gap: 1px;
+                padding: 2px 0;
+                min-height: 24px;
             }
+            .sortable-container:first-child { counter-reset: item; }
             .sortable-item {
                 background: #fafafa;
                 border: 1px solid #e8e8e8;
-                border-radius: 6px;
-                padding: 10px 14px;
-                font-size: 0.82rem;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 0.72rem;
                 font-weight: 500;
                 color: #1d1d1f;
                 cursor: grab;
-                transition: all 0.15s ease;
+                transition: all 0.12s ease;
                 user-select: none;
-                letter-spacing: 0.01em;
+                line-height: 1.5;
             }
             .sortable-item:hover {
                 background: #f0f0f2;
                 border-color: #c0c0c0;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.06);
             }
-            .sortable-item::before {
+            .sortable-container:first-child .sortable-item::before {
                 content: counter(item) ".";
                 counter-increment: item;
                 display: inline-block;
-                min-width: 22px;
+                min-width: 18px;
                 color: #999;
                 font-weight: 600;
-                margin-right: 8px;
+                margin-right: 6px;
+                font-size: 0.68rem;
+            }
+            .sortable-container:last-child .sortable-item {
+                opacity: 0.45;
+                background: #f8f8f8;
+                border-style: dashed;
+                border-color: #ddd;
+            }
+            .sortable-container:last-child .sortable-item::before {
+                content: "\u2298 ";
+                color: #ccc;
+                margin-right: 4px;
+            }
+            .sortable-container:last-child .sortable-item:hover {
+                opacity: 0.7;
             }
             """
 
             sorted_result = sort_items(
-                [{"header": "order", "items": _labels}],
+                [
+                    {"header": "Included", "items": _included_labels},
+                    {"header": "Excluded", "items": _excluded_labels},
+                ],
                 multi_containers=True,
                 custom_style=_sortable_style,
                 key="sample_order_sort",
             )
-            _new_labels = sorted_result[0]["items"] if sorted_result else _labels
 
             # Map sorted labels back to sample names
-            _new_order = []
-            for _lbl in _new_labels:
-                if _lbl in _label_to_sample:
-                    _new_order.append(_label_to_sample[_lbl])
-                else:
-                    # Fallback: label changed between reruns, keep current order
-                    break
-            else:
-                # All labels mapped successfully
-                if _new_order != st.session_state.sample_order:
-                    st.session_state.sample_order = _new_order
-
-            # --- Inline editing section (same panel) ---
-            st.markdown(
-                "<div style='margin-top: 12px; margin-bottom: 6px; padding-top: 10px; "
-                "border-top: 1px solid #eee;'>"
-                "<span style='font-size: 0.78rem; color: #999; font-weight: 600; "
-                "text-transform: uppercase; letter-spacing: 0.05em;'>"
-                "Edit Details</span></div>",
-                unsafe_allow_html=True,
+            _new_included = []
+            _new_excluded = []
+            _mapping_ok = True
+            _res_inc = (
+                sorted_result[0]["items"] if sorted_result else _included_labels
+            )
+            _res_exc = (
+                sorted_result[1]["items"]
+                if sorted_result and len(sorted_result) > 1
+                else _excluded_labels
             )
 
-            display_samples = st.session_state.sample_order.copy()
+            for _lbl in _res_inc:
+                if _lbl in _label_to_sample:
+                    _new_included.append(_label_to_sample[_lbl])
+                else:
+                    _mapping_ok = False
+                    break
 
-            for i, sample in enumerate(display_samples):
-                with st.container():
-                    col0, col1, col2, col3 = st.columns([0.4, 1.8, 3, 2.5])
+            if _mapping_ok:
+                for _lbl in _res_exc:
+                    if _lbl in _label_to_sample:
+                        _new_excluded.append(_label_to_sample[_lbl])
+                    else:
+                        _mapping_ok = False
+                        break
 
-                    # Include checkbox
-                    with col0:
-                        include = st.checkbox(
-                            "Include sample",
-                            value=st.session_state.sample_mapping[sample].get(
-                                "include", True
-                            ),
-                            key=f"include_{sample}_{i}",
-                            label_visibility="collapsed",
-                        )
-                        st.session_state.sample_mapping[sample]["include"] = include
+            if _mapping_ok:
+                _new_order = _new_included + _new_excluded
+                if _new_order != st.session_state.sample_order:
+                    st.session_state.sample_order = _new_order
+                # Sync include flags with container placement
+                for _s in _new_included:
+                    st.session_state.sample_mapping[_s]["include"] = True
+                for _s in _new_excluded:
+                    st.session_state.sample_mapping[_s]["include"] = False
 
-                    # Original sample name (non-editable)
-                    with col1:
-                        st.text_input(
-                            "Original",
-                            sample,
-                            key=f"orig_{sample}_{i}",
-                            disabled=True,
-                            label_visibility="collapsed",
-                        )
+            # --- Edit details for included samples (same panel) ---
+            _edit_samples = _new_included if _mapping_ok else _included_samples
+            if _edit_samples:
+                # Compact column headers
+                _h1, _h2, _h3 = st.columns([1.8, 3, 2.5])
+                _h1.markdown(
+                    "<span style='font-size: 0.62rem; color: #bbb; "
+                    "text-transform: uppercase; letter-spacing: 0.04em;'>"
+                    "Sample</span>",
+                    unsafe_allow_html=True,
+                )
+                _h2.markdown(
+                    "<span style='font-size: 0.62rem; color: #bbb; "
+                    "text-transform: uppercase; letter-spacing: 0.04em;'>"
+                    "Condition</span>",
+                    unsafe_allow_html=True,
+                )
+                _h3.markdown(
+                    "<span style='font-size: 0.62rem; color: #bbb; "
+                    "text-transform: uppercase; letter-spacing: 0.04em;'>"
+                    "Group</span>",
+                    unsafe_allow_html=True,
+                )
 
-                    # Condition name (editable)
-                    with col2:
-                        cond = st.text_input(
-                            "Condition",
-                            st.session_state.sample_mapping[sample]["condition"],
-                            key=f"cond_{sample}_{i}",
-                            label_visibility="collapsed",
-                            placeholder="Enter condition name...",
-                        )
-                        st.session_state.sample_mapping[sample]["condition"] = cond
+                for i, sample in enumerate(_edit_samples):
+                    with st.container():
+                        col1, col2, col3 = st.columns([1.8, 3, 2.5])
 
-                    # Group selector
-                    with col3:
-                        grp_idx = 0
-                        try:
-                            grp_idx = group_types.index(
-                                st.session_state.sample_mapping[sample]["group"]
+                        # Original sample name (non-editable)
+                        with col1:
+                            st.text_input(
+                                "Original",
+                                sample,
+                                key=f"orig_{sample}_{i}",
+                                disabled=True,
+                                label_visibility="collapsed",
                             )
-                        except (ValueError, KeyError):
-                            pass
 
-                        grp = st.selectbox(
-                            "Group",
-                            group_types,
-                            index=grp_idx,
-                            key=f"grp_{sample}_{i}",
-                            label_visibility="collapsed",
-                        )
-                        st.session_state.sample_mapping[sample]["group"] = grp
+                        # Condition name (editable)
+                        with col2:
+                            cond = st.text_input(
+                                "Condition",
+                                st.session_state.sample_mapping[sample][
+                                    "condition"
+                                ],
+                                key=f"cond_{sample}_{i}",
+                                label_visibility="collapsed",
+                                placeholder="Enter condition name...",
+                            )
+                            st.session_state.sample_mapping[sample][
+                                "condition"
+                            ] = cond
+
+                        # Group selector
+                        with col3:
+                            grp_idx = 0
+                            try:
+                                grp_idx = group_types.index(
+                                    st.session_state.sample_mapping[sample][
+                                        "group"
+                                    ]
+                                )
+                            except (ValueError, KeyError):
+                                pass
+
+                            grp = st.selectbox(
+                                "Group",
+                                group_types,
+                                index=grp_idx,
+                                key=f"grp_{sample}_{i}",
+                                label_visibility="collapsed",
+                            )
+                            st.session_state.sample_mapping[sample][
+                                "group"
+                            ] = grp
 
         # Update excluded_samples from include flags
         st.session_state.excluded_samples = set(
