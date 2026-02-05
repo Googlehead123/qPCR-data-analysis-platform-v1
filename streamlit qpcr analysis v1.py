@@ -1244,7 +1244,7 @@ class AnalysisEngine:
 
         # Process each target gene separately (exclude housekeeping)
         for target in data["Target"].unique():
-            if target.upper() in [hk_gene.upper(), "ACTIN", "B-ACTIN", "GAPDH", "ACTB"]:
+            if target.upper() in [hk_gene.upper(), "ACTIN", "B-ACTIN", "BACTIN", "GAPDH", "ACTB"]:
                 continue
 
             target_data = data[data["Target"] == target]
@@ -2962,6 +2962,7 @@ with tab1:
         KNOWN_HK_GENES = [
             "ACTIN",
             "B-ACTIN",
+            "BACTIN",
             "GAPDH",
             "ACTB",
             "BETA-ACTIN",
@@ -3338,7 +3339,7 @@ with tab_qc:
                                     checkbox_states[idx] = st.checkbox(
                                         label,
                                         value=row["Include"],
-                                        key=f"cb_{gene}_{well}_{sample_name}",
+                                        key=f"cb_{gene}_{well}_{sample_name}_{idx}",
                                     )
                                 if s_idx < len(gene_samples) - 1:
                                     st.markdown(
