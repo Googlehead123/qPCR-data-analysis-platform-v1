@@ -13,6 +13,11 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
 
+try:
+    from streamlit_sortables import sort_items
+except ImportError:
+    sort_items = None
+
 
 # ==================== UTILITY FUNCTIONS ====================
 def natural_sort_key(sample_name):
@@ -285,6 +290,12 @@ for key in [
             )
         )
 
+if "mapping_finalized" not in st.session_state:
+    st.session_state.mapping_finalized = False
+
+if "gene_display_names" not in st.session_state:
+    st.session_state.gene_display_names = {}
+
 # ==================== EFFICACY DATABASE ====================
 EFFICACY_CONFIG = {
     "탄력": {
@@ -402,6 +413,16 @@ EFFICACY_CONFIG = {
             "compare_to": "negative",
         },
         "description": "Cooling effect - Non-treated vs Menthol (positive) vs Treatments",
+    },
+    "모근 강화": {
+        "genes": ["VEGF", "COL17A1", "HGF", "FGF7", "FLG"],
+        "cell": "HFDPC / HaCaT",
+        "controls": {
+            "negative": "Non-treated",
+            "positive": "Minoxidil",
+            "compare_to": "negative",
+        },
+        "description": "Hair root strengthening - VEGF, COL17A1, HGF, FGF7, FLG expression",
     },
 }
 
@@ -1813,6 +1834,7 @@ class GraphGenerator:
         sample_order: list = None,
         per_sample_overrides: dict = None,
         condition_colors: dict = None,
+        display_gene_name: str = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -2059,8 +2081,8 @@ class GraphGenerator:
                         yanchor="bottom",
                     )
 
-        # Custom y-axis label with bold red gene name
-        y_label_html = f"Relative <b style='color:red;'>{gene}</b> Expression Level"
+        gene_label = display_gene_name if display_gene_name else gene
+        y_label_html = f"Relative <b style='color:red;'>{gene_label}</b> Expression Level"
 
         # Y-axis configuration (y_max_auto already calculated above)
         y_axis_config = dict(
@@ -2832,28 +2854,159 @@ class PPTGenerator:
         p.alignment = PP_ALIGN.RIGHT
 
     @staticmethod
+    def _delete_slide(prs, index):
+        slides_list = prs.slides._sldIdLst
+        rId = slides_list[index].attrib[
+            '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+        ]
+        prs.part.drop_rel(rId)
+        slides_list.remove(slides_list[index])
+
+    @staticmethod
+    def _duplicate_slide(prs, source_index):
+        import copy
+        from lxml import etree
+
+        source = prs.slides[source_index]
+        slide_layout = source.slide_layout
+        new_slide = prs.slides.add_slide(slide_layout)
+
+        rid_map = {}
+        for old_rid, rel in source.part.rels.items():
+            reltype_str = str(rel.reltype)
+            if 'slideLayout' in reltype_str:
+                continue
+            if rel.is_external:
+                new_rid = new_slide.part.rels.get_or_add_ext_rel(
+                    rel.reltype, rel.target_ref
+                )
+            else:
+                new_rid = new_slide.part.relate_to(rel.target_part, rel.reltype)
+            rid_map[old_rid] = new_rid
+
+        for child in list(new_slide._element):
+            new_slide._element.remove(child)
+
+        for child in source._element:
+            new_child = copy.deepcopy(child)
+            xml_bytes = etree.tostring(new_child)
+            xml_str = xml_bytes.decode('utf-8')
+            for old_rid, new_rid in rid_map.items():
+                xml_str = xml_str.replace(f'"{old_rid}"', f'"{new_rid}"')
+            new_child = etree.fromstring(xml_str.encode('utf-8'))
+            new_slide._element.append(new_child)
+
+        return new_slide
+
+    @staticmethod
+    def _move_slide_to_end(prs, slide_index):
+        slides_list = prs.slides._sldIdLst
+        el = slides_list[slide_index]
+        slides_list.remove(el)
+        slides_list.append(el)
+
+    @staticmethod
     def generate_presentation(graphs, processed_data, analysis_params):
         try:
             from pptx import Presentation
-            from pptx.util import Inches
+            from pptx.util import Inches, Emu
             from pptx.dml.color import RGBColor
         except ImportError:
             st.error("python-pptx not installed")
             return None
 
-        prs = Presentation()
-        prs.slide_width = Inches(13.333)
-        prs.slide_height = Inches(7.5)
+        import os
 
-        # Simple export: one graph centered on blank white slide
-        for gene, fig in graphs.items():
-            slide = prs.slides.add_slide(prs.slide_layouts[6])
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        template_path = os.path.join(
+            script_dir, "251215 효능평가 결과 TEMPLATE.pptx"
+        )
+        use_template = os.path.isfile(template_path)
 
-            bg = slide.background
-            fill = bg.fill
-            fill.solid()
-            fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        if not use_template:
+            st.warning(
+                "Template file not found — generating simple PPT layout. "
+                "Place '251215 효능평가 결과 TEMPLATE.pptx' next to the app for branded slides."
+            )
+            prs = Presentation()
+            prs.slide_width = Emu(12192000)
+            prs.slide_height = Emu(6858000)
 
+            for gene, fig in graphs.items():
+                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                bg = slide.background
+                fill = bg.fill
+                fill.solid()
+                fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+                fig_copy = go.Figure(fig)
+                fig_copy.update_layout(
+                    width=1100,
+                    height=700,
+                    margin=dict(l=80, r=80, t=60, b=180),
+                    font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+                )
+                img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
+                img_stream = io.BytesIO(img_bytes)
+
+                img_width = Inches(10.0)
+                img_height = Inches(5.5)
+                left = int((prs.slide_width - img_width) / 2)
+                top = int((prs.slide_height - img_height) / 2)
+                slide.shapes.add_picture(
+                    img_stream, left, top, width=img_width, height=img_height
+                )
+
+            output = io.BytesIO()
+            prs.save(output)
+            output.seek(0)
+            return output.getvalue()
+
+        prs = Presentation(template_path)
+
+        PPTGenerator._delete_slide(prs, 1)
+        # After deletion: [0]=Title, [1]=Gene template, [2]=Closing
+
+        efficacy = analysis_params.get("Efficacy_Type", "소재")
+        title_slide = prs.slides[0]
+        for shape in title_slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        if "소재" in run.text:
+                            run.text = run.text.replace("소재", efficacy)
+
+        gene_template_index = 1
+        gene_names = list(graphs.keys())
+
+        if not gene_names:
+            output = io.BytesIO()
+            prs.save(output)
+            output.seek(0)
+            return output.getvalue()
+
+        for _ in range(len(gene_names) - 1):
+            PPTGenerator._duplicate_slide(prs, gene_template_index)
+
+        # Duplicates appended after closing: [0]=Title, [1]=Gene, [2]=Closing, [3..N]=Copies
+        # Move closing slide (index 2) to end
+        if len(gene_names) > 1:
+            PPTGenerator._move_slide_to_end(prs, 2)
+        # Now: [0]=Title, [1]=Gene(orig), [2..N-1]=Copies, [N]=Closing
+
+        for i, gene in enumerate(gene_names):
+            gene_slide = prs.slides[1 + i]
+
+            for shape in gene_slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        for run in para.runs:
+                            if "효능 평가" in run.text:
+                                run.text = run.text.replace(
+                                    "효능 평가", f"{gene} 효능 평가"
+                                )
+
+            fig = graphs[gene]
             fig_copy = go.Figure(fig)
             fig_copy.update_layout(
                 width=1100,
@@ -2861,14 +3014,25 @@ class PPTGenerator:
                 margin=dict(l=80, r=80, t=60, b=180),
                 font=dict(size=14, family=PLOTLY_FONT_FAMILY),
             )
-            img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
-            img_stream = io.BytesIO(img_bytes)
-
-            img_width = Inches(10.0)
-            img_height = Inches(5.5)
-            left = int((prs.slide_width - img_width) / 2)
-            top = int((prs.slide_height - img_height) / 2)
-            slide.shapes.add_picture(img_stream, left, top, width=img_width, height=img_height)
+            try:
+                img_bytes = ReportGenerator._fig_to_image(
+                    fig_copy, format="png", scale=2
+                )
+                img_stream = io.BytesIO(img_bytes)
+                gene_slide.shapes.add_picture(
+                    img_stream,
+                    Emu(1371600),
+                    Emu(1371600),
+                    width=Emu(9448800),
+                    height=Emu(4114800),
+                )
+            except Exception as e:
+                from pptx.util import Pt
+                err_box = gene_slide.shapes.add_textbox(
+                    Emu(1371600), Emu(2743200), Emu(9448800), Emu(914400)
+                )
+                err_box.text_frame.paragraphs[0].text = f"Graph error: {str(e)}"
+                err_box.text_frame.paragraphs[0].font.size = Pt(14)
 
         output = io.BytesIO()
         prs.save(output)
@@ -3850,10 +4014,9 @@ with tab2:
                 <tr>
                     <th style='width: 5%; text-align: center;'>✓</th>
                     <th style='width: 10%;'>Order</th>
-                    <th style='width: 15%;'>Original</th>
-                    <th style='width: 25%;'>Condition Name</th>
-                    <th style='width: 20%;'>Group</th>
-                    <th style='width: 10%;'>Move</th>
+                    <th style='width: 20%;'>Original</th>
+                    <th style='width: 35%;'>Condition Name</th>
+                    <th style='width: 25%;'>Group</th>
                 </tr>
             </table>
         </div>
@@ -3871,8 +4034,8 @@ with tab2:
                 continue
             # Container for each row
             with st.container():
-                col0, col_order, col1, col2, col3, col_move = st.columns(
-                    [0.5, 0.8, 1.5, 2.5, 2, 1]
+                col0, col_order, col1, col2, col3 = st.columns(
+                    [0.5, 0.8, 2, 3.5, 2.5]
                 )
 
                 # Include checkbox
@@ -3935,45 +4098,79 @@ with tab2:
                     )
                     st.session_state.sample_mapping[sample]["group"] = grp
 
-                # Move controls - FIXED: Use immutable operations to prevent race conditions
-                with col_move:
-                    btn_col1, btn_col2 = st.columns(2)
-                    with btn_col1:
-                        if i > 0:
-                            if st.button(
-                                "⬆",
-                                key=f"up_{sample}_{i}",
-                                help="Move up",
-                                width="stretch",
-                            ):
-                                # Create new list with swapped items (immutable operation)
-                                new_order = st.session_state.sample_order.copy()
-                                new_order[i], new_order[i - 1] = (
-                                    new_order[i - 1],
-                                    new_order[i],
-                                )
-                                st.session_state.sample_order = new_order
-                                st.rerun()
-                    with btn_col2:
-                        if i < len(display_samples) - 1:
-                            if st.button(
-                                "⬇",
-                                key=f"down_{sample}_{i}",
-                                help="Move down",
-                                width="stretch",
-                            ):
-                                # Create new list with swapped items (immutable operation)
-                                new_order = st.session_state.sample_order.copy()
-                                new_order[i], new_order[i + 1] = (
-                                    new_order[i + 1],
-                                    new_order[i],
-                                )
-                                st.session_state.sample_order = new_order
-                                st.rerun()
-
                 # Divider line
                 st.markdown(
                     "<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True
+                )
+
+        st.markdown("---")
+        if st.button("✅ Done! Set sample order below", type="primary", key="finalize_mapping"):
+            st.session_state.mapping_finalized = True
+            st.rerun()
+
+        if st.session_state.get("mapping_finalized", False):
+            st.markdown("### 🔀 Drag to Reorder Samples")
+            st.caption("Drag included samples to set the display order for graphs and exports.")
+
+            if sort_items is not None:
+                current_order = st.session_state.sample_order
+                # Filter to only included samples
+                included_order = [
+                    s for s in current_order
+                    if st.session_state.sample_mapping.get(s, {}).get("include", True)
+                ]
+                # Build unique labels: "Condition Name  (Original)" format
+                order_labels = []
+                label_to_sample = {}
+                for s in included_order:
+                    cond = st.session_state.sample_mapping.get(s, {}).get("condition", s)
+                    label = f"{cond}  ({s})" if cond != s else s
+                    # Handle potential duplicate labels by appending index
+                    if label in label_to_sample:
+                        label = f"{cond}  ({s}) #{included_order.index(s) + 1}"
+                    order_labels.append(label)
+                    label_to_sample[label] = s
+
+                # Compact drag-and-drop styling
+                st.markdown("""
+                <style>
+                div[data-testid="stVerticalBlock"] div[data-baseweb="tag"] {
+                    font-size: 0.85rem !important;
+                    padding: 4px 12px !important;
+                }
+                .sortable-item {
+                    padding: 6px 14px !important;
+                    margin: 2px 0 !important;
+                    border-radius: 8px !important;
+                    font-size: 0.85rem !important;
+                    max-width: 400px !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+
+                if not order_labels:
+                    st.info("No included samples to reorder. Include samples above first.")
+                    sorted_labels = []
+                else:
+                    col_drag, col_spacer = st.columns([2, 3])
+                    with col_drag:
+                        sorted_labels = sort_items(items=order_labels, direction="vertical")
+
+                new_included_order = [label_to_sample[lbl] for lbl in sorted_labels]
+
+                # Rebuild full order: included in new order + excluded appended at end
+                excluded_samples_list = [
+                    s for s in current_order
+                    if not st.session_state.sample_mapping.get(s, {}).get("include", True)
+                ]
+                new_order = new_included_order + excluded_samples_list
+
+                if new_order != st.session_state.sample_order:
+                    st.session_state.sample_order = new_order
+            else:
+                st.warning(
+                    "Drag-and-drop requires `streamlit-sortables`. "
+                    "Install with: `pip install streamlit-sortables`"
                 )
 
         # Update excluded_samples from include flags
@@ -4621,6 +4818,82 @@ with tab4:
                             ] = grays[idx % len(grays)]
                         st.rerun()
 
+        with st.expander("⚙️ Graph Settings", expanded=False):
+            settings_col1, settings_col2 = st.columns(2)
+
+            with settings_col1:
+                st.markdown("**Gene Display Name**")
+                gene_display = st.text_input(
+                    "Override gene name on Y-axis",
+                    value=st.session_state.gene_display_names.get(current_gene, current_gene),
+                    key=f"gene_display_{current_gene}",
+                    placeholder=current_gene,
+                )
+                gene_display_stripped = gene_display.strip() if gene_display else ""
+                if gene_display_stripped and gene_display_stripped != current_gene:
+                    st.session_state.gene_display_names[current_gene] = gene_display_stripped
+                elif current_gene in st.session_state.gene_display_names:
+                    del st.session_state.gene_display_names[current_gene]
+
+                st.markdown("**Chart Dimensions**")
+                fig_width = st.slider(
+                    "Width (px)", 400, 1600,
+                    value=st.session_state.graph_settings.get("figure_width", 1000),
+                    step=50, key=f"fig_w_{current_gene}",
+                )
+                fig_height = st.slider(
+                    "Height (px)", 300, 1200,
+                    value=st.session_state.graph_settings.get("figure_height", 600),
+                    step=50, key=f"fig_h_{current_gene}",
+                )
+                st.session_state.graph_settings["figure_width"] = fig_width
+                st.session_state.graph_settings["figure_height"] = fig_height
+
+            with settings_col2:
+                st.markdown("**Font Sizes**")
+                global_font = st.slider(
+                    "Global font", 8, 28,
+                    value=st.session_state.graph_settings.get("font_size", 14),
+                    key=f"gf_{current_gene}",
+                )
+                st.session_state.graph_settings["font_size"] = global_font
+
+                tick_size = st.slider(
+                    "X-axis tick labels", 8, 24,
+                    value=st.session_state.graph_settings.get(f"{current_gene}_tick_size", 12),
+                    key=f"ts_{current_gene}",
+                )
+                st.session_state.graph_settings[f"{current_gene}_tick_size"] = tick_size
+
+                ylabel_size = st.slider(
+                    "Y-axis label", 8, 24,
+                    value=st.session_state.graph_settings.get(f"{current_gene}_ylabel_size", 14),
+                    key=f"ys_{current_gene}",
+                )
+                st.session_state.graph_settings[f"{current_gene}_ylabel_size"] = ylabel_size
+
+            st.markdown("---")
+            st.markdown("**Reference Line**")
+            ref_line_help = "Draw a horizontal dashed line at a selected condition's expression level"
+            conditions_list = gene_data["Condition"].tolist()
+            ref_options = ["None"] + conditions_list
+            ref_line_key = f"{current_gene}_ref_line"
+            if ref_line_key not in st.session_state.graph_settings:
+                st.session_state.graph_settings[ref_line_key] = "None"
+
+            ref_col1, ref_col2 = st.columns([2, 3])
+            with ref_col1:
+                selected_ref = st.selectbox(
+                    "Reference condition",
+                    ref_options,
+                    index=ref_options.index(st.session_state.graph_settings.get(ref_line_key, "None"))
+                    if st.session_state.graph_settings.get(ref_line_key, "None") in ref_options
+                    else 0,
+                    key=f"ref_sel_{current_gene}",
+                    help=ref_line_help,
+                )
+                st.session_state.graph_settings[ref_line_key] = selected_ref
+
         current_settings = st.session_state.graph_settings.copy()
         current_settings["show_significance"] = st.session_state.graph_settings.get(
             show_sig_key, True
@@ -4632,6 +4905,8 @@ with tab4:
             bar_gap_key, 0.25
         )
 
+        display_gene_name = st.session_state.gene_display_names.get(current_gene, current_gene)
+
         fig = GraphGenerator.create_gene_graph(
             gene_data,
             current_gene,
@@ -4640,7 +4915,24 @@ with tab4:
             sample_order=st.session_state.get("sample_order"),
             per_sample_overrides=None,
             condition_colors=st.session_state.get("condition_colors", {}),
+            display_gene_name=display_gene_name,
         )
+
+        ref_condition = st.session_state.graph_settings.get(f"{current_gene}_ref_line", "None")
+        if ref_condition != "None":
+            ref_rows = gene_data[gene_data["Condition"] == ref_condition]
+            if not ref_rows.empty:
+                ref_value = ref_rows["Relative_Expression"].values[0]
+                if pd.notna(ref_value):
+                    fig.add_hline(
+                        y=ref_value,
+                        line_dash="dash",
+                        line_color="rgba(100, 100, 100, 0.7)",
+                        line_width=1.5,
+                        annotation_text=f"{ref_condition}: {ref_value:.2f}",
+                        annotation_position="top right",
+                        annotation_font=dict(size=10, color="#666666", family=PLOTLY_FONT_FAMILY),
+                    )
 
         st.plotly_chart(fig, width="stretch", key=f"main_fig_{current_gene}")
         st.session_state.graphs[current_gene] = fig
@@ -4679,6 +4971,7 @@ with tab4:
                     efficacy_config,
                     sample_order=st.session_state.get("sample_order"),
                     condition_colors=st.session_state.get("condition_colors", {}),
+                    display_gene_name=st.session_state.gene_display_names.get(gene, gene),
                 )
 
                 with all_gene_cols[idx % len(all_gene_cols)]:
