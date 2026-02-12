@@ -211,6 +211,9 @@ def _detect_available_fonts():
 
 PLOTLY_FONT_FAMILY = ", ".join(_detect_available_fonts())
 
+CM_TO_PX = 37.7953
+CM_TO_EMU = 360000
+
 
 # ==================== SESSION STATE INIT ====================
 # Helper function for well exclusion management
@@ -2202,8 +2205,8 @@ class GraphGenerator:
             yaxis=y_axis_config,
             template=settings.get("color_scheme", "plotly_white"),
             font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY),
-            height=settings.get("figure_height", 600),
-            width=settings.get("figure_width", 1000),
+            height=int(settings.get("figure_height", 11) * CM_TO_PX),
+            width=int(settings.get("figure_width", 26) * CM_TO_PX),
             bargap=gene_bar_gap,
             showlegend=settings.get("show_legend", False),
             plot_bgcolor=gene_bg_color,
@@ -2302,33 +2305,19 @@ class ReportGenerator:
 
         blank_layout = prs.slide_layouts[6]
 
-        # Simple export: one graph per slide, centered on blank white background
+        if include_title_slide:
+            ReportGenerator._add_title_slide(prs, analysis_params)
+
         for gene, fig in graphs.items():
-            slide = prs.slides.add_slide(blank_layout)
-
-            # White background
-            bg = slide.background
-            fill = bg.fill
-            fill.solid()
-            fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-
-            # Render graph to image
-            fig_copy = go.Figure(fig)
-            fig_copy.update_layout(
-                width=1100,
-                height=700,
-                margin=dict(l=80, r=80, t=60, b=180),
-                font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+            gene_data = processed_data.get(gene)
+            ReportGenerator._add_gene_slide(
+                prs, blank_layout, gene, fig, gene_data, method_text
             )
-            img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
-            img_stream = io.BytesIO(img_bytes)
 
-            # Center the image on the slide
-            img_width = Inches(10.0)
-            img_height = Inches(5.5)
-            left = int((prs.slide_width - img_width) / 2)
-            top = int((prs.slide_height - img_height) / 2)
-            slide.shapes.add_picture(img_stream, left, top, width=img_width, height=img_height)
+        if include_summary:
+            ReportGenerator._add_summary_slide(
+                prs, blank_layout, processed_data, analysis_params
+            )
 
         output = io.BytesIO()
         prs.save(output)
@@ -2896,7 +2885,6 @@ class PPTGenerator:
     @staticmethod
     def _duplicate_slide(prs, source_index):
         import copy
-        from lxml import etree
 
         source = prs.slides[source_index]
         slide_layout = source.slide_layout
@@ -2904,27 +2892,35 @@ class PPTGenerator:
 
         rid_map = {}
         for old_rid, rel in source.part.rels.items():
-            reltype_str = str(rel.reltype)
-            if 'slideLayout' in reltype_str:
+            if 'slideLayout' in str(rel.reltype):
+                for new_rid, new_rel in new_slide.part.rels.items():
+                    if 'slideLayout' in str(new_rel.reltype):
+                        rid_map[old_rid] = new_rid
+                        break
                 continue
-            if rel.is_external:
-                new_rid = new_slide.part.rels.get_or_add_ext_rel(
-                    rel.reltype, rel.target_ref
-                )
-            else:
-                new_rid = new_slide.part.relate_to(rel.target_part, rel.reltype)
-            rid_map[old_rid] = new_rid
+            try:
+                if rel.is_external:
+                    new_rid = new_slide.part.rels.get_or_add_ext_rel(
+                        rel.reltype, rel.target_ref
+                    )
+                else:
+                    new_rid = new_slide.part.relate_to(
+                        rel.target_part, rel.reltype
+                    )
+                rid_map[old_rid] = new_rid
+            except Exception:
+                continue
 
         for child in list(new_slide._element):
             new_slide._element.remove(child)
 
         for child in source._element:
             new_child = copy.deepcopy(child)
-            xml_bytes = etree.tostring(new_child)
-            xml_str = xml_bytes.decode('utf-8')
-            for old_rid, new_rid in rid_map.items():
-                xml_str = xml_str.replace(f'"{old_rid}"', f'"{new_rid}"')
-            new_child = etree.fromstring(xml_str.encode('utf-8'))
+            for elem in new_child.iter():
+                for attr_key in list(elem.attrib.keys()):
+                    val = elem.attrib[attr_key]
+                    if val in rid_map:
+                        elem.attrib[attr_key] = rid_map[val]
             new_slide._element.append(new_child)
 
         return new_slide
@@ -2937,7 +2933,7 @@ class PPTGenerator:
         slides_list.append(el)
 
     @staticmethod
-    def generate_presentation(graphs, processed_data, analysis_params):
+    def generate_presentation(graphs, processed_data, analysis_params, graph_settings=None):
         try:
             from pptx import Presentation
             from pptx.util import Inches, Emu
@@ -2971,17 +2967,20 @@ class PPTGenerator:
                 fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
                 fig_copy = go.Figure(fig)
-                cur_w = fig_copy.layout.width or 1000
-                cur_h = fig_copy.layout.height or 600
+                gs = graph_settings or {}
+                w_px = int(gs.get("figure_width", 26) * CM_TO_PX)
+                h_px = int(gs.get("figure_height", 11) * CM_TO_PX)
                 fig_copy.update_layout(
-                    width=max(cur_w, 900),
-                    height=max(cur_h, 550),
+                    width=max(w_px, 900),
+                    height=max(h_px, 550),
                 )
                 img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
                 img_stream = io.BytesIO(img_bytes)
 
-                img_width = Inches(10.0)
-                img_height = Inches(5.5)
+                w_emu = int(gs.get("figure_width", 26) * CM_TO_EMU)
+                h_emu = int(gs.get("figure_height", 11) * CM_TO_EMU)
+                img_width = Emu(w_emu)
+                img_height = Emu(h_emu)
                 left = int((prs.slide_width - img_width) / 2)
                 top = int((prs.slide_height - img_height) / 2)
                 slide.shapes.add_picture(
@@ -3057,12 +3056,15 @@ class PPTGenerator:
 
             fig = graphs[gene]
             fig_copy = go.Figure(fig)
-            cur_w = fig_copy.layout.width or 1000
-            cur_h = fig_copy.layout.height or 600
+            gs = graph_settings or {}
+            w_px = int(gs.get("figure_width", 26) * CM_TO_PX)
+            h_px = int(gs.get("figure_height", 11) * CM_TO_PX)
             fig_copy.update_layout(
-                width=max(cur_w, 900),
-                height=max(cur_h, 550),
+                width=max(w_px, 900),
+                height=max(h_px, 550),
             )
+            w_emu = int(gs.get("figure_width", 26) * CM_TO_EMU)
+            h_emu = int(gs.get("figure_height", 11) * CM_TO_EMU)
             try:
                 img_bytes = ReportGenerator._fig_to_image(
                     fig_copy, format="png", scale=2
@@ -3072,8 +3074,8 @@ class PPTGenerator:
                     img_stream,
                     Emu(1371600),
                     Emu(1371600),
-                    width=Emu(9448800),
-                    height=Emu(4114800),
+                    width=Emu(w_emu),
+                    height=Emu(h_emu),
                 )
             except Exception as e:
                 from pptx.util import Pt
@@ -3266,8 +3268,8 @@ with tab1:
                 st.session_state.graph_settings = {
                     "color_scheme": "plotly_white",
                     "font_size": 14,
-                    "figure_height": 600,
-                    "figure_width": 1000,
+"figure_height": 11,
+                "figure_width": 26,
                     "show_legend": False,
                     "bar_gap": 0.15,
                     "show_error_bars": True,
@@ -4596,8 +4598,8 @@ with tab4:
                 "title_size": 20,
                 "font_size": 14,
                 "sig_font_size": 18,
-                "figure_width": 1000,
-                "figure_height": 600,
+                "figure_width": 26,
+                "figure_height": 11,
                 "color_scheme": "plotly_white",
                 "show_error": True,
                 "show_significance": True,
@@ -4754,18 +4756,18 @@ with tab4:
                         del st.session_state.gene_display_names[current_gene]
 
                 with s_col2:
-                    fig_width = st.slider(
-                        "Width (px)", 400, 1600,
-                        value=st.session_state.graph_settings.get("figure_width", 1000),
-                        step=50, key=f"fig_w_{current_gene}",
+                    fig_width_cm = st.slider(
+                        "Width (cm)", 10.0, 34.0,
+                        value=float(st.session_state.graph_settings.get("figure_width", 26)),
+                        step=0.5, key=f"fig_w_{current_gene}",
                     )
-                    fig_height = st.slider(
-                        "Height (px)", 300, 1200,
-                        value=st.session_state.graph_settings.get("figure_height", 600),
-                        step=50, key=f"fig_h_{current_gene}",
+                    fig_height_cm = st.slider(
+                        "Height (cm)", 6.0, 19.0,
+                        value=float(st.session_state.graph_settings.get("figure_height", 11)),
+                        step=0.5, key=f"fig_h_{current_gene}",
                     )
-                    st.session_state.graph_settings["figure_width"] = fig_width
-                    st.session_state.graph_settings["figure_height"] = fig_height
+                    st.session_state.graph_settings["figure_width"] = fig_width_cm
+                    st.session_state.graph_settings["figure_height"] = fig_height_cm
 
                 with s_col3:
                     global_font = st.slider(
@@ -4941,7 +4943,7 @@ with tab4:
                 gs["show_significance"] = gs.get(f"{gene}_show_sig", True)
                 gs["show_error"] = gs.get(f"{gene}_show_err", True)
                 gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.25)
-                gs["figure_height"] = 350
+                gs["figure_height"] = 9
 
                 f = GraphGenerator.create_gene_graph(
                     gd,
@@ -5077,6 +5079,7 @@ with tab5:
                         st.session_state.graphs,
                         st.session_state.processed_data,
                         analysis_params,
+                        graph_settings=st.session_state.get("graph_settings"),
                     )
                     if ppt_bytes:
                         st.session_state["ppt_export"] = ppt_bytes
