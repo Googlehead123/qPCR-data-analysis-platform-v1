@@ -296,6 +296,9 @@ if "mapping_finalized" not in st.session_state:
 if "gene_display_names" not in st.session_state:
     st.session_state.gene_display_names = {}
 
+if "experiment_desc" not in st.session_state:
+    st.session_state.experiment_desc = {"concentration": "1 ppm", "treatment_time": "24 h"}
+
 # ==================== EFFICACY DATABASE ====================
 EFFICACY_CONFIG = {
     "탄력": {
@@ -1835,6 +1838,8 @@ class GraphGenerator:
         per_sample_overrides: dict = None,
         condition_colors: dict = None,
         display_gene_name: str = None,
+        ref_line_value: float = None,
+        ref_line_label: str = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -1992,7 +1997,9 @@ class GraphGenerator:
         max_error = error_array.max() if len(error_array) > 0 else 0
         y_max_auto = (
             max_y_value + max_error + (max_y_value * 0.15)
-        )  # Add 15% padding for stars
+        )
+        if ref_line_value is not None and pd.notna(ref_line_value):
+            y_max_auto = max(y_max_auto, ref_line_value * 1.20)
 
         # FIXED ABSOLUTE SPACING for dual symbols (in data units)
         # This ensures consistent spacing across all bars regardless of height
@@ -2208,6 +2215,30 @@ class GraphGenerator:
                 b=gene_margins.get("b", 160),
             ),
         )
+
+        if ref_line_value is not None and pd.notna(ref_line_value):
+            max_annotation_y = 0
+            for _idx in range(n_bars):
+                _row = gene_data_indexed.iloc[_idx]
+                _bar_h = _row["Relative_Expression"]
+                _err_h = error_visible_array[_idx] if _idx < len(error_visible_array) else 0
+                _top_y = _bar_h + _err_h + (fixed_symbol_spacing * 1.2)
+                if _top_y > max_annotation_y:
+                    max_annotation_y = _top_y
+
+            ann_position = "top right"
+            if ref_line_value > max_annotation_y * 0.85:
+                ann_position = "bottom right"
+
+            fig.add_hline(
+                y=ref_line_value,
+                line_dash="dash",
+                line_color="rgba(120, 120, 120, 0.6)",
+                line_width=1.5,
+                annotation_text=ref_line_label or f"{ref_line_value:.2f}",
+                annotation_position=ann_position,
+                annotation_font=dict(size=10, color="#666666", family=PLOTLY_FONT_FAMILY),
+            )
 
         return fig
 
@@ -2940,11 +2971,11 @@ class PPTGenerator:
                 fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
                 fig_copy = go.Figure(fig)
+                cur_w = fig_copy.layout.width or 1000
+                cur_h = fig_copy.layout.height or 600
                 fig_copy.update_layout(
-                    width=1100,
-                    height=700,
-                    margin=dict(l=80, r=80, t=60, b=180),
-                    font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+                    width=max(cur_w, 900),
+                    height=max(cur_h, 550),
                 )
                 img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
                 img_stream = io.BytesIO(img_bytes)
@@ -2994,25 +3025,43 @@ class PPTGenerator:
             PPTGenerator._move_slide_to_end(prs, 2)
         # Now: [0]=Title, [1]=Gene(orig), [2..N-1]=Copies, [N]=Closing
 
+        desc_replacements = {
+            "YYYY/MM/DD": analysis_params.get("Date", "")[:10],
+            "CELL": EFFICACY_CONFIG.get(efficacy, {}).get("cell", ""),
+            "CONC": analysis_params.get("concentration", "1 ppm"),
+            "PC": EFFICACY_CONFIG.get(efficacy, {}).get("controls", {}).get("positive", ""),
+        }
+        user_time = analysis_params.get("treatment_time", "24 h")
+
         for i, gene in enumerate(gene_names):
             gene_slide = prs.slides[1 + i]
 
             for shape in gene_slide.shapes:
-                if shape.has_text_frame:
+                if not shape.has_text_frame:
+                    continue
+                if shape.name == "TextBox 17":
                     for para in shape.text_frame.paragraphs:
                         for run in para.runs:
                             if "효능 평가" in run.text:
                                 run.text = run.text.replace(
                                     "효능 평가", f"{gene} 효능 평가"
                                 )
+                elif shape.name == "TextBox 2":
+                    for para in shape.text_frame.paragraphs:
+                        for run in para.runs:
+                            for placeholder, value in desc_replacements.items():
+                                if placeholder in run.text:
+                                    run.text = run.text.replace(placeholder, value)
+                            if user_time != "24 h" and "24 h" in run.text:
+                                run.text = run.text.replace("24 h", user_time)
 
             fig = graphs[gene]
             fig_copy = go.Figure(fig)
+            cur_w = fig_copy.layout.width or 1000
+            cur_h = fig_copy.layout.height or 600
             fig_copy.update_layout(
-                width=1100,
-                height=700,
-                margin=dict(l=80, r=80, t=60, b=180),
-                font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+                width=max(cur_w, 900),
+                height=max(cur_h, 550),
             )
             try:
                 img_bytes = ReportGenerator._fig_to_image(
@@ -4597,8 +4646,6 @@ with tab4:
 
         st.markdown("---")
 
-        toolbar_cols = st.columns([1, 1, 1, 1, 2])
-
         show_sig_key = f"{current_gene}_show_sig"
         show_err_key = f"{current_gene}_show_err"
         bar_gap_key = f"{current_gene}_bar_gap"
@@ -4610,9 +4657,19 @@ with tab4:
         if bar_gap_key not in st.session_state.graph_settings:
             st.session_state.graph_settings[bar_gap_key] = 0.25
 
+        conditions_list = gene_data["Condition"].tolist()
+        ref_options = ["None"] + conditions_list
+        ref_line_key = f"{current_gene}_ref_line"
+        if ref_line_key not in st.session_state.graph_settings:
+            st.session_state.graph_settings[ref_line_key] = "None"
+        if st.session_state.graph_settings.get(ref_line_key, "None") not in ref_options:
+            st.session_state.graph_settings[ref_line_key] = "None"
+
+        toolbar_cols = st.columns([1, 1, 1, 2, 1, 1])
+
         with toolbar_cols[0]:
             sig_on = st.toggle(
-                "✨ Significance",
+                "✨ Sig",
                 st.session_state.graph_settings[show_sig_key],
                 key=f"tgl_sig_{current_gene}",
             )
@@ -4620,7 +4677,7 @@ with tab4:
 
         with toolbar_cols[1]:
             err_on = st.toggle(
-                "📏 Error Bars",
+                "📏 Err",
                 st.session_state.graph_settings[show_err_key],
                 key=f"tgl_err_{current_gene}",
             )
@@ -4636,9 +4693,19 @@ with tab4:
             st.session_state.graph_settings[bar_gap_key] = gap_val
 
         with toolbar_cols[3]:
-            if st.button(
-                "↺ Reset All", key=f"reset_all_{current_gene}", width="stretch"
-            ):
+            selected_ref = st.selectbox(
+                "Ref Line",
+                ref_options,
+                index=ref_options.index(st.session_state.graph_settings.get(ref_line_key, "None"))
+                if st.session_state.graph_settings.get(ref_line_key, "None") in ref_options
+                else 0,
+                key=f"ref_sel_{current_gene}",
+                help="Horizontal dashed line at a condition's expression level",
+            )
+            st.session_state.graph_settings[ref_line_key] = selected_ref
+
+        with toolbar_cols[4]:
+            if st.button("↺ Reset", key=f"reset_all_{current_gene}", use_container_width=True):
                 if f"{current_gene}_bar_settings" in st.session_state:
                     del st.session_state[f"{current_gene}_bar_settings"]
                 st.session_state.graph_settings[show_sig_key] = True
@@ -4646,10 +4713,10 @@ with tab4:
                 st.session_state.graph_settings[bar_gap_key] = 0.25
                 st.rerun()
 
-        with toolbar_cols[4]:
+        with toolbar_cols[5]:
             edit_mode = st.checkbox(
-                "🎨 Edit Bar Colors", key=f"edit_mode_{current_gene}",
-                help="Check this to customize colors for individual bars within each gene graph"
+                "⚙️ Settings", key=f"edit_mode_{current_gene}",
+                help="Open graph settings and color editor"
             )
 
         if f"{current_gene}_bar_settings" not in st.session_state:
@@ -4662,7 +4729,6 @@ with tab4:
             group = row.get("Group", "Treatment")
             default_color = DEFAULT_GROUP_COLORS.get(group, "#D3D3D3")
             bar_key = f"{current_gene}_{condition}"
-
             if bar_key not in st.session_state[f"{current_gene}_bar_settings"]:
                 st.session_state[f"{current_gene}_bar_settings"][bar_key] = {
                     "color": default_color,
@@ -4671,13 +4737,61 @@ with tab4:
                 }
 
         if edit_mode:
-            with st.expander("Bar Color & Visibility Editor", expanded=True):
-                # Color editor styles handled by global theme
+            with st.expander("⚙️ Settings & Colors", expanded=True):
+                s_col1, s_col2, s_col3 = st.columns(3)
 
+                with s_col1:
+                    gene_display = st.text_input(
+                        "Gene display name",
+                        value=st.session_state.gene_display_names.get(current_gene, current_gene),
+                        key=f"gene_display_{current_gene}",
+                        placeholder=current_gene,
+                    )
+                    gene_display_stripped = (gene_display.strip() if gene_display else "")[:50]
+                    if gene_display_stripped and gene_display_stripped != current_gene:
+                        st.session_state.gene_display_names[current_gene] = gene_display_stripped
+                    elif current_gene in st.session_state.gene_display_names:
+                        del st.session_state.gene_display_names[current_gene]
+
+                with s_col2:
+                    fig_width = st.slider(
+                        "Width (px)", 400, 1600,
+                        value=st.session_state.graph_settings.get("figure_width", 1000),
+                        step=50, key=f"fig_w_{current_gene}",
+                    )
+                    fig_height = st.slider(
+                        "Height (px)", 300, 1200,
+                        value=st.session_state.graph_settings.get("figure_height", 600),
+                        step=50, key=f"fig_h_{current_gene}",
+                    )
+                    st.session_state.graph_settings["figure_width"] = fig_width
+                    st.session_state.graph_settings["figure_height"] = fig_height
+
+                with s_col3:
+                    global_font = st.slider(
+                        "Global font", 8, 28,
+                        value=st.session_state.graph_settings.get("font_size", 14),
+                        key=f"gf_{current_gene}",
+                    )
+                    st.session_state.graph_settings["font_size"] = global_font
+                    tick_size = st.slider(
+                        "X-tick labels", 8, 24,
+                        value=st.session_state.graph_settings.get(f"{current_gene}_tick_size", 12),
+                        key=f"ts_{current_gene}",
+                    )
+                    st.session_state.graph_settings[f"{current_gene}_tick_size"] = tick_size
+                    ylabel_size = st.slider(
+                        "Y-axis label", 8, 24,
+                        value=st.session_state.graph_settings.get(f"{current_gene}_ylabel_size", 14),
+                        key=f"ys_{current_gene}",
+                    )
+                    st.session_state.graph_settings[f"{current_gene}_ylabel_size"] = ylabel_size
+
+                st.markdown("---")
+
+                st.markdown("**Bar Colors**")
                 n_bars = len(gene_data)
-                n_cols = min(n_bars, 3)
-
-                st.markdown("#### Individual Bar Settings")
+                n_cols = min(n_bars, 4)
                 color_cols = st.columns(n_cols)
 
                 for idx, (_, row) in enumerate(gene_data.iterrows()):
@@ -4686,213 +4800,81 @@ with tab4:
                     bar_key = f"{current_gene}_{condition}"
 
                     with color_cols[idx % n_cols]:
-                        with st.container():
-                            display_name = (
-                                condition
-                                if len(condition) <= 18
-                                else condition[:15] + "..."
+                        lbl = condition if len(condition) <= 15 else condition[:12] + "..."
+                        st.caption(f"**{lbl}** ({group})")
+                        new_color = st.color_picker(
+                            "Color",
+                            st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"],
+                            key=f"cp_{current_gene}_{idx}",
+                            help=condition,
+                        )
+                        st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"] = new_color
+                        st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = new_color
+
+                        cb1, cb2 = st.columns(2)
+                        with cb1:
+                            sig_bar = st.checkbox(
+                                "*", st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_sig"],
+                                key=f"sb_{current_gene}_{idx}", help="Significance",
                             )
-                            st.markdown(
-                                f"""
-                            <div class='color-editor-card'>
-                                <div class='color-editor-title' title='{condition}'>{display_name}</div>
-                                <div class='color-editor-subtitle'>{group}</div>
-                            </div>
-                            """,
-                                unsafe_allow_html=True,
+                            st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_sig"] = sig_bar
+                        with cb2:
+                            err_bar = st.checkbox(
+                                "±", st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_err"],
+                                key=f"eb_{current_gene}_{idx}", help="Error bar",
                             )
+                            st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_err"] = err_bar
 
-                            new_color = st.color_picker(
-                                "Color",
-                                st.session_state[f"{current_gene}_bar_settings"][
-                                    bar_key
-                                ]["color"],
-                                key=f"cp_{current_gene}_{idx}",
-                                help=f"Bar color for {condition}",
-                            )
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key][
-                                "color"
-                            ] = new_color
-                            st.session_state.graph_settings["bar_colors_per_sample"][
-                                bar_key
-                            ] = new_color
-
-                            cb_col1, cb_col2 = st.columns(2)
-                            with cb_col1:
-                                sig_bar = st.checkbox(
-                                    "Show *",
-                                    st.session_state[f"{current_gene}_bar_settings"][
-                                        bar_key
-                                    ]["show_sig"],
-                                    key=f"sb_{current_gene}_{idx}",
-                                    help="Show significance marker",
-                                )
-                                st.session_state[f"{current_gene}_bar_settings"][
-                                    bar_key
-                                ]["show_sig"] = sig_bar
-                            with cb_col2:
-                                err_bar = st.checkbox(
-                                    "Show ±",
-                                    st.session_state[f"{current_gene}_bar_settings"][
-                                        bar_key
-                                    ]["show_err"],
-                                    key=f"eb_{current_gene}_{idx}",
-                                    help="Show error bar",
-                                )
-                                st.session_state[f"{current_gene}_bar_settings"][
-                                    bar_key
-                                ]["show_err"] = err_bar
-
-                            st.markdown(
-                                "<div style='margin-bottom: 16px;'></div>",
-                                unsafe_allow_html=True,
-                            )
-
-                st.markdown("---")
-                st.markdown("#### Quick Color Presets")
-                st.caption("Apply a color scheme to all bars")
-
-                preset_cols = st.columns(4)
-                with preset_cols[0]:
-                    if st.button(
-                        "🔵 Blues",
-                        key=f"preset_blue_{current_gene}",
-                        use_container_width=True,
-                    ):
+                _bar_settings = st.session_state[f"{current_gene}_bar_settings"]
+                p1, p2, p3, p4 = st.columns(4)
+                with p1:
+                    if st.button("🔵 Blues", key=f"preset_blue_{current_gene}", use_container_width=True):
                         blues = ["#e3f2fd", "#90caf9", "#42a5f5", "#1976d2", "#0d47a1"]
-                        for idx, (_, row) in enumerate(gene_data.iterrows()):
-                            bar_key = f"{current_gene}_{row['Condition']}"
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key][
-                                "color"
-                            ] = blues[idx % len(blues)]
-                            st.session_state.graph_settings["bar_colors_per_sample"][
-                                bar_key
-                            ] = blues[idx % len(blues)]
+                        for i, (_, r) in enumerate(gene_data.iterrows()):
+                            bk = f"{current_gene}_{r['Condition']}"
+                            c = blues[i % len(blues)]
+                            if bk not in _bar_settings:
+                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
+                            else:
+                                _bar_settings[bk]["color"] = c
+                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
                         st.rerun()
-                with preset_cols[1]:
-                    if st.button(
-                        "🟢 Greens",
-                        key=f"preset_green_{current_gene}",
-                        use_container_width=True,
-                    ):
+                with p2:
+                    if st.button("🟢 Greens", key=f"preset_green_{current_gene}", use_container_width=True):
                         greens = ["#e8f5e9", "#a5d6a7", "#66bb6a", "#388e3c", "#1b5e20"]
-                        for idx, (_, row) in enumerate(gene_data.iterrows()):
-                            bar_key = f"{current_gene}_{row['Condition']}"
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key][
-                                "color"
-                            ] = greens[idx % len(greens)]
-                            st.session_state.graph_settings["bar_colors_per_sample"][
-                                bar_key
-                            ] = greens[idx % len(greens)]
+                        for i, (_, r) in enumerate(gene_data.iterrows()):
+                            bk = f"{current_gene}_{r['Condition']}"
+                            c = greens[i % len(greens)]
+                            if bk not in _bar_settings:
+                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
+                            else:
+                                _bar_settings[bk]["color"] = c
+                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
                         st.rerun()
-                with preset_cols[2]:
-                    if st.button(
-                        "🔴 Warm",
-                        key=f"preset_warm_{current_gene}",
-                        use_container_width=True,
-                    ):
+                with p3:
+                    if st.button("🔴 Warm", key=f"preset_warm_{current_gene}", use_container_width=True):
                         warms = ["#fff3e0", "#ffcc80", "#ff9800", "#f57c00", "#e65100"]
-                        for idx, (_, row) in enumerate(gene_data.iterrows()):
-                            bar_key = f"{current_gene}_{row['Condition']}"
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key][
-                                "color"
-                            ] = warms[idx % len(warms)]
-                            st.session_state.graph_settings["bar_colors_per_sample"][
-                                bar_key
-                            ] = warms[idx % len(warms)]
+                        for i, (_, r) in enumerate(gene_data.iterrows()):
+                            bk = f"{current_gene}_{r['Condition']}"
+                            c = warms[i % len(warms)]
+                            if bk not in _bar_settings:
+                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
+                            else:
+                                _bar_settings[bk]["color"] = c
+                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
                         st.rerun()
-                with preset_cols[3]:
-                    if st.button(
-                        "⬜ Grayscale",
-                        key=f"preset_gray_{current_gene}",
-                        use_container_width=True,
-                    ):
+                with p4:
+                    if st.button("⬜ Gray", key=f"preset_gray_{current_gene}", use_container_width=True):
                         grays = ["#ffffff", "#e0e0e0", "#bdbdbd", "#9e9e9e", "#616161"]
-                        for idx, (_, row) in enumerate(gene_data.iterrows()):
-                            bar_key = f"{current_gene}_{row['Condition']}"
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key][
-                                "color"
-                            ] = grays[idx % len(grays)]
-                            st.session_state.graph_settings["bar_colors_per_sample"][
-                                bar_key
-                            ] = grays[idx % len(grays)]
+                        for i, (_, r) in enumerate(gene_data.iterrows()):
+                            bk = f"{current_gene}_{r['Condition']}"
+                            c = grays[i % len(grays)]
+                            if bk not in _bar_settings:
+                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
+                            else:
+                                _bar_settings[bk]["color"] = c
+                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
                         st.rerun()
-
-        with st.expander("⚙️ Graph Settings", expanded=False):
-            settings_col1, settings_col2 = st.columns(2)
-
-            with settings_col1:
-                st.markdown("**Gene Display Name**")
-                gene_display = st.text_input(
-                    "Override gene name on Y-axis",
-                    value=st.session_state.gene_display_names.get(current_gene, current_gene),
-                    key=f"gene_display_{current_gene}",
-                    placeholder=current_gene,
-                )
-                gene_display_stripped = gene_display.strip() if gene_display else ""
-                if gene_display_stripped and gene_display_stripped != current_gene:
-                    st.session_state.gene_display_names[current_gene] = gene_display_stripped
-                elif current_gene in st.session_state.gene_display_names:
-                    del st.session_state.gene_display_names[current_gene]
-
-                st.markdown("**Chart Dimensions**")
-                fig_width = st.slider(
-                    "Width (px)", 400, 1600,
-                    value=st.session_state.graph_settings.get("figure_width", 1000),
-                    step=50, key=f"fig_w_{current_gene}",
-                )
-                fig_height = st.slider(
-                    "Height (px)", 300, 1200,
-                    value=st.session_state.graph_settings.get("figure_height", 600),
-                    step=50, key=f"fig_h_{current_gene}",
-                )
-                st.session_state.graph_settings["figure_width"] = fig_width
-                st.session_state.graph_settings["figure_height"] = fig_height
-
-            with settings_col2:
-                st.markdown("**Font Sizes**")
-                global_font = st.slider(
-                    "Global font", 8, 28,
-                    value=st.session_state.graph_settings.get("font_size", 14),
-                    key=f"gf_{current_gene}",
-                )
-                st.session_state.graph_settings["font_size"] = global_font
-
-                tick_size = st.slider(
-                    "X-axis tick labels", 8, 24,
-                    value=st.session_state.graph_settings.get(f"{current_gene}_tick_size", 12),
-                    key=f"ts_{current_gene}",
-                )
-                st.session_state.graph_settings[f"{current_gene}_tick_size"] = tick_size
-
-                ylabel_size = st.slider(
-                    "Y-axis label", 8, 24,
-                    value=st.session_state.graph_settings.get(f"{current_gene}_ylabel_size", 14),
-                    key=f"ys_{current_gene}",
-                )
-                st.session_state.graph_settings[f"{current_gene}_ylabel_size"] = ylabel_size
-
-            st.markdown("---")
-            st.markdown("**Reference Line**")
-            ref_line_help = "Draw a horizontal dashed line at a selected condition's expression level"
-            conditions_list = gene_data["Condition"].tolist()
-            ref_options = ["None"] + conditions_list
-            ref_line_key = f"{current_gene}_ref_line"
-            if ref_line_key not in st.session_state.graph_settings:
-                st.session_state.graph_settings[ref_line_key] = "None"
-
-            ref_col1, ref_col2 = st.columns([2, 3])
-            with ref_col1:
-                selected_ref = st.selectbox(
-                    "Reference condition",
-                    ref_options,
-                    index=ref_options.index(st.session_state.graph_settings.get(ref_line_key, "None"))
-                    if st.session_state.graph_settings.get(ref_line_key, "None") in ref_options
-                    else 0,
-                    key=f"ref_sel_{current_gene}",
-                    help=ref_line_help,
-                )
-                st.session_state.graph_settings[ref_line_key] = selected_ref
 
         current_settings = st.session_state.graph_settings.copy()
         current_settings["show_significance"] = st.session_state.graph_settings.get(
@@ -4907,6 +4889,17 @@ with tab4:
 
         display_gene_name = st.session_state.gene_display_names.get(current_gene, current_gene)
 
+        ref_condition = st.session_state.graph_settings.get(f"{current_gene}_ref_line", "None")
+        ref_line_val = None
+        ref_line_lbl = None
+        if ref_condition != "None":
+            ref_rows = gene_data[gene_data["Condition"] == ref_condition]
+            if not ref_rows.empty:
+                _rv = ref_rows["Relative_Expression"].values[0]
+                if pd.notna(_rv):
+                    ref_line_val = _rv
+                    ref_line_lbl = f"{ref_condition}: {_rv:.2f}"
+
         fig = GraphGenerator.create_gene_graph(
             gene_data,
             current_gene,
@@ -4916,23 +4909,9 @@ with tab4:
             per_sample_overrides=None,
             condition_colors=st.session_state.get("condition_colors", {}),
             display_gene_name=display_gene_name,
+            ref_line_value=ref_line_val,
+            ref_line_label=ref_line_lbl,
         )
-
-        ref_condition = st.session_state.graph_settings.get(f"{current_gene}_ref_line", "None")
-        if ref_condition != "None":
-            ref_rows = gene_data[gene_data["Condition"] == ref_condition]
-            if not ref_rows.empty:
-                ref_value = ref_rows["Relative_Expression"].values[0]
-                if pd.notna(ref_value):
-                    fig.add_hline(
-                        y=ref_value,
-                        line_dash="dash",
-                        line_color="rgba(100, 100, 100, 0.7)",
-                        line_width=1.5,
-                        annotation_text=f"{ref_condition}: {ref_value:.2f}",
-                        annotation_position="top right",
-                        annotation_font=dict(size=10, color="#666666", family=PLOTLY_FONT_FAMILY),
-                    )
 
         st.plotly_chart(fig, width="stretch", key=f"main_fig_{current_gene}")
         st.session_state.graphs[current_gene] = fig
@@ -4977,7 +4956,8 @@ with tab4:
                 with all_gene_cols[idx % len(all_gene_cols)]:
                     st.markdown(f"**{gene}**")
                     st.plotly_chart(f, width="stretch", key=f"mini_{gene}")
-                    st.session_state.graphs[gene] = f
+                    if gene not in st.session_state.graphs:
+                        st.session_state.graphs[gene] = f
     else:
         st.info(
             "⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'"
@@ -4999,6 +4979,8 @@ with tab5:
             "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
+            "concentration": st.session_state.experiment_desc.get("concentration", "1 ppm"),
+            "treatment_time": st.session_state.experiment_desc.get("treatment_time", "24 h"),
         }
 
         col1, col2 = st.columns(2)
@@ -5063,6 +5045,23 @@ with tab5:
         st.caption(
             "Generate a slide deck with title, gene slides, and summary"
         )
+
+        with st.expander("📝 Experiment Description (for PPT slides)", expanded=False):
+            desc_c1, desc_c2 = st.columns(2)
+            with desc_c1:
+                conc_val = st.text_input(
+                    "Sample concentration",
+                    value=st.session_state.experiment_desc.get("concentration", "1 ppm"),
+                    key="exp_concentration",
+                )
+                st.session_state.experiment_desc["concentration"] = conc_val
+            with desc_c2:
+                time_val = st.text_input(
+                    "Treatment time",
+                    value=st.session_state.experiment_desc.get("treatment_time", "24 h"),
+                    key="exp_treatment_time",
+                )
+                st.session_state.experiment_desc["treatment_time"] = time_val
 
         ppt_col1, ppt_col2 = st.columns([1, 2])
 
