@@ -99,6 +99,11 @@ def mock_streamlit():
     if main_module_name in sys.modules:
         del sys.modules[main_module_name]
 
+    # Also clear qpcr submodule caches so they pick up fresh mock
+    for mod_name in list(sys.modules.keys()):
+        if mod_name.startswith("qpcr"):
+            del sys.modules[mod_name]
+
     yield mock_st
 
 
@@ -247,8 +252,8 @@ def graph_settings():
         "bar_gap": 0.15,
         "title_size": 20,
         "font_size": 14,
-        "figure_height": 11,
-        "figure_width": 26,
+        "figure_height": 9,
+        "figure_width": 15,
         "color_scheme": "plotly_white",
         "plot_bgcolor": "#FFFFFF",
         "show_legend": False,

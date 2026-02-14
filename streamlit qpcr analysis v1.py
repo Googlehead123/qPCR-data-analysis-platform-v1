@@ -26,6 +26,47 @@ def natural_sort_key(sample_name):
     return [int(part) if part.isdigit() else part.lower() for part in parts]
 
 
+WORKFLOW_STEPS = [
+    ("Upload", "upload"),
+    ("QC", "qc"),
+    ("Mapping", "mapping"),
+    ("Analysis", "analysis"),
+    ("Graphs", "graphs"),
+    ("Export", "export"),
+]
+
+
+def render_step_indicator(current_step: str):
+    """Render a compact horizontal step progress indicator."""
+    has_data = st.session_state.get("data") is not None
+    has_analysis = bool(st.session_state.get("processed_data"))
+    has_graphs = bool(st.session_state.get("graphs"))
+    mapping_done = st.session_state.get("mapping_finalized", False)
+
+    step_status = {
+        "upload": "done" if has_data else "pending",
+        "qc": "done" if has_data else "pending",
+        "mapping": "done" if mapping_done else "pending",
+        "analysis": "done" if has_analysis else "pending",
+        "graphs": "done" if has_graphs else "pending",
+        "export": "done" if has_graphs else "pending",
+    }
+
+    parts = []
+    for i, (label, key) in enumerate(WORKFLOW_STEPS):
+        if key == current_step:
+            cls = "active"
+        elif step_status[key] == "done":
+            cls = "done"
+        else:
+            cls = ""
+        parts.append(f'<span class="step-item {cls}"><span class="step-dot"></span>{label}</span>')
+        if i < len(WORKFLOW_STEPS) - 1:
+            parts.append('<span class="step-conn"></span>')
+
+    st.markdown(f'<div class="step-progress">{"".join(parts)}</div>', unsafe_allow_html=True)
+
+
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="qPCR Analysis Suite",
@@ -163,6 +204,67 @@ st.markdown("""
 
     /* Caption text */
     .stCaption { color: #86868b; }
+
+    /* Step progress indicator */
+    .step-progress {
+        display: flex;
+        align-items: center;
+        gap: 0;
+        padding: 8px 0 12px 0;
+        margin-bottom: 4px;
+    }
+    .step-progress .step-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.75rem;
+        color: #d2d2d7;
+        font-weight: 500;
+        white-space: nowrap;
+    }
+    .step-progress .step-item.active {
+        color: #1d1d1f;
+        font-weight: 600;
+    }
+    .step-progress .step-item.done {
+        color: #86868b;
+    }
+    .step-progress .step-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #e5e5e7;
+        flex-shrink: 0;
+    }
+    .step-progress .step-item.active .step-dot {
+        background: #1d1d1f;
+        box-shadow: 0 0 0 3px rgba(29,29,31,0.12);
+    }
+    .step-progress .step-item.done .step-dot {
+        background: #86868b;
+    }
+    .step-progress .step-conn {
+        width: 20px;
+        height: 1px;
+        background: #e5e5e7;
+        margin: 0 4px;
+        flex-shrink: 0;
+    }
+
+    /* Gene pill selector container */
+    .gene-pill-container {
+        background: #fafafa;
+        border: 1px solid #f0f0f0;
+        border-radius: 12px;
+        padding: 12px 16px 8px 16px;
+        margin-bottom: 12px;
+    }
+    .gene-pill-container .label {
+        font-size: 0.78rem;
+        color: #86868b;
+        font-weight: 500;
+        margin-bottom: 8px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -519,7 +621,13 @@ class QPCRParser:
                 f"Note: {invalid_ct_count} rows with invalid/undetermined CT values were filtered out."
             )
 
+        pre_filter_count = len(parsed.dropna(subset=["CT"]))
         result = parsed.dropna(subset=["CT"]).query("Sample.notna() & Target.notna()")
+        dropped_sample_target = pre_filter_count - len(result)
+        if dropped_sample_target > 0:
+            st.info(
+                f"Note: {dropped_sample_target} rows with missing Sample or Target names were filtered out."
+            )
 
         if result.empty:
             st.warning(
@@ -567,9 +675,15 @@ class QPCRParser:
                 }
             )
 
+            pre_filter_count = len(parsed.dropna(subset=["CT"]))
             result = parsed.dropna(subset=["CT"]).query(
                 "Sample.notna() & Target.notna()"
             )
+            dropped_sample_target = pre_filter_count - len(result)
+            if dropped_sample_target > 0:
+                st.info(
+                    f"Note: {dropped_sample_target} rows with missing Sample or Target names were filtered out."
+                )
             if result.empty:
                 st.warning(
                     "No valid data rows found after filtering. Check CT values and Sample/Target names."
@@ -688,7 +802,7 @@ class QualityControl:
             if row["n"] < 2:
                 issues.append("Low n")
                 severity = "warning"
-            if row["CV_pct"] > QualityControl.CV_THRESHOLD * 100:
+            if pd.notna(row["CV_pct"]) and row["CV_pct"] > QualityControl.CV_THRESHOLD * 100:
                 issues.append(f"High CV ({row['CV_pct']:.1f}%)")
                 severity = "warning"
             if row["Mean_CT"] > QualityControl.CT_HIGH_THRESHOLD:
@@ -759,7 +873,7 @@ class QualityControl:
         # Calculate deviation from mean
         wells["Deviation"] = (wells["CT"] - mean_ct).round(3)
         wells["Z_Score"] = np.where(
-            std_ct > 0, (wells["CT"] - mean_ct) / std_ct, 0
+            std_ct > 0, (wells["CT"] - mean_ct) / std_ct, np.nan
         ).round(2)
 
         # Determine individual well status
@@ -771,7 +885,7 @@ class QualityControl:
                 issues.append("Low CT")
             if row["Is_Outlier"]:
                 issues.append("Grubbs outlier")
-            if abs(row["Z_Score"]) > 2:
+            if pd.notna(row["Z_Score"]) and abs(row["Z_Score"]) > 2:
                 issues.append(f"Z={row['Z_Score']:.1f}")
             return "; ".join(issues) if issues else "OK"
 
@@ -839,7 +953,7 @@ class QualityControl:
             total_triplicates = healthy_triplicates = warning_triplicates = (
                 error_triplicates
             ) = 0
-            avg_cv = max_cv = 0
+            avg_cv = max_cv = np.nan
 
         # Unique counts
         n_samples = active_data["Sample"].nunique()
@@ -976,7 +1090,7 @@ class QualityControl:
         cv_stats["cv"] = np.where(
             (cv_stats["mean"] > 0) & (cv_stats["count"] > 1),
             cv_stats["std"] / cv_stats["mean"],
-            0,
+            np.nan,
         )
         high_cv_groups = cv_stats[cv_stats["cv"] > QualityControl.CV_THRESHOLD][
             ["Sample", "Target", "cv"]
@@ -1075,7 +1189,7 @@ class QualityControl:
 
         stats["SD"] = stats["SD"].fillna(0)
         stats["CV%"] = np.where(
-            stats["Mean CT"] > 0, (stats["SD"] / stats["Mean CT"]) * 100, 0
+            stats["Mean CT"] > 0, (stats["SD"] / stats["Mean CT"]) * 100, np.nan
         )
 
         stats["Status"] = np.select(
@@ -1301,7 +1415,7 @@ class AnalysisEngine:
 
         # Process each target gene separately (exclude housekeeping)
         for target in data["Target"].unique():
-            if target.upper() in [hk_gene.upper(), "ACTIN", "B-ACTIN", "BACTIN", "GAPDH", "ACTB"]:
+            if target.upper() == hk_gene.upper():
                 continue
 
             target_data = data[data["Target"] == target]
@@ -1335,6 +1449,9 @@ class AnalysisEngine:
                         hk_data = hk_data[~hk_data["Well"].isin(hk_excluded)]
 
                 if len(hk_data) == 0:
+                    _skipped_warnings.append(
+                        f"Gene '{target}', condition '{condition}': no HK gene ('{hk_gene}') data"
+                    )
                     continue
 
                 target_ct_values = cond_data["CT"].values
@@ -1345,6 +1462,13 @@ class AnalysisEngine:
 
                 target_ct_mean = target_ct_values.mean()
                 hk_ct_mean = hk_ct_values.mean()
+
+                if np.isnan(target_ct_mean) or np.isnan(hk_ct_mean):
+                    _skipped_warnings.append(
+                        f"Gene '{target}', condition '{condition}': NaN CT mean (target={target_ct_mean}, HK={hk_ct_mean})"
+                    )
+                    continue
+
                 delta_ct = target_ct_mean - hk_ct_mean
 
                 # Get reference ΔCt (ref_sample) — must also respect exclusions
@@ -1376,7 +1500,9 @@ class AnalysisEngine:
                         continue
 
                 ddct = delta_ct - ref_delta_ct
-                rel_expr = 2 ** (-ddct)
+                # Guard against overflow: clamp ddct to prevent inf/0 in 2^(-ddct)
+                ddct_clamped = np.clip(ddct, -50, 50)
+                rel_expr = 2 ** (-ddct_clamped)
 
                 target_sd = target_ct_values.std() if len(target_ct_values) > 1 else 0
                 hk_sd = hk_ct_values.std() if len(hk_ct_values) > 1 else 0
@@ -1477,6 +1603,7 @@ class AnalysisEngine:
         results["significance"] = ""
         # FIX-16: Track one-sample t-test usage
         _onesamp_warnings = []
+        _stats_skipped = []
 
         # Add second p-value columns if compare_condition_2 is provided
         if compare_condition_2:
@@ -1530,7 +1657,7 @@ class AnalysisEngine:
                 # High CT values are legitimate (low HK expression) and should
                 # produce a warning upstream, not silently drop data.
                 if np.isnan(hk_mean) or hk_mean <= 0:
-                    # Invalid housekeeping gene Ct value - skip this condition
+                    _stats_skipped.append(f"{target}/{cond}: invalid HK mean ({hk_mean})")
                     continue
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
 
@@ -1623,6 +1750,7 @@ class AnalysisEngine:
 
         # FIX-16: Attach one-sample t-test warnings for caller to display
         results.attrs["_onesamp_warnings"] = _onesamp_warnings
+        results.attrs["_stats_skipped_warnings"] = _stats_skipped
         return results
 
     @staticmethod
@@ -1682,13 +1810,13 @@ class AnalysisEngine:
             hk_gene = st.session_state.get("hk_gene")
 
             if data is None:
-                st.error("❌ No raw data loaded.")
+                st.error("No raw data loaded.")
                 return False
             if not mapping:
-                st.error("❌ Sample mapping not found.")
+                st.error("Sample mapping not found.")
                 return False
             if not hk_gene:
-                st.error("❌ Housekeeping gene not selected.")
+                st.error("Housekeeping gene not selected.")
                 return False
 
             ct_values = data["CT"]
@@ -1816,7 +1944,7 @@ class AnalysisEngine:
             return True
 
         except Exception as e:
-            st.error(f"❌ Analysis failed: {e}")
+            st.error(f"Analysis failed: {e}")
             return False
 
 
@@ -1827,9 +1955,9 @@ import textwrap
 class GraphGenerator:
     @staticmethod
     def _wrap_text(text: str, width: int = 15) -> str:
-        """Wrap text for x-axis labels"""
+        """Wrap text for x-axis labels using <br> for Plotly compatibility"""
         wrapped = textwrap.fill(text, width=width)
-        return wrapped
+        return wrapped.replace("\n", "<br>")
 
     @staticmethod
     def create_gene_graph(
@@ -1997,7 +2125,11 @@ class GraphGenerator:
 
         # Calculate y-axis range FIRST (needed for absolute positioning of significance)
         max_y_value = gene_data_indexed["Relative_Expression"].max()
+        if pd.isna(max_y_value) or max_y_value <= 0:
+            max_y_value = 1.0  # Fallback for all-NaN or zero expression
         max_error = error_array.max() if len(error_array) > 0 else 0
+        if pd.isna(max_error):
+            max_error = 0
         y_max_auto = (
             max_y_value + max_error + (max_y_value * 0.15)
         )
@@ -2128,7 +2260,7 @@ class GraphGenerator:
         # Get gene-specific settings
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get("bar_gap", 0.15))
         gene_margins = settings.get(
-            f"{gene}_margins", {"l": 80, "r": 80, "t": 100, "b": 160}
+            f"{gene}_margins", {"l": 80, "r": 40, "t": 60, "b": 200}
         )
         gene_bg_color = settings.get(
             f"{gene}_bg_color", settings.get("plot_bgcolor", "#FFFFFF")
@@ -2145,9 +2277,9 @@ class GraphGenerator:
             (label.count("<br>") + 1 for label in wrapped_labels), default=1
         )
         # Base margin + extra per line beyond 1 (~18px per line)
-        dynamic_b_margin = 120 + max(0, max_label_lines - 1) * 18
+        dynamic_b_margin = 180 + max(0, max_label_lines - 1) * 22
         default_margins = gene_margins.copy()
-        if default_margins.get("b", 160) < dynamic_b_margin:
+        if default_margins.get("b", 200) < dynamic_b_margin:
             default_margins["b"] = dynamic_b_margin
         gene_margins = default_margins
 
@@ -2167,21 +2299,14 @@ class GraphGenerator:
                 f"<br><b>2nd Comparison{legend_ref_label_2}:</b>  # p<0.05  ## p<0.01  ### p<0.001"
             )
 
-        fig.add_annotation(
-            text=legend_text,
-            xref="paper",
-            yref="paper",
-            x=1.0,
-            y=-0.15,
-            xanchor="right",
-            yanchor="top",
-            showarrow=False,
-            font=dict(size=12, color="#666666", family=PLOTLY_FONT_FAMILY),
-            bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="#CCCCCC",
-            borderwidth=1,
-            borderpad=4,
-        )
+        fig_h_px = int(settings.get("figure_height", 16) * CM_TO_PX)
+        b_margin_px = gene_margins.get("b", 200)
+        t_margin_px = gene_margins.get("t", 60)
+        plot_h_px = max(fig_h_px - b_margin_px - t_margin_px, 100)
+
+        # Dynamic legend y: place below x-axis labels with gap
+        label_px_est = max_label_lines * 18 + 10
+        legend_y = -((label_px_est / plot_h_px) + 0.06)
 
         fig.update_layout(
             title="",
@@ -2192,7 +2317,7 @@ class GraphGenerator:
                 tickmode="array",
                 tickvals=list(range(n_bars)),
                 ticktext=wrapped_labels,
-                tickfont=dict(size=gene_tick_size),
+                tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY),
                 tickangle=0,
                 ticks="outside",
                 ticklen=8,
@@ -2205,18 +2330,34 @@ class GraphGenerator:
             yaxis=y_axis_config,
             template=settings.get("color_scheme", "plotly_white"),
             font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY),
-            height=int(settings.get("figure_height", 11) * CM_TO_PX),
-            width=int(settings.get("figure_width", 26) * CM_TO_PX),
+            height=fig_h_px,
+            width=int(settings.get("figure_width", 28) * CM_TO_PX),
             bargap=gene_bar_gap,
             showlegend=settings.get("show_legend", False),
             plot_bgcolor=gene_bg_color,
             paper_bgcolor="#FFFFFF",
             margin=dict(
                 l=gene_margins.get("l", 80),
-                r=gene_margins.get("r", 80),
-                t=gene_margins.get("t", 100),
-                b=gene_margins.get("b", 160),
+                r=gene_margins.get("r", 40),
+                t=t_margin_px,
+                b=b_margin_px,
             ),
+        )
+
+        fig.add_annotation(
+            text=legend_text,
+            xref="paper",
+            yref="paper",
+            x=1.0,
+            y=legend_y,
+            xanchor="right",
+            yanchor="top",
+            showarrow=False,
+            font=dict(size=10, color="#888888", family=PLOTLY_FONT_FAMILY),
+            bgcolor="rgba(255,255,255,0.85)",
+            bordercolor="#DDDDDD",
+            borderwidth=1,
+            borderpad=3,
         )
 
         if ref_line_value is not None and pd.notna(ref_line_value):
@@ -2883,20 +3024,29 @@ class PPTGenerator:
         slides_list.remove(slides_list[index])
 
     @staticmethod
-    def _duplicate_slide(prs, source_index):
+    def _safe_copy_slide(prs, source_index):
+        """Copy a slide by duplicating shapes via the spTree proxy.
+
+        Uses python-pptx's spTree property to ensure shapes are properly
+        recognized after copy. Copies relationships for images/media,
+        then deep-copies each shape element from the source spTree.
+        """
         import copy
 
         source = prs.slides[source_index]
-        slide_layout = source.slide_layout
-        new_slide = prs.slides.add_slide(slide_layout)
+        new_slide = prs.slides.add_slide(source.slide_layout)
 
+        # Map source relationship IDs to new ones
         rid_map = {}
-        for old_rid, rel in source.part.rels.items():
-            if 'slideLayout' in str(rel.reltype):
+        for rid, rel in source.part.rels.items():
+            rel_type = str(rel.reltype)
+            if 'slideLayout' in rel_type:
                 for new_rid, new_rel in new_slide.part.rels.items():
                     if 'slideLayout' in str(new_rel.reltype):
-                        rid_map[old_rid] = new_rid
+                        rid_map[rid] = new_rid
                         break
+                continue
+            if 'notesSlide' in rel_type:
                 continue
             try:
                 if rel.is_external:
@@ -2907,21 +3057,29 @@ class PPTGenerator:
                     new_rid = new_slide.part.relate_to(
                         rel.target_part, rel.reltype
                     )
-                rid_map[old_rid] = new_rid
+                rid_map[rid] = new_rid
             except Exception:
-                continue
+                pass
 
-        for child in list(new_slide._element):
-            new_slide._element.remove(child)
+        source_spTree = source._element.spTree
+        target_spTree = new_slide._element.spTree
 
-        for child in source._element:
-            new_child = copy.deepcopy(child)
-            for elem in new_child.iter():
-                for attr_key in list(elem.attrib.keys()):
-                    val = elem.attrib[attr_key]
-                    if val in rid_map:
-                        elem.attrib[attr_key] = rid_map[val]
-            new_slide._element.append(new_child)
+        # Remove layout placeholder shapes from target
+        shape_tags = ['}sp', '}pic', '}cxnSp', '}grpSp']
+        for child in list(target_spTree):
+            if any(child.tag.endswith(t) for t in shape_tags):
+                target_spTree.remove(child)
+
+        # Deep-copy shapes from source, remapping relationship IDs
+        for child in source_spTree:
+            if any(child.tag.endswith(t) for t in shape_tags):
+                new_child = copy.deepcopy(child)
+                for elem in new_child.iter():
+                    for attr_key in list(elem.attrib.keys()):
+                        val = elem.attrib[attr_key]
+                        if val in rid_map:
+                            elem.attrib[attr_key] = rid_map[val]
+                target_spTree.append(new_child)
 
         return new_slide
 
@@ -2933,11 +3091,115 @@ class PPTGenerator:
         slides_list.append(el)
 
     @staticmethod
+    def _populate_gene_slide(prs, slide, gene, fig, gene_data, analysis_params, graph_settings):
+        """Populate a template-duplicated gene slide with gene name and graph image."""
+        from pptx.util import Inches, Pt, Emu
+
+        # Update text boxes on the template slide
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            full_text = shape.text_frame.text
+
+            # TextBox 17: "효능 평가" → "{gene} 효능 평가"
+            if "효능 평가" in full_text and "Results" not in full_text and "有" not in full_text:
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        if "효능" in run.text:
+                            run.text = run.text.replace("효능 평가", f"{gene} 효능 평가")
+                            break
+                    break
+
+            # TextBox 14: "Results: 효능 有/無" → update with gene result
+            elif "Results" in full_text or "효능 有" in full_text:
+                has_efficacy = False
+                if gene_data is not None and not gene_data.empty:
+                    sig_vals = gene_data.get("significance", pd.Series())
+                    has_efficacy = sig_vals.str.len().gt(0).any() if not sig_vals.empty else False
+                result_text = f"Results: 효능 {'有' if has_efficacy else '無'}"
+                for para in shape.text_frame.paragraphs:
+                    runs = list(para.runs)
+                    for i, run in enumerate(runs):
+                        if i == 0:
+                            run.text = result_text
+                        else:
+                            run.text = ""
+                    break
+
+            # TextBox 2: experiment details (top-right area) — fill template fields
+            elif (shape.left is not None and shape.top is not None
+                  and shape.left > 3500000 and shape.top < 500000):
+                efficacy_t = analysis_params.get("Efficacy_Type", "")
+                eff_cfg = EFFICACY_CONFIG.get(efficacy_t, {})
+                field_values = {
+                    "Date: ": analysis_params.get("Date", "")[:10],
+                    "Cell line: ": eff_cfg.get("cell", ""),
+                    "Sample concentration: ": analysis_params.get("concentration", "1 ppm"),
+                    "Positive control: ": eff_cfg.get("controls", {}).get("positive", ""),
+                    "Inducer: ": eff_cfg.get("controls", {}).get("negative", ""),
+                    "Treatment time: ": analysis_params.get("treatment_time", "24 h"),
+                    "Test method:": " qPCR (DDCt)",
+                }
+                for para in shape.text_frame.paragraphs:
+                    if not para.runs:
+                        continue
+                    label = para.runs[0].text
+                    for field_label, value in field_values.items():
+                        if label.strip().startswith(field_label.strip()):
+                            para.runs[0].text = f"{field_label}{value}"
+                            for extra_run in para.runs[1:]:
+                                extra_run.text = ""
+                            break
+
+        # Add graph image
+        gs = graph_settings or {}
+        w_cm = gs.get("figure_width", 28)
+        h_cm = gs.get("figure_height", 16)
+
+        fig_copy = go.Figure(fig)
+        fig_copy.update_layout(
+            width=max(int(w_cm * CM_TO_PX), 800),
+            height=max(int(h_cm * CM_TO_PX), 500),
+        )
+
+        try:
+            img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
+            img_stream = io.BytesIO(img_bytes)
+
+            w_emu = int(w_cm * CM_TO_EMU)
+            h_emu = int(h_cm * CM_TO_EMU)
+            # Available area: ~1.0" to ~6.6" vertically, ~12" wide
+            max_w_emu = int(11.5 * 914400)
+            max_h_emu = int(5.2 * 914400)
+
+            if w_emu > max_w_emu:
+                scale_f = max_w_emu / w_emu
+                w_emu = max_w_emu
+                h_emu = int(h_emu * scale_f)
+            if h_emu > max_h_emu:
+                scale_f = max_h_emu / h_emu
+                h_emu = max_h_emu
+                w_emu = int(w_emu * scale_f)
+
+            slide_w = int(prs.slide_width)
+            left = max(0, int((slide_w - w_emu) / 2))
+            top = int(1.0 * 914400)  # 1.0" below header
+
+            slide.shapes.add_picture(
+                img_stream, left, top, width=Emu(w_emu), height=Emu(h_emu)
+            )
+        except Exception as e:
+            err_box = slide.shapes.add_textbox(
+                Inches(0.5), Inches(1.5), Inches(11.0), Inches(4.0)
+            )
+            err_box.text_frame.paragraphs[0].text = f"Graph Error: {str(e)}"
+            err_box.text_frame.paragraphs[0].font.size = Pt(14)
+
+    @staticmethod
     def generate_presentation(graphs, processed_data, analysis_params, graph_settings=None):
         try:
             from pptx import Presentation
             from pptx.util import Inches, Emu
-            from pptx.dml.color import RGBColor
         except ImportError:
             st.error("python-pptx not installed")
             return None
@@ -2950,140 +3212,59 @@ class PPTGenerator:
         )
         use_template = os.path.isfile(template_path)
 
-        if not use_template:
-            st.warning(
-                "Template file not found — generating simple PPT layout. "
-                "Place '251215 효능평가 결과 TEMPLATE.pptx' next to the app for branded slides."
-            )
+        gs = graph_settings or {}
+        gene_list = list(graphs.keys())
+        n_genes = len(gene_list)
+
+        if use_template and n_genes > 0:
+            prs = Presentation(template_path)
+
+            # Template slides: [0]=Title, [1]=Description, [2]=Gene template, [3]=Closing
+            # Step 1: Update title slide — replace "소재" with efficacy type
+            efficacy = analysis_params.get("Efficacy_Type", "소재")
+            title_slide = prs.slides[0]
+            for shape in title_slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        for run in para.runs:
+                            if "소재" in run.text:
+                                run.text = run.text.replace("소재", efficacy)
+
+            # Step 2: Copy gene template (index 2) BEFORE deleting to avoid
+            # ZIP part-name conflicts (delete frees a name that add_slide reuses)
+            for _ in range(n_genes - 1):
+                PPTGenerator._safe_copy_slide(prs, 2)
+            # Now: [0]=Title, [1]=Desc, [2]=Gene, [3]=Closing, [4..N+2]=GeneCopies
+
+            # Step 3: Delete slide 1 (description overview)
+            PPTGenerator._delete_slide(prs, 1)
+            # Now: [0]=Title, [1]=Gene, [2]=Closing, [3..N+1]=GeneCopies
+
+            # Step 4: Move closing slide (index 2) to end
+            PPTGenerator._move_slide_to_end(prs, 2)
+            # Now: [0]=Title, [1]=Gene, [2..N]=GeneCopies, [N+1]=Closing
+
+            # Step 5: Populate each gene slide with gene name and graph
+            for i, gene in enumerate(gene_list):
+                slide = prs.slides[1 + i]
+                fig = graphs[gene]
+                gene_data = processed_data.get(gene)
+                PPTGenerator._populate_gene_slide(
+                    prs, slide, gene, fig, gene_data, analysis_params, gs
+                )
+        else:
+            # Fallback: no template available
             prs = Presentation()
             prs.slide_width = Emu(12192000)
             prs.slide_height = Emu(6858000)
+            PPTGenerator.create_title_slide(prs, analysis_params)
 
-            for gene, fig in graphs.items():
-                slide = prs.slides.add_slide(prs.slide_layouts[6])
-                bg = slide.background
-                fill = bg.fill
-                fill.solid()
-                fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-
-                fig_copy = go.Figure(fig)
-                gs = graph_settings or {}
-                w_px = int(gs.get("figure_width", 26) * CM_TO_PX)
-                h_px = int(gs.get("figure_height", 11) * CM_TO_PX)
-                fig_copy.update_layout(
-                    width=max(w_px, 900),
-                    height=max(h_px, 550),
+            for gene in gene_list:
+                fig = graphs[gene]
+                gene_data = processed_data.get(gene)
+                PPTGenerator.create_gene_slide(
+                    prs, gene, fig, gene_data, analysis_params
                 )
-                img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
-                img_stream = io.BytesIO(img_bytes)
-
-                w_emu = int(gs.get("figure_width", 26) * CM_TO_EMU)
-                h_emu = int(gs.get("figure_height", 11) * CM_TO_EMU)
-                img_width = Emu(w_emu)
-                img_height = Emu(h_emu)
-                left = int((prs.slide_width - img_width) / 2)
-                top = int((prs.slide_height - img_height) / 2)
-                slide.shapes.add_picture(
-                    img_stream, left, top, width=img_width, height=img_height
-                )
-
-            output = io.BytesIO()
-            prs.save(output)
-            output.seek(0)
-            return output.getvalue()
-
-        prs = Presentation(template_path)
-
-        PPTGenerator._delete_slide(prs, 1)
-        # After deletion: [0]=Title, [1]=Gene template, [2]=Closing
-
-        efficacy = analysis_params.get("Efficacy_Type", "소재")
-        title_slide = prs.slides[0]
-        for shape in title_slide.shapes:
-            if shape.has_text_frame:
-                for para in shape.text_frame.paragraphs:
-                    for run in para.runs:
-                        if "소재" in run.text:
-                            run.text = run.text.replace("소재", efficacy)
-
-        gene_template_index = 1
-        gene_names = list(graphs.keys())
-
-        if not gene_names:
-            output = io.BytesIO()
-            prs.save(output)
-            output.seek(0)
-            return output.getvalue()
-
-        for _ in range(len(gene_names) - 1):
-            PPTGenerator._duplicate_slide(prs, gene_template_index)
-
-        # Duplicates appended after closing: [0]=Title, [1]=Gene, [2]=Closing, [3..N]=Copies
-        # Move closing slide (index 2) to end
-        if len(gene_names) > 1:
-            PPTGenerator._move_slide_to_end(prs, 2)
-        # Now: [0]=Title, [1]=Gene(orig), [2..N-1]=Copies, [N]=Closing
-
-        desc_replacements = {
-            "YYYY/MM/DD": analysis_params.get("Date", "")[:10],
-            "CELL": EFFICACY_CONFIG.get(efficacy, {}).get("cell", ""),
-            "CONC": analysis_params.get("concentration", "1 ppm"),
-            "PC": EFFICACY_CONFIG.get(efficacy, {}).get("controls", {}).get("positive", ""),
-        }
-        user_time = analysis_params.get("treatment_time", "24 h")
-
-        for i, gene in enumerate(gene_names):
-            gene_slide = prs.slides[1 + i]
-
-            for shape in gene_slide.shapes:
-                if not shape.has_text_frame:
-                    continue
-                if shape.name == "TextBox 17":
-                    for para in shape.text_frame.paragraphs:
-                        for run in para.runs:
-                            if "효능 평가" in run.text:
-                                run.text = run.text.replace(
-                                    "효능 평가", f"{gene} 효능 평가"
-                                )
-                elif shape.name == "TextBox 2":
-                    for para in shape.text_frame.paragraphs:
-                        for run in para.runs:
-                            for placeholder, value in desc_replacements.items():
-                                if placeholder in run.text:
-                                    run.text = run.text.replace(placeholder, value)
-                            if user_time != "24 h" and "24 h" in run.text:
-                                run.text = run.text.replace("24 h", user_time)
-
-            fig = graphs[gene]
-            fig_copy = go.Figure(fig)
-            gs = graph_settings or {}
-            w_px = int(gs.get("figure_width", 26) * CM_TO_PX)
-            h_px = int(gs.get("figure_height", 11) * CM_TO_PX)
-            fig_copy.update_layout(
-                width=max(w_px, 900),
-                height=max(h_px, 550),
-            )
-            w_emu = int(gs.get("figure_width", 26) * CM_TO_EMU)
-            h_emu = int(gs.get("figure_height", 11) * CM_TO_EMU)
-            try:
-                img_bytes = ReportGenerator._fig_to_image(
-                    fig_copy, format="png", scale=2
-                )
-                img_stream = io.BytesIO(img_bytes)
-                gene_slide.shapes.add_picture(
-                    img_stream,
-                    Emu(1371600),
-                    Emu(1371600),
-                    width=Emu(w_emu),
-                    height=Emu(h_emu),
-                )
-            except Exception as e:
-                from pptx.util import Pt
-                err_box = gene_slide.shapes.add_textbox(
-                    Emu(1371600), Emu(2743200), Emu(9448800), Emu(914400)
-                )
-                err_box.text_frame.paragraphs[0].text = f"Graph error: {str(e)}"
-                err_box.text_frame.paragraphs[0].font.size = Pt(14)
 
         output = io.BytesIO()
         prs.save(output)
@@ -3097,8 +3278,10 @@ def export_to_excel(
     processed_data: Dict[str, pd.DataFrame],
     params: dict,
     mapping: dict,
+    qc_stats: dict = None,
+    replicate_stats: pd.DataFrame = None,
 ) -> bytes:
-    """Export comprehensive Excel with gene-by-gene sheets"""
+    """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix."""
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -3114,14 +3297,12 @@ def export_to_excel(
 
         # Raw data (include mapped Condition column reflecting sample mapping)
         raw_export = raw_data.copy()
-        # mapping provided as argument 'mapping'
         if mapping:
             raw_export["Condition"] = raw_export["Sample"].map(
                 lambda x: mapping.get(x, {}).get("condition", x)
             )
         else:
             raw_export["Condition"] = raw_export["Sample"]
-        # Keep original Sample name but add mapped Condition
         raw_export = (
             raw_export[["Well", "Sample", "Condition", "Target", "CT", "Source_File"]]
             if "Source_File" in raw_export.columns
@@ -3129,24 +3310,206 @@ def export_to_excel(
         )
         raw_export.to_excel(writer, sheet_name="Raw_Data", index=False)
 
-        # Gene-by-gene calculations
+        # Gene-by-gene calculations with statistical test method column
         for gene, gene_data in processed_data.items():
-            sheet_name = f"{gene}_Analysis"[:31]  # Excel sheet name limit
-            gene_data.to_excel(writer, sheet_name=sheet_name, index=False)
+            sheet_name = f"{gene}_Analysis"[:31]
+            gene_export = gene_data.copy()
+            if "p_value" in gene_export.columns:
+                ttest_type = params.get("ttest_type", "welch")
+                gene_export["Stat_Test"] = ""
+                for idx, row in gene_export.iterrows():
+                    n_rep = row.get("n_replicates", 0)
+                    if pd.notna(row.get("p_value")) and row.get("p_value") is not np.nan:
+                        if n_rep >= 2:
+                            gene_export.loc[idx, "Stat_Test"] = (
+                                f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test (n={n_rep})"
+                            )
+                        elif n_rep == 1:
+                            gene_export.loc[idx, "Stat_Test"] = f"One-sample t-test (n={n_rep})"
+                        else:
+                            gene_export.loc[idx, "Stat_Test"] = "N/A"
+            gene_export.to_excel(writer, sheet_name=sheet_name, index=False)
 
         # Summary sheet
         if processed_data:
-            all_data = pd.concat(processed_data.values(), ignore_index=True)
-            summary = (
-                all_data.groupby(["Target", "Group"])
-                .agg(
-                    {"Relative_Expression": ["mean", "std", "count"], "p_value": "min"}
+            non_empty = [df for df in processed_data.values() if not df.empty]
+            if non_empty:
+                all_data = pd.concat(non_empty, ignore_index=True)
+                agg_dict = {"Relative_Expression": ["mean", "std", "count"]}
+                if "p_value" in all_data.columns:
+                    agg_dict["p_value"] = "min"
+                group_cols = ["Target"]
+                if "Group" in all_data.columns:
+                    group_cols.append("Group")
+                summary = (
+                    all_data.groupby(group_cols)
+                    .agg(agg_dict)
+                    .round(4)
                 )
-                .round(4)
-            )
-            summary.to_excel(writer, sheet_name="Summary")
+                summary.to_excel(writer, sheet_name="Summary")
+
+        # Fold Change Matrix (pivot table)
+        if processed_data:
+            non_empty = [df for df in processed_data.values() if not df.empty]
+            if non_empty:
+                all_data = pd.concat(non_empty, ignore_index=True)
+                if "Fold_Change" in all_data.columns and "Condition" in all_data.columns:
+                    fc_matrix = all_data.pivot_table(
+                        values="Fold_Change",
+                        index="Target",
+                        columns="Condition",
+                        aggfunc="first",
+                    )
+                    fc_matrix = fc_matrix.round(4)
+                    fc_matrix.to_excel(writer, sheet_name="FC_Matrix")
+
+        # QC Report sheet
+        _write_qc_report_sheet(writer, qc_stats, replicate_stats)
+
+        # Gene chart sheets (editable Excel bar charts with error bars)
+        _write_gene_chart_sheets(writer, processed_data)
 
     return output.getvalue()
+
+
+def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
+    """Write QC Report sheet with summary stats and replicate-level CV/outlier info."""
+    rows = []
+    if qc_stats:
+        rows.append({"Metric": "Total Wells", "Value": qc_stats.get("total_wells", "")})
+        rows.append({"Metric": "Excluded Wells", "Value": qc_stats.get("excluded_wells", "")})
+        rows.append({"Metric": "Active Wells", "Value": qc_stats.get("active_wells", "")})
+        rows.append({"Metric": "CT Mean", "Value": qc_stats.get("ct_mean", "")})
+        rows.append({"Metric": "CT SD", "Value": qc_stats.get("ct_std", "")})
+        rows.append({"Metric": "CT Range", "Value": f"{qc_stats.get('ct_min', '')}-{qc_stats.get('ct_max', '')}"})
+        rows.append({"Metric": "High CT Wells (>35)", "Value": qc_stats.get("high_ct_count", "")})
+        rows.append({"Metric": "Low CT Wells (<10)", "Value": qc_stats.get("low_ct_count", "")})
+        rows.append({"Metric": "Total Triplicates", "Value": qc_stats.get("total_triplicates", "")})
+        rows.append({"Metric": "Healthy Triplicates", "Value": qc_stats.get("healthy_triplicates", "")})
+        rows.append({"Metric": "Warning Triplicates", "Value": qc_stats.get("warning_triplicates", "")})
+        rows.append({"Metric": "Error Triplicates", "Value": qc_stats.get("error_triplicates", "")})
+        rows.append({"Metric": "Avg CV%", "Value": qc_stats.get("avg_cv_pct", "")})
+        rows.append({"Metric": "Max CV%", "Value": qc_stats.get("max_cv_pct", "")})
+        rows.append({"Metric": "Health Score (%)", "Value": qc_stats.get("health_score", "")})
+    if rows:
+        pd.DataFrame(rows).to_excel(writer, sheet_name="QC_Report", index=False, startrow=0)
+    if replicate_stats is not None and not replicate_stats.empty:
+        start_row = len(rows) + 3 if rows else 0
+        replicate_stats.to_excel(writer, sheet_name="QC_Report", index=False, startrow=start_row)
+
+
+def _write_gene_chart_sheets(writer, processed_data):
+    """Write per-gene chart sheets with editable Excel bar charts and error bars.
+
+    Each gene gets a sheet named '{Gene}_Chart' containing a data table
+    (Condition, Fold_Change, SEM, p_value, significance) and an embedded
+    editable bar chart with custom SEM error bars — matching the ADD_THIS
+    reference layout.
+    """
+    if not processed_data:
+        return
+
+    workbook = writer.book
+
+    for gene, gene_data in processed_data.items():
+        if gene_data is None or gene_data.empty:
+            continue
+
+        sheet_name = f"{gene}_Chart"[:31]
+        ws = workbook.add_worksheet(sheet_name)
+
+        # Build data columns
+        conditions = gene_data["Condition"].tolist() if "Condition" in gene_data.columns else gene_data.get("Group", pd.Series()).tolist()
+        fold_changes = gene_data.get("Fold_Change", gene_data.get("Relative_Expression", pd.Series())).tolist()
+        sems = gene_data.get("SEM", pd.Series([0] * len(gene_data))).tolist()
+        p_values = gene_data.get("p_value", pd.Series()).tolist()
+        significances = gene_data.get("significance", pd.Series([""]*len(gene_data))).tolist()
+
+        # Check for second comparison columns
+        has_p2 = "p_value_2" in gene_data.columns
+        p_values_2 = gene_data.get("p_value_2", pd.Series()).tolist() if has_p2 else []
+        sig_2 = gene_data.get("significance_2", pd.Series()).tolist() if has_p2 else []
+
+        n_rows = len(conditions)
+        if n_rows == 0:
+            continue
+
+        # Header row at row 4 (0-indexed), data starts at row 5 — matching ADD_THIS layout
+        hdr_row = 4
+        data_start = 5
+        col_c, col_d, col_e, col_f, col_g = 2, 3, 4, 5, 6  # columns C-G
+
+        header_fmt = workbook.add_format({"bold": True, "bottom": 1, "font_name": "Arial", "font_size": 10})
+        data_fmt = workbook.add_format({"font_name": "Arial", "font_size": 10})
+        sci_fmt = workbook.add_format({"font_name": "Arial", "font_size": 10, "num_format": "0.00E+00"})
+
+        headers = ["Condition", "Fold_Change", "SEM", "p_value", "significance"]
+        if has_p2:
+            headers.extend(["p_value_2", "significance_2"])
+
+        for ci, h in enumerate(headers):
+            ws.write(hdr_row, col_c + ci, h, header_fmt)
+
+        ws.set_column(col_c, col_c, 18)
+        ws.set_column(col_d, col_e, 14)
+        ws.set_column(col_f, col_f, 14)
+        ws.set_column(col_g, col_g, 14)
+
+        for i in range(n_rows):
+            r = data_start + i
+            ws.write(r, col_c, conditions[i], data_fmt)
+            ws.write(r, col_d, fold_changes[i] if pd.notna(fold_changes[i]) else 0, data_fmt)
+            ws.write(r, col_e, sems[i] if pd.notna(sems[i]) else 0, data_fmt)
+            pv = p_values[i] if i < len(p_values) else None
+            ws.write(r, col_f, pv if pd.notna(pv) else "", sci_fmt)
+            sig = significances[i] if i < len(significances) else ""
+            ws.write(r, col_g, sig if pd.notna(sig) else "", data_fmt)
+            if has_p2:
+                pv2 = p_values_2[i] if i < len(p_values_2) else None
+                ws.write(r, col_g + 1, pv2 if pd.notna(pv2) else "", sci_fmt)
+                s2 = sig_2[i] if i < len(sig_2) else ""
+                ws.write(r, col_g + 2, s2 if pd.notna(s2) else "", data_fmt)
+
+        last_data_row = data_start + n_rows - 1
+
+        # Create editable bar chart
+        chart = workbook.add_chart({"type": "column"})
+        chart.add_series({
+            "name": "Fold Change",
+            "categories": [sheet_name, data_start, col_c, last_data_row, col_c],
+            "values": [sheet_name, data_start, col_d, last_data_row, col_d],
+            "fill": {"color": "#4472C4"},
+            "border": {"color": "#2F5597"},
+            "gap": 219,
+            "y_error_bars": {
+                "type": "custom",
+                "plus_values": [sheet_name, data_start, col_e, last_data_row, col_e],
+                "minus_values": [sheet_name, data_start, col_e, last_data_row, col_e],
+                "end_style": 1,
+                "line": {"color": "#595959", "width": 0.75},
+            },
+        })
+
+        chart.set_title({"name": gene, "name_font": {"size": 14, "bold": True}})
+        chart.set_x_axis({
+            "name": "Condition",
+            "name_font": {"size": 11},
+            "num_font": {"size": 9, "rotation": -45},
+        })
+        chart.set_y_axis({
+            "name": "Relative Expression (Fold Change)",
+            "name_font": {"size": 11},
+            "num_font": {"size": 9},
+            "major_gridlines": {"visible": True, "line": {"color": "#D9D9D9"}},
+        })
+        chart.set_legend({"none": True})
+        chart.set_size({"width": 720, "height": 432})
+        chart.set_plotarea({
+            "border": {"color": "#D9D9D9"},
+            "fill": {"color": "#FFFFFF"},
+        })
+
+        ws.insert_chart("I3", chart)
 
 
 # ==================== UI ====================
@@ -3165,7 +3528,7 @@ with st.sidebar:
     6. **Export** — Download publication-ready files
     """)
 
-    st.markdown("---")
+    st.markdown("")
     st.markdown("### Quick Actions")
 
     if st.session_state.get("data") is not None:
@@ -3181,7 +3544,7 @@ with st.sidebar:
     else:
         st.info("Upload data to begin")
 
-    st.markdown("---")
+    st.markdown("")
     with st.expander("Navigation Tips"):
         st.markdown("""
         **Tab Navigation**
@@ -3213,7 +3576,8 @@ tab1, tab_qc, tab2, tab3, tab4, tab5 = st.tabs(
 
 # ==================== TAB 1: UPLOAD & FILTER ====================
 with tab1:
-    st.header("Step 1: Upload & Filter Data")
+    render_step_indicator("upload")
+    st.header("Upload & Filter Data")
 
     uploaded_files = st.file_uploader(
         "Upload qPCR CSV files", type=["csv"], accept_multiple_files=True
@@ -3239,9 +3603,9 @@ with tab1:
                 if parsed is not None and not parsed.empty:
                     parsed["Source_File"] = file.name
                     all_data.append(parsed)
-                    st.success(f"✅ {file.name}: {len(parsed)} wells")
+                    st.success(f"{file.name}: {len(parsed)} wells parsed")
                 elif parsed is not None and parsed.empty:
-                    st.warning(f"⚠️ {file.name}: parsed successfully but contained no valid data rows.")
+                    st.warning(f"{file.name}: parsed successfully but contained no valid data rows.")
 
             if all_data:
                 st.session_state.data = pd.concat(all_data, ignore_index=True)
@@ -3268,13 +3632,16 @@ with tab1:
                 st.session_state.graph_settings = {
                     "color_scheme": "plotly_white",
                     "font_size": 14,
-"figure_height": 11,
-                "figure_width": 26,
+                    "figure_height": 16,
+                    "figure_width": 28,
                     "show_legend": False,
                     "bar_gap": 0.15,
                     "show_error_bars": True,
                     "show_pvalues": True,
                     "y_auto_range": True,
+                    "bar_opacity": 0.95,
+                    "marker_line_width": 1,
+                    "plot_bgcolor": "#FFFFFF",
                 }
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
@@ -3350,7 +3717,7 @@ with tab1:
             col4.metric("HK Gene", st.session_state.hk_gene)
         else:
             st.warning(
-                "⚠️ No standard housekeeping gene detected. Please select one manually."
+                "No standard housekeeping gene detected. Please select one manually."
             )
             default_idx = 0
             if st.session_state.get("hk_gene") in all_genes:
@@ -3377,7 +3744,7 @@ with tab1:
         if len(single_replicates) > 0:
             warnings_found = True
             st.warning(
-                f"⚠️ **Low Replicates**: {len(single_replicates)} sample-target combinations have only 1 replicate. Statistical analysis requires n≥2."
+                f"**Low Replicates**: {len(single_replicates)} sample-target combinations have only 1 replicate. Statistical analysis requires n>=2."
             )
             with st.expander("View affected samples"):
                 st.dataframe(single_replicates.reset_index(name="n"))
@@ -3398,15 +3765,16 @@ with tab1:
             warnings_found = True
             pct = high_ct_count / len(data) * 100
             st.warning(
-                f"⚠️ **High CT Values**: {high_ct_count} wells ({pct:.1f}%) have CT > {AnalysisConstants.CT_HIGH_WARNING} (low expression)"
+                f"**High CT Values**: {high_ct_count} wells ({pct:.1f}%) have CT > {AnalysisConstants.CT_HIGH_WARNING} (low expression)"
             )
 
         if not warnings_found:
-            st.success("✅ Data validation passed. No issues detected.")
+            st.success("Data validation passed. No issues detected.")
 
 # ==================== TAB QC: QUALITY CONTROL ====================
 with tab_qc:
-    st.header("Step 1.5: Quality Control Check")
+    render_step_indicator("qc")
+    st.header("Quality Control Check")
 
     if st.session_state.data is not None and not st.session_state.data.empty:
         data = st.session_state.data
@@ -3423,18 +3791,20 @@ with tab_qc:
         # Get comprehensive QC stats using helper to get all excluded wells
         qc_stats = QualityControl.get_qc_summary_stats(data, get_all_excluded_wells())
 
-        # Summary metrics row
-        metric_cols = st.columns(6)
-        metric_cols[0].metric("Total Wells", qc_stats.get("total_wells", 0))
-        metric_cols[1].metric(
+        # Summary metrics — 2 rows of 3 for better readability
+        row1_cols = st.columns(3)
+        row1_cols[0].metric("Total Wells", qc_stats.get("total_wells", 0))
+        row1_cols[1].metric(
             "Active Wells",
             qc_stats.get("active_wells", 0),
             delta=f"-{qc_stats.get('excluded_wells', 0)}"
             if qc_stats.get("excluded_wells", 0) > 0
             else None,
         )
-        metric_cols[2].metric("Triplicates", qc_stats.get("total_triplicates", 0))
-        metric_cols[3].metric(
+        row1_cols[2].metric("Triplicates", qc_stats.get("total_triplicates", 0))
+
+        row2_cols = st.columns(3)
+        row2_cols[0].metric(
             "Healthy",
             qc_stats.get("healthy_triplicates", 0),
             delta=f"{qc_stats.get('health_score', 0)}%"
@@ -3442,14 +3812,14 @@ with tab_qc:
             else None,
             delta_color="normal",
         )
-        metric_cols[4].metric(
-            "⚠️ Warnings",
+        row2_cols[1].metric(
+            "Warnings",
             qc_stats.get("warning_triplicates", 0),
             delta=None if qc_stats.get("warning_triplicates", 0) == 0 else "review",
             delta_color="off",
         )
-        metric_cols[5].metric(
-            "❌ Errors",
+        row2_cols[2].metric(
+            "Errors",
             qc_stats.get("error_triplicates", 0),
             delta=None if qc_stats.get("error_triplicates", 0) == 0 else "critical",
             delta_color="off",
@@ -3466,7 +3836,7 @@ with tab_qc:
             dist_cols[2].metric(
                 "High CT (>35)",
                 qc_stats.get("high_ct_count", 0),
-                delta="⚠️" if qc_stats.get("high_ct_count", 0) > 0 else None,
+                delta="check" if qc_stats.get("high_ct_count", 0) > 0 else None,
                 delta_color="off",
             )
             dist_cols[3].metric(
@@ -3475,8 +3845,6 @@ with tab_qc:
                 delta="high" if qc_stats.get("avg_cv_pct", 0) > 5 else None,
                 delta_color="off" if qc_stats.get("avg_cv_pct", 0) > 5 else "normal",
             )
-
-        st.markdown("---")
 
         # ==================== MAIN QC INTERFACE WITH TABS ====================
         qc_tab1, qc_tab2 = st.tabs(
@@ -3546,13 +3914,20 @@ with tab_qc:
             flagged = qc_results[qc_results["Flagged"]].copy()
 
             if len(flagged) > 0:
+                # Count how many flagged wells are not yet excluded
+                _already_excluded = sum(
+                    1 for _, r in flagged.iterrows()
+                    if is_well_excluded(r["Well"], r["Target"], r["Sample"])
+                )
+                _new_exclusions = len(flagged) - _already_excluded
+
                 flag_col1, flag_col2 = st.columns([3, 1])
                 with flag_col1:
-                    st.warning(f"⚠️ **{len(flagged)} wells** auto-flagged by QC algorithms (CT thresholds, CV%, Grubbs test)")
-                    # FIX-15: Note Grubbs test limitation at small sample sizes
-                    st.caption("ℹ️ Note: Grubbs test requires n≥3 replicates. Groups with fewer replicates are not tested for outliers.")
+                    st.warning(f"**{len(flagged)} wells** auto-flagged by QC algorithms (CT thresholds, CV%, Grubbs test)")
+                    st.caption("Grubbs test requires n>=3 replicates. Groups with fewer replicates are not tested for outliers.")
                 with flag_col2:
-                    if st.button("Auto-Exclude Flagged", use_container_width=True, key="qc_auto_exclude_flagged"):
+                    _btn_label = f"Exclude {_new_exclusions} New" if _new_exclusions > 0 else "All Already Excluded"
+                    if st.button(_btn_label, use_container_width=True, key="qc_auto_exclude_flagged", disabled=(_new_exclusions == 0)):
                         st.session_state.excluded_wells_history.append(
                             {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                         )
@@ -3627,8 +4002,6 @@ with tab_qc:
                         if st.session_state.excluded_wells_history:
                             st.session_state.excluded_wells = st.session_state.excluded_wells_history.pop()
                             st.rerun()
-
-                st.markdown("---")
 
                 # Render per-gene expandable sections
                 for gene in display_genes:
@@ -3792,8 +4165,6 @@ with tab_qc:
                     styled_stats = rep_stats.style.apply(highlight_status, axis=1)
                     st.dataframe(styled_stats, height=400, use_container_width=True)
 
-            st.markdown("---")
-
             # ---- Section 2: Flagged Wells (read-only) ----
             st.markdown("### Flagged Wells")
 
@@ -3829,9 +4200,7 @@ with tab_qc:
                     },
                 )
             else:
-                st.success("✅ No quality issues detected! All wells pass QC thresholds.")
-
-            st.markdown("---")
+                st.success("No quality issues detected. All wells pass QC thresholds.")
 
             # ---- Section 3: Pre-Analysis Summary ----
             st.markdown("### Pre-Analysis Summary")
@@ -3909,13 +4278,13 @@ with tab_qc:
                 sum_col3.metric(
                     "Low Replicate (n<2)",
                     len(low_rep),
-                    delta="⚠️ check" if len(low_rep) > 0 else None,
+                    delta="check" if len(low_rep) > 0 else None,
                     delta_color="off",
                 )
 
                 if len(low_rep) > 0:
                     st.warning(
-                        f"⚠️ {len(low_rep)} gene-sample group(s) have fewer than 2 included wells. "
+                        f"{len(low_rep)} gene-sample group(s) have fewer than 2 included wells. "
                         "Statistics (SD, SEM, p-values) will be unreliable or zero."
                     )
 
@@ -3944,7 +4313,6 @@ with tab_qc:
                 st.info("No data available. Upload and parse data first.")
 
         # ==================== BOTTOM STATUS BAR ====================
-        st.markdown("---")
         # Count total excluded wells across all gene-sample combinations
         excluded_count = sum(
             len(wells_set) for wells_set in st.session_state.excluded_wells.values()
@@ -3982,11 +4350,12 @@ with tab_qc:
                 st.rerun()
 
     else:
-        st.info("⏳ Upload data first in the Upload tab.")
+        st.info("Upload data first in the Upload tab.")
 
 # ==================== TAB 2: SAMPLE MAPPING ====================
 with tab2:
-    st.header("Step 2: Map Samples to Conditions")
+    render_step_indicator("mapping")
+    st.header("Map Samples to Conditions")
 
     if st.session_state.data is not None:
         # Efficacy type selection
@@ -4016,8 +4385,7 @@ with tab2:
                 st.markdown(f"- **{ctrl_type.title()}**: {ctrl_name}")
 
         # Sample mapping interface with professional layout
-        st.markdown("---")
-        st.markdown("### 🗺️ Sample Condition Mapping")
+        st.markdown("### Sample Condition Mapping")
 
         # FIX-04: Always sync sample_order with actual data to prevent desync
         # New samples from data that aren't in sample_order yet get appended
@@ -4057,23 +4425,13 @@ with tab2:
             if "include" not in st.session_state.sample_mapping[sample]:
                 st.session_state.sample_mapping[sample]["include"] = True
 
-        # Header row with styled background
-        st.markdown(
-            """
-        <div style='background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px;'>
-            <table style='width: 100%;'>
-                <tr>
-                    <th style='width: 5%; text-align: center;'>✓</th>
-                    <th style='width: 10%;'>Order</th>
-                    <th style='width: 20%;'>Original</th>
-                    <th style='width: 35%;'>Condition Name</th>
-                    <th style='width: 25%;'>Group</th>
-                </tr>
-            </table>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        # Header row matching column proportions below
+        hdr0, hdr_ord, hdr1, hdr2, hdr3 = st.columns([0.5, 0.8, 2, 3.5, 2.5])
+        hdr0.markdown("**Incl.**")
+        hdr_ord.markdown("**#**")
+        hdr1.markdown("**Original**")
+        hdr2.markdown("**Condition Name**")
+        hdr3.markdown("**Group**")
 
         # FIXED: Display ALL samples in sample_order (including excluded ones)
         display_samples = st.session_state.sample_order.copy()
@@ -4149,15 +4507,12 @@ with tab2:
                     )
                     st.session_state.sample_mapping[sample]["group"] = grp
 
-                # Divider line
-                st.markdown(
-                    "<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True
-                )
+                st.markdown("")
 
-        st.markdown("---")
-        if st.button("✅ Done! Set sample order below", type="primary", key="finalize_mapping"):
+        if st.button("Finalize Mapping", type="primary", use_container_width=True, key="finalize_mapping"):
             st.session_state.mapping_finalized = True
             st.rerun()
+        st.caption("Lock in condition names and groups, then reorder samples below.")
 
         if st.session_state.get("mapping_finalized", False):
             st.markdown("### 🔀 Drag to Reorder Samples")
@@ -4251,7 +4606,6 @@ with tab2:
             )
 
         # Summary with styled cards
-        st.markdown("---")
         st.subheader("Mapping Summary")
 
         col_card1, col_card2, col_card3, col_card4 = st.columns(4)
@@ -4300,10 +4654,9 @@ with tab2:
                     for idx, s in enumerate(st.session_state.sample_order)
                 ]
             )
-            st.dataframe(mapping_df, width="stretch", hide_index=True)
+            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
 
         # Run analysis
-        st.markdown("---")
         st.subheader("Run Full Analysis (DDCt + Statistics)")
 
         # Build condition list from mapping
@@ -4444,7 +4797,6 @@ with tab2:
                 # Note: Widget with key="error_bar_type" auto-syncs to session state
 
             # Visual summary
-            st.markdown("---")
             col_sum1, col_sum2, col_sum3 = st.columns([1, 2, 1])
             with col_sum2:
                 summary_html = f"""
@@ -4458,15 +4810,13 @@ with tab2:
                 summary_html += "</div>"
                 st.markdown(summary_html, unsafe_allow_html=True)
 
-            st.markdown("---")
-
             # Store analysis parameters for auto-rerun
             st.session_state['_last_ref_sample_key'] = ref_sample_key
             st.session_state['_last_cmp_sample_key'] = cmp_sample_key
             st.session_state['_last_cmp_sample_key_2'] = cmp_sample_key_2 if use_second_comparison else None
 
             # Run button
-            if st.button("▶️ Run Full Analysis Now", type="primary", width="stretch"):
+            if st.button("Run Full Analysis", type="primary", use_container_width=True):
                 ok = AnalysisEngine.run_full_analysis(
                     ref_sample_key,
                     cmp_sample_key,
@@ -4479,9 +4829,9 @@ with tab2:
                     st.success(success_msg)
                     st.rerun()
                 else:
-                    st.error("❌ Analysis failed. Check messages above.")
+                    st.error("Analysis failed. Check messages above.")
         else:
-            st.warning("⚠️ No samples available for analysis.")
+            st.warning("No samples available for analysis.")
 
 # ==================== TAB 3: ANALYSIS ====================
 with tab3:
@@ -4502,8 +4852,10 @@ with tab3:
                 st.session_state['_last_cmp_sample_key'],
                 st.session_state.get('_last_cmp_sample_key_2'),
             )
+            st.info("Analysis auto-updated to reflect changes in QC exclusions or settings.")
 
-    st.header("Step 3: Analysis Results")
+    render_step_indicator("analysis")
+    st.header("Analysis Results")
 
     if st.session_state.processed_data:
         st.subheader("Analysis Summary")
@@ -4577,9 +4929,9 @@ with tab3:
                     na_rep="—",
                 )
 
-                st.dataframe(styled, width="stretch")
+                st.dataframe(styled, use_container_width=True)
 
-        st.success("✅ Results ready! Go to Graphs tab to visualize.")
+        st.success("Results ready. Go to **Graphs** tab to visualize.")
 
     else:
         st.info(
@@ -4588,7 +4940,8 @@ with tab3:
 
 # ==================== TAB 4: GRAPHS ====================
 with tab4:
-    st.header("Step 4: Individual Gene Graphs")
+    render_step_indicator("graphs")
+    st.header("Individual Gene Graphs")
 
     # Graph tab styles handled by global theme
 
@@ -4598,8 +4951,8 @@ with tab4:
                 "title_size": 20,
                 "font_size": 14,
                 "sig_font_size": 18,
-                "figure_width": 26,
-                "figure_height": 11,
+                "figure_width": 15,
+                "figure_height": 9,
                 "color_scheme": "plotly_white",
                 "show_error": True,
                 "show_significance": True,
@@ -4626,16 +4979,15 @@ with tab4:
         if "selected_gene_idx" not in st.session_state:
             st.session_state.selected_gene_idx = 0
 
-        # Gene pill styles handled by global theme
-
-        st.markdown("### Select Gene")
+        # Gene pill selector with container
+        st.markdown('<div class="gene-pill-container"><div class="label">Select Gene</div></div>', unsafe_allow_html=True)
         gene_cols = st.columns(min(len(gene_list), 6))
         for idx, gene in enumerate(gene_list):
             with gene_cols[idx % len(gene_cols)]:
                 if st.button(
                     f"{'✓ ' if idx == st.session_state.selected_gene_idx else ''}{gene}",
                     key=f"gene_btn_{gene}",
-                    width="stretch",
+                    use_container_width=True,
                     type="primary"
                     if idx == st.session_state.selected_gene_idx
                     else "secondary",
@@ -4645,8 +4997,6 @@ with tab4:
 
         current_gene = gene_list[st.session_state.selected_gene_idx]
         gene_data = st.session_state.processed_data[current_gene]
-
-        st.markdown("---")
 
         show_sig_key = f"{current_gene}_show_sig"
         show_err_key = f"{current_gene}_show_err"
@@ -4667,36 +5017,44 @@ with tab4:
         if st.session_state.graph_settings.get(ref_line_key, "None") not in ref_options:
             st.session_state.graph_settings[ref_line_key] = "None"
 
-        toolbar_cols = st.columns([1, 1, 1, 2, 1, 1])
-
-        with toolbar_cols[0]:
+        # Toolbar row 1: toggles and reset
+        tb_row1 = st.columns([1, 1, 1, 1])
+        with tb_row1[0]:
             sig_on = st.toggle(
-                "✨ Sig",
+                "Significance",
                 st.session_state.graph_settings[show_sig_key],
                 key=f"tgl_sig_{current_gene}",
             )
             st.session_state.graph_settings[show_sig_key] = sig_on
-
-        with toolbar_cols[1]:
+        with tb_row1[1]:
             err_on = st.toggle(
-                "📏 Err",
+                "Error Bars",
                 st.session_state.graph_settings[show_err_key],
                 key=f"tgl_err_{current_gene}",
             )
             st.session_state.graph_settings[show_err_key] = err_on
-
-        with toolbar_cols[2]:
+        with tb_row1[2]:
             gap_val = st.select_slider(
-                "Gap",
+                "Bar Gap",
                 options=[0.1, 0.15, 0.2, 0.25, 0.3, 0.4],
                 value=st.session_state.graph_settings[bar_gap_key],
                 key=f"gap_sl_{current_gene}",
             )
             st.session_state.graph_settings[bar_gap_key] = gap_val
+        with tb_row1[3]:
+            if st.button("Reset", key=f"reset_all_{current_gene}", use_container_width=True):
+                if f"{current_gene}_bar_settings" in st.session_state:
+                    del st.session_state[f"{current_gene}_bar_settings"]
+                st.session_state.graph_settings[show_sig_key] = True
+                st.session_state.graph_settings[show_err_key] = True
+                st.session_state.graph_settings[bar_gap_key] = 0.25
+                st.rerun()
 
-        with toolbar_cols[3]:
+        # Toolbar row 2: ref line selector
+        tb_row2 = st.columns([2, 2])
+        with tb_row2[0]:
             selected_ref = st.selectbox(
-                "Ref Line",
+                "Reference Line",
                 ref_options,
                 index=ref_options.index(st.session_state.graph_settings.get(ref_line_key, "None"))
                 if st.session_state.graph_settings.get(ref_line_key, "None") in ref_options
@@ -4705,21 +5063,6 @@ with tab4:
                 help="Horizontal dashed line at a condition's expression level",
             )
             st.session_state.graph_settings[ref_line_key] = selected_ref
-
-        with toolbar_cols[4]:
-            if st.button("↺ Reset", key=f"reset_all_{current_gene}", use_container_width=True):
-                if f"{current_gene}_bar_settings" in st.session_state:
-                    del st.session_state[f"{current_gene}_bar_settings"]
-                st.session_state.graph_settings[show_sig_key] = True
-                st.session_state.graph_settings[show_err_key] = True
-                st.session_state.graph_settings[bar_gap_key] = 0.25
-                st.rerun()
-
-        with toolbar_cols[5]:
-            edit_mode = st.checkbox(
-                "⚙️ Settings", key=f"edit_mode_{current_gene}",
-                help="Open graph settings and color editor"
-            )
 
         if f"{current_gene}_bar_settings" not in st.session_state:
             st.session_state[f"{current_gene}_bar_settings"] = {}
@@ -4738,11 +5081,11 @@ with tab4:
                     "show_err": True,
                 }
 
-        if edit_mode:
-            with st.expander("⚙️ Settings & Colors", expanded=True):
-                s_col1, s_col2, s_col3 = st.columns(3)
+        with st.expander("Settings & Colors", expanded=False):
+                s_col1, s_col2, s_col3, s_col4 = st.columns(4)
 
                 with s_col1:
+                    st.caption("**Display**")
                     gene_display = st.text_input(
                         "Gene display name",
                         value=st.session_state.gene_display_names.get(current_gene, current_gene),
@@ -4755,21 +5098,31 @@ with tab4:
                     elif current_gene in st.session_state.gene_display_names:
                         del st.session_state.gene_display_names[current_gene]
 
+                    bg_color = st.color_picker(
+                        "Background",
+                        st.session_state.graph_settings.get(f"{current_gene}_bg_color",
+                            st.session_state.graph_settings.get("plot_bgcolor", "#FFFFFF")),
+                        key=f"bg_{current_gene}",
+                    )
+                    st.session_state.graph_settings[f"{current_gene}_bg_color"] = bg_color
+
                 with s_col2:
+                    st.caption("**Figure Size**")
                     fig_width_cm = st.slider(
-                        "Width (cm)", 10.0, 34.0,
-                        value=float(st.session_state.graph_settings.get("figure_width", 26)),
+                        "Width (cm)", 10.0, 40.0,
+                        value=float(st.session_state.graph_settings.get("figure_width", 28)),
                         step=0.5, key=f"fig_w_{current_gene}",
                     )
                     fig_height_cm = st.slider(
-                        "Height (cm)", 6.0, 19.0,
-                        value=float(st.session_state.graph_settings.get("figure_height", 11)),
+                        "Height (cm)", 6.0, 25.0,
+                        value=float(st.session_state.graph_settings.get("figure_height", 16)),
                         step=0.5, key=f"fig_h_{current_gene}",
                     )
                     st.session_state.graph_settings["figure_width"] = fig_width_cm
                     st.session_state.graph_settings["figure_height"] = fig_height_cm
 
                 with s_col3:
+                    st.caption("**Fonts**")
                     global_font = st.slider(
                         "Global font", 8, 28,
                         value=st.session_state.graph_settings.get("font_size", 14),
@@ -4788,6 +5141,43 @@ with tab4:
                         key=f"ys_{current_gene}",
                     )
                     st.session_state.graph_settings[f"{current_gene}_ylabel_size"] = ylabel_size
+
+                with s_col4:
+                    st.caption("**Bar Style**")
+                    bar_opacity = st.slider(
+                        "Bar opacity", 0.3, 1.0,
+                        value=float(st.session_state.graph_settings.get("bar_opacity", 0.95)),
+                        step=0.05, key=f"bo_{current_gene}",
+                    )
+                    st.session_state.graph_settings["bar_opacity"] = bar_opacity
+                    outline_width = st.slider(
+                        "Outline width", 0, 3,
+                        value=int(st.session_state.graph_settings.get("marker_line_width", 1)),
+                        key=f"ow_{current_gene}",
+                    )
+                    st.session_state.graph_settings["marker_line_width"] = outline_width
+                    y_min_input = st.number_input(
+                        "Y-axis min",
+                        value=None,
+                        placeholder="Auto",
+                        key=f"ymin_{current_gene}",
+                        help="Leave empty for auto range",
+                    )
+                    y_max_input = st.number_input(
+                        "Y-axis max",
+                        value=None,
+                        placeholder="Auto",
+                        key=f"ymax_{current_gene}",
+                        help="Leave empty for auto range",
+                    )
+                    if y_min_input is not None:
+                        st.session_state.graph_settings["y_min"] = y_min_input
+                    elif "y_min" in st.session_state.graph_settings:
+                        del st.session_state.graph_settings["y_min"]
+                    if y_max_input is not None:
+                        st.session_state.graph_settings["y_max"] = y_max_input
+                    elif "y_max" in st.session_state.graph_settings:
+                        del st.session_state.graph_settings["y_max"]
 
                 st.markdown("---")
 
@@ -4828,55 +5218,6 @@ with tab4:
                             st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_err"] = err_bar
 
                 _bar_settings = st.session_state[f"{current_gene}_bar_settings"]
-                p1, p2, p3, p4 = st.columns(4)
-                with p1:
-                    if st.button("🔵 Blues", key=f"preset_blue_{current_gene}", use_container_width=True):
-                        blues = ["#e3f2fd", "#90caf9", "#42a5f5", "#1976d2", "#0d47a1"]
-                        for i, (_, r) in enumerate(gene_data.iterrows()):
-                            bk = f"{current_gene}_{r['Condition']}"
-                            c = blues[i % len(blues)]
-                            if bk not in _bar_settings:
-                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
-                            else:
-                                _bar_settings[bk]["color"] = c
-                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
-                        st.rerun()
-                with p2:
-                    if st.button("🟢 Greens", key=f"preset_green_{current_gene}", use_container_width=True):
-                        greens = ["#e8f5e9", "#a5d6a7", "#66bb6a", "#388e3c", "#1b5e20"]
-                        for i, (_, r) in enumerate(gene_data.iterrows()):
-                            bk = f"{current_gene}_{r['Condition']}"
-                            c = greens[i % len(greens)]
-                            if bk not in _bar_settings:
-                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
-                            else:
-                                _bar_settings[bk]["color"] = c
-                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
-                        st.rerun()
-                with p3:
-                    if st.button("🔴 Warm", key=f"preset_warm_{current_gene}", use_container_width=True):
-                        warms = ["#fff3e0", "#ffcc80", "#ff9800", "#f57c00", "#e65100"]
-                        for i, (_, r) in enumerate(gene_data.iterrows()):
-                            bk = f"{current_gene}_{r['Condition']}"
-                            c = warms[i % len(warms)]
-                            if bk not in _bar_settings:
-                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
-                            else:
-                                _bar_settings[bk]["color"] = c
-                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
-                        st.rerun()
-                with p4:
-                    if st.button("⬜ Gray", key=f"preset_gray_{current_gene}", use_container_width=True):
-                        grays = ["#ffffff", "#e0e0e0", "#bdbdbd", "#9e9e9e", "#616161"]
-                        for i, (_, r) in enumerate(gene_data.iterrows()):
-                            bk = f"{current_gene}_{r['Condition']}"
-                            c = grays[i % len(grays)]
-                            if bk not in _bar_settings:
-                                _bar_settings[bk] = {"color": c, "show_sig": True, "show_err": True}
-                            else:
-                                _bar_settings[bk]["color"] = c
-                            st.session_state.graph_settings["bar_colors_per_sample"][bk] = c
-                        st.rerun()
 
         current_settings = st.session_state.graph_settings.copy()
         current_settings["show_significance"] = st.session_state.graph_settings.get(
@@ -4915,7 +5256,7 @@ with tab4:
             ref_line_label=ref_line_lbl,
         )
 
-        st.plotly_chart(fig, width="stretch", key=f"main_fig_{current_gene}")
+        st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
         st.session_state.graphs[current_gene] = fig
 
         with st.expander("📊 All Gene Graphs (Quick View)", expanded=False):
@@ -4943,7 +5284,8 @@ with tab4:
                 gs["show_significance"] = gs.get(f"{gene}_show_sig", True)
                 gs["show_error"] = gs.get(f"{gene}_show_err", True)
                 gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.25)
-                gs["figure_height"] = 9
+                gs["figure_height"] = 12
+                gs["figure_width"] = 20
 
                 f = GraphGenerator.create_gene_graph(
                     gd,
@@ -4957,7 +5299,7 @@ with tab4:
 
                 with all_gene_cols[idx % len(all_gene_cols)]:
                     st.markdown(f"**{gene}**")
-                    st.plotly_chart(f, width="stretch", key=f"mini_{gene}")
+                    st.plotly_chart(f, use_container_width=True, key=f"mini_{gene}")
                     if gene not in st.session_state.graphs:
                         st.session_state.graphs[gene] = f
     else:
@@ -4967,11 +5309,10 @@ with tab4:
 
 # ==================== TAB 5: EXPORT ====================
 with tab5:
-    st.header("Step 5: Export All Results")
+    render_step_indicator("export")
+    st.header("Export Results")
 
     if st.session_state.processed_data:
-        st.subheader("Download Options")
-
         analysis_params = {
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "Efficacy_Type": st.session_state.selected_efficacy,
@@ -4985,35 +5326,33 @@ with tab5:
             "treatment_time": st.session_state.experiment_desc.get("treatment_time", "24 h"),
         }
 
-        col1, col2 = st.columns(2)
+        # ---- Group 1: Reports ----
+        st.subheader("Reports")
 
-        with col1:
-            st.markdown("### 📊 Complete Excel Report")
-            st.caption(
-                "Includes: Parameters, Mapping, Raw Data, Gene-by-Gene Calculations, Summary"
-            )
+        rpt_col1, rpt_col2, rpt_col3 = st.columns(3)
 
+        with rpt_col1:
+            st.markdown("**Excel Report**")
+            st.caption("Parameters, mapping, raw data, calculations, QC, FC matrix")
             excel_data = export_to_excel(
                 st.session_state.data,
                 st.session_state.processed_data,
                 analysis_params,
                 st.session_state.sample_mapping,
             )
-
             st.download_button(
-                label="📥 Download Excel Report",
+                label="Download Excel",
                 data=excel_data,
                 file_name=f"qPCR_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
+                use_container_width=True,
             )
 
-        with col2:
-            st.markdown("### 📈 All Graphs (HTML)")
+        with rpt_col2:
+            st.markdown("**All Graphs (HTML)**")
             st.caption("Interactive graphs for all genes in one file")
-
             if st.session_state.graphs:
-                # Create combined HTML
                 html_parts = [
                     "<html><head><title>qPCR Analysis Graphs</title></head><body>"
                 ]
@@ -5023,41 +5362,33 @@ with tab5:
                 html_parts.append(
                     f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"
                 )
-
                 for gene, fig in st.session_state.graphs.items():
                     html_parts.append(f"<h2>{gene}</h2>")
                     html_parts.append(
                         fig.to_html(include_plotlyjs="cdn", div_id=f"graph_{gene}")
                     )
                     html_parts.append("<hr>")
-
                 html_parts.append("</body></html>")
                 combined_html = "\n".join(html_parts)
-
                 st.download_button(
-                    label="📥 Download All Graphs (HTML)",
+                    label="Download All Graphs",
                     data=combined_html,
                     file_name=f"qPCR_graphs_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
                     mime="text/html",
                     type="primary",
+                    use_container_width=True,
                 )
 
-        st.markdown("---")
-        st.subheader("PowerPoint Report")
-        st.caption(
-            "Generate a slide deck with title, gene slides, and summary"
-        )
-
-        with st.expander("📝 Experiment Description (for PPT slides)", expanded=False):
-            desc_c1, desc_c2 = st.columns(2)
-            with desc_c1:
+        with rpt_col3:
+            st.markdown("**PowerPoint**")
+            st.caption("Slide deck with title, gene slides, and summary")
+            with st.expander("Experiment Description", expanded=False):
                 conc_val = st.text_input(
                     "Sample concentration",
                     value=st.session_state.experiment_desc.get("concentration", "1 ppm"),
                     key="exp_concentration",
                 )
                 st.session_state.experiment_desc["concentration"] = conc_val
-            with desc_c2:
                 time_val = st.text_input(
                     "Treatment time",
                     value=st.session_state.experiment_desc.get("treatment_time", "24 h"),
@@ -5065,11 +5396,8 @@ with tab5:
                 )
                 st.session_state.experiment_desc["treatment_time"] = time_val
 
-        ppt_col1, ppt_col2 = st.columns([1, 2])
-
-        with ppt_col1:
             if st.button(
-                "🚀 Generate PPT",
+                "Generate PPT",
                 type="primary",
                 use_container_width=True,
                 key="gen_ppt_tab5",
@@ -5087,10 +5415,9 @@ with tab5:
                     else:
                         st.error("Failed to generate PPT")
 
-        with ppt_col2:
             if "ppt_export" in st.session_state:
                 st.download_button(
-                    label="📥 Download PowerPoint (.pptx)",
+                    label="Download PowerPoint",
                     data=st.session_state["ppt_export"],
                     file_name=f"qPCR_Report_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -5099,97 +5426,29 @@ with tab5:
                     key="dl_ppt_tab5",
                 )
 
-        st.markdown("---")
-        st.subheader("Individual Downloads")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            # CSV export per gene
-            st.markdown("**Gene-by-Gene CSV**")
-            for gene, gene_df in st.session_state.processed_data.items():
-                csv_buffer = io.StringIO()
-                gene_df.to_csv(csv_buffer, index=False)
-
-                st.download_button(
-                    label=f"📥 {gene}.csv",
-                    data=csv_buffer.getvalue(),
-                    file_name=f"{gene}_calculations_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    key=f"csv_{gene}",
-                )
-
-        with col2:
-            # Individual graph HTML
-            st.markdown("**Individual Graph HTML**")
-            for gene, fig in st.session_state.graphs.items():
-                html_buffer = io.StringIO()
-                fig.write_html(html_buffer)
-
-                st.download_button(
-                    label=f"📥 {gene}.html",
-                    data=html_buffer.getvalue(),
-                    file_name=f"{gene}_graph_{datetime.now().strftime('%Y%m%d')}.html",
-                    mime="text/html",
-                    key=f"html_{gene}",
-                )
-
-        with col3:
-            # Configuration export
-            st.markdown("**Reproducibility Files**")
-
-            # Analysis config
-            config_data = {
-                "analysis_params": analysis_params,
-                "sample_mapping": st.session_state.sample_mapping,
-                "graph_settings": st.session_state.graph_settings,
-                "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
-                "excluded_samples": list(st.session_state.excluded_samples),
-            }
-
-            st.download_button(
-                label="📥 Analysis Config",
-                data=json.dumps(config_data, indent=2),
-                file_name=f"config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                mime="application/json",
-            )
-
-            # Graph preset
-            st.download_button(
-                label="📥 Graph Preset",
-                data=json.dumps(st.session_state.graph_settings, indent=2),
-                file_name=f"graph_preset_{datetime.now().strftime('%Y%m%d')}.json",
-                mime="application/json",
-            )
-
-        st.markdown("---")
-        st.subheader("Publication-Ready Images")
+        # ---- Group 2: Publication Images ----
+        st.subheader("Publication Images")
         st.caption("High-resolution images suitable for journals and reports")
 
-        pub_col1, pub_col2, pub_col3 = st.columns(3)
-
-        with pub_col1:
+        img_col1, img_col2, img_col3 = st.columns(3)
+        with img_col1:
             img_format = st.selectbox(
                 "Image Format",
                 ["PNG (300 DPI)", "SVG (Vector)", "PDF (Vector)"],
                 key="pub_img_format",
             )
-
-        with pub_col2:
+        with img_col2:
             img_width = st.number_input(
                 "Width (px)", min_value=400, max_value=3000, value=1200, step=100
             )
-
-        with pub_col3:
+        with img_col3:
             img_height = st.number_input(
                 "Height (px)", min_value=300, max_value=2000, value=800, step=100
             )
 
         if st.session_state.graphs:
-            st.markdown("**Download Individual High-Res Images:**")
-
+            # Individual images + batch in one row
             img_cols = st.columns(min(len(st.session_state.graphs), 4))
-
             for idx, (gene, fig) in enumerate(st.session_state.graphs.items()):
                 col_idx = idx % len(img_cols)
                 with img_cols[col_idx]:
@@ -5202,59 +5461,55 @@ with tab5:
                             title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY)),
                             margin=dict(b=180),
                         )
-
                         if "PNG" in img_format:
                             img_bytes = fig_copy.to_image(
-                                format="png",
-                                scale=3,
-                                width=img_width,
-                                height=img_height,
+                                format="png", scale=3, width=img_width, height=img_height,
                             )
                             st.download_button(
-                                label=f"📥 {gene}.png",
+                                label=f"{gene}.png",
                                 data=img_bytes,
                                 file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}_300dpi.png",
                                 mime="image/png",
                                 key=f"png_{gene}",
+                                use_container_width=True,
                             )
                         elif "SVG" in img_format:
                             svg_bytes = fig_copy.to_image(
                                 format="svg", width=img_width, height=img_height
                             )
                             st.download_button(
-                                label=f"📥 {gene}.svg",
+                                label=f"{gene}.svg",
                                 data=svg_bytes,
                                 file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.svg",
                                 mime="image/svg+xml",
                                 key=f"svg_{gene}",
+                                use_container_width=True,
                             )
                         else:
                             pdf_bytes = fig_copy.to_image(
                                 format="pdf", width=img_width, height=img_height
                             )
                             st.download_button(
-                                label=f"📥 {gene}.pdf",
+                                label=f"{gene}.pdf",
                                 data=pdf_bytes,
                                 file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.pdf",
                                 mime="application/pdf",
                                 key=f"pdf_{gene}",
+                                use_container_width=True,
                             )
                     except Exception as e:
                         # FIX-13: Per-image error handling — continue with remaining genes
                         st.warning(
-                            f"⚠️ Failed to export {gene}: {e}. "
+                            f"Failed to export {gene}: {e}. "
                             f"(Ensure kaleido is installed: pip install kaleido)"
                         )
                         continue
 
-            st.markdown("---")
-            st.subheader("Batch Export (ZIP)")
-
+            # Batch ZIP buttons
             batch_col1, batch_col2 = st.columns(2)
-
             with batch_col1:
                 if st.button(
-                    "📥 Download All Figures (ZIP)", type="primary", width="stretch"
+                    "Download All Figures (ZIP)", type="primary", use_container_width=True
                 ):
                     try:
                         zip_buffer = io.BytesIO()
@@ -5278,20 +5533,14 @@ with tab5:
                                         width=img_width, height=img_height, margin=dict(b=180),
                                         font=dict(family=PLOTLY_FONT_FAMILY),
                                     )
-
                                     png_bytes = fig_copy.to_image(
-                                        format="png",
-                                        scale=3,
-                                        width=img_width,
-                                        height=img_height,
+                                        format="png", scale=3, width=img_width, height=img_height,
                                     )
                                     zf.writestr(f"{gene}_300dpi.png", png_bytes)
-
                                     svg_bytes = fig_copy.to_image(
                                         format="svg", width=img_width, height=img_height
                                     )
                                     zf.writestr(f"{gene}.svg", svg_bytes)
-
                                     html_str = fig_copy.to_html(include_plotlyjs="cdn")
                                     zf.writestr(f"{gene}.html", html_str)
                                 except Exception as e:
@@ -5310,26 +5559,27 @@ with tab5:
 
                         progress_bar.empty()
                         st.download_button(
-                            label="📥 Download ZIP Now",
+                            label="Download ZIP Now",
                             data=zip_buffer.getvalue(),
                             file_name=f"qPCR_figures_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.zip",
                             mime="application/zip",
                             key="batch_zip",
+                            use_container_width=True,
                         )
                         n_success = len(st.session_state.graphs) - len(_export_failures)
                         st.success(
-                            f"✅ Created ZIP with {n_success} figures (PNG + SVG + HTML)"
+                            f"Created ZIP with {n_success} figures (PNG + SVG + HTML)"
                         )
                         if _export_failures:
                             st.warning(
-                                f"⚠️ {len(_export_failures)} gene(s) failed to export:\n"
-                                + "\n".join(f"  • {f}" for f in _export_failures)
+                                f"{len(_export_failures)} gene(s) failed to export:\n"
+                                + "\n".join(f"  - {f}" for f in _export_failures)
                             )
                     except Exception as e:
                         st.error(f"Batch export failed: {e}. Ensure kaleido is installed: pip install kaleido")
 
             with batch_col2:
-                if st.button("📥 Download Complete Report (ZIP)", width="stretch"):
+                if st.button("Download Complete Report (ZIP)", use_container_width=True):
                     try:
                         zip_buffer = io.BytesIO()
                         total_steps = (
@@ -5356,7 +5606,6 @@ with tab5:
                                     st.session_state.sample_mapping,
                                 ),
                             )
-
                             progress_bar.progress(
                                 2 / total_steps, text="Saving config..."
                             )
@@ -5375,7 +5624,6 @@ with tab5:
                                     indent=2,
                                 ),
                             )
-
                             for i, (gene, fig) in enumerate(
                                 st.session_state.graphs.items()
                             ):
@@ -5389,20 +5637,14 @@ with tab5:
                                     width=img_width, height=img_height, margin=dict(b=180),
                                     font=dict(family=PLOTLY_FONT_FAMILY),
                                 )
-
                                 png_bytes = fig_copy.to_image(
-                                    format="png",
-                                    scale=3,
-                                    width=img_width,
-                                    height=img_height,
+                                    format="png", scale=3, width=img_width, height=img_height,
                                 )
                                 zf.writestr(f"figures/{gene}_300dpi.png", png_bytes)
-
                                 svg_bytes = fig_copy.to_image(
                                     format="svg", width=img_width, height=img_height
                                 )
                                 zf.writestr(f"figures/{gene}.svg", svg_bytes)
-
                             for (
                                 gene,
                                 gene_df,
@@ -5417,48 +5659,74 @@ with tab5:
 
                         progress_bar.empty()
                         st.download_button(
-                            label="📥 Download Complete Report ZIP",
+                            label="Download Complete Report ZIP",
                             data=zip_buffer.getvalue(),
                             file_name=f"qPCR_complete_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.zip",
                             mime="application/zip",
                             key="complete_zip",
+                            use_container_width=True,
                         )
-                        st.success("✅ Complete report package created!")
+                        st.success("Complete report package created!")
                     except Exception as e:
                         st.error(f"Report generation failed: {e}")
 
-        with st.expander("💡 Export Guide"):
-            st.markdown(f"""
-            ### For {st.session_state.selected_efficacy} Analysis
-            
-            **Complete Package (Recommended)**
-            - ✅ Excel Report: All calculations, statistics, and raw data
-            - ✅ All Graphs HTML: Interactive figures for all {len(st.session_state.graphs)} genes
-            - ✅ Analysis Config: For reproducibility and audit trail
-            
-            **For Publications**
-            1. Download Excel → Reviewer can verify calculations
-            2. Download individual HTML → Open in browser → Right-click → Save as PNG/SVG
-            3. Or screenshot from browser for manuscripts
-            
-            **For Presentations**
-            - Drag HTML files directly into PowerPoint/Google Slides
-            - Interactive graphs work in presentations!
-            
-            **For Patents/IP**
-            - Excel: Complete audit trail with timestamps
-            - Config JSON: Reproducibility proof
-            - All Graphs HTML: Visual evidence
-            
-            **Gene-by-Gene Files**
-            - Useful for sharing specific gene results
-            - CSV for data analysis in other tools
-            - HTML for interactive sharing
-            """)
+        # ---- Group 3: Individual Data & Config ----
+        with st.expander("Individual Downloads & Config"):
+            dl_col1, dl_col2, dl_col3 = st.columns(3)
 
-        st.success("✅ All export options ready!")
+            with dl_col1:
+                st.markdown("**Gene-by-Gene CSV**")
+                for gene, gene_df in st.session_state.processed_data.items():
+                    csv_buffer = io.StringIO()
+                    gene_df.to_csv(csv_buffer, index=False)
+                    st.download_button(
+                        label=f"{gene}.csv",
+                        data=csv_buffer.getvalue(),
+                        file_name=f"{gene}_calculations_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key=f"csv_{gene}",
+                        use_container_width=True,
+                    )
+
+            with dl_col2:
+                st.markdown("**Individual Graph HTML**")
+                for gene, fig in st.session_state.graphs.items():
+                    html_buffer = io.StringIO()
+                    fig.write_html(html_buffer)
+                    st.download_button(
+                        label=f"{gene}.html",
+                        data=html_buffer.getvalue(),
+                        file_name=f"{gene}_graph_{datetime.now().strftime('%Y%m%d')}.html",
+                        mime="text/html",
+                        key=f"html_{gene}",
+                        use_container_width=True,
+                    )
+
+            with dl_col3:
+                st.markdown("**Reproducibility Files**")
+                config_data = {
+                    "analysis_params": analysis_params,
+                    "sample_mapping": st.session_state.sample_mapping,
+                    "graph_settings": st.session_state.graph_settings,
+                    "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
+                    "excluded_samples": list(st.session_state.excluded_samples),
+                }
+                st.download_button(
+                    label="Analysis Config",
+                    data=json.dumps(config_data, indent=2),
+                    file_name=f"config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+                st.download_button(
+                    label="Graph Preset",
+                    data=json.dumps(st.session_state.graph_settings, indent=2),
+                    file_name=f"graph_preset_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
     else:
-        st.warning("⚠️ Complete analysis first")
+        st.warning("Complete analysis first.")
 
 # ==================== FOOTER ====================
 st.markdown("---")

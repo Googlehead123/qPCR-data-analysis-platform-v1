@@ -146,4 +146,4 @@ class TestGraphGeneratorWrapText:
         GraphGenerator = spec.GraphGenerator
         
         result = GraphGenerator._wrap_text("This is a very long condition name", width=15)
-        assert "\n" in result
+        assert "<br>" in result
