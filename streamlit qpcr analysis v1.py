@@ -3366,8 +3366,8 @@ def export_to_excel(
         # QC Report sheet
         _write_qc_report_sheet(writer, qc_stats, replicate_stats)
 
-        # Gene chart sheets (editable Excel bar charts with error bars)
-        _write_gene_chart_sheets(writer, processed_data)
+    # Post-process: add gene chart sheets with openpyxl (supports rich text axis titles)
+    output = _add_gene_chart_sheets(output, processed_data, params)
 
     return output.getvalue()
 
@@ -3398,25 +3398,45 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         replicate_stats.to_excel(writer, sheet_name="QC_Report", index=False, startrow=start_row)
 
 
-def _write_gene_chart_sheets(writer, processed_data):
-    """Write per-gene chart sheets with editable Excel bar charts and error bars.
+def _add_gene_chart_sheets(output_buf, processed_data, params):
+    """Post-process Excel bytes to add per-gene chart sheets using openpyxl.
 
-    Each gene gets a sheet named '{Gene}_Chart' containing a data table
-    (Condition, Fold_Change, SEM, p_value, significance) and an embedded
-    editable bar chart with custom SEM error bars — matching the ADD_THIS
-    reference layout.
+    Two-phase approach:
+    Phase 1: openpyxl API for chart creation (series, errBars, axis properties)
+    Phase 2: zip-level XML post-processing for elements openpyxl can't set
+             (axis label fonts, rich text Y-axis title, hidden gridlines)
+
+    Chart matches ADD_THIS reference template exactly:
+    - White bars with black 0.5pt outline
+    - Custom SEM error bars (both directions), gray 0.75pt line, with end caps
+    - No gridlines (hidden via noFill)
+    - Y-axis title: rich text with gene name in RED, HK gene in black
+    - 9pt Arial gray axis labels, black axis lines
     """
-    if not processed_data:
-        return
+    from openpyxl import load_workbook
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.chart.data_source import NumRef, NumDataSource
+    from openpyxl.chart.error_bar import ErrorBars
+    from openpyxl.chart.shapes import GraphicalProperties
+    from lxml import etree
+    import zipfile
 
-    workbook = writer.book
+    if not processed_data:
+        return output_buf
+
+    output_buf.seek(0)
+    wb = load_workbook(output_buf)
+    hk_gene = params.get("Housekeeping_Gene", params.get("reference_gene", "\u03b2-Actin"))
+
+    # Track which chart files correspond to which gene (for phase 2)
+    gene_chart_map = {}
 
     for gene, gene_data in processed_data.items():
         if gene_data is None or gene_data.empty:
             continue
 
         sheet_name = f"{gene}_Chart"[:31]
-        ws = workbook.add_worksheet(sheet_name)
+        ws = wb.create_sheet(sheet_name)
 
         # Build data columns
         conditions = gene_data["Condition"].tolist() if "Condition" in gene_data.columns else gene_data.get("Group", pd.Series()).tolist()
@@ -3424,8 +3444,6 @@ def _write_gene_chart_sheets(writer, processed_data):
         sems = gene_data.get("SEM", pd.Series([0] * len(gene_data))).tolist()
         p_values = gene_data.get("p_value", pd.Series()).tolist()
         significances = gene_data.get("significance", pd.Series([""]*len(gene_data))).tolist()
-
-        # Check for second comparison columns
         has_p2 = "p_value_2" in gene_data.columns
         p_values_2 = gene_data.get("p_value_2", pd.Series()).tolist() if has_p2 else []
         sig_2 = gene_data.get("significance_2", pd.Series()).tolist() if has_p2 else []
@@ -3434,82 +3452,295 @@ def _write_gene_chart_sheets(writer, processed_data):
         if n_rows == 0:
             continue
 
-        # Header row at row 4 (0-indexed), data starts at row 5 — matching ADD_THIS layout
-        hdr_row = 4
-        data_start = 5
-        col_c, col_d, col_e, col_f, col_g = 2, 3, 4, 5, 6  # columns C-G
-
-        header_fmt = workbook.add_format({"bold": True, "bottom": 1, "font_name": "Arial", "font_size": 10})
-        data_fmt = workbook.add_format({"font_name": "Arial", "font_size": 10})
-        sci_fmt = workbook.add_format({"font_name": "Arial", "font_size": 10, "num_format": "0.00E+00"})
-
+        hdr_row, data_start = 5, 6
         headers = ["Condition", "Fold_Change", "SEM", "p_value", "significance"]
         if has_p2:
             headers.extend(["p_value_2", "significance_2"])
-
         for ci, h in enumerate(headers):
-            ws.write(hdr_row, col_c + ci, h, header_fmt)
-
-        ws.set_column(col_c, col_c, 18)
-        ws.set_column(col_d, col_e, 14)
-        ws.set_column(col_f, col_f, 14)
-        ws.set_column(col_g, col_g, 14)
+            ws.cell(row=hdr_row, column=3 + ci, value=h)
+        ws.column_dimensions["C"].width = 18
+        for col_letter in ("D", "E", "F", "G"):
+            ws.column_dimensions[col_letter].width = 14
 
         for i in range(n_rows):
             r = data_start + i
-            ws.write(r, col_c, conditions[i], data_fmt)
-            ws.write(r, col_d, fold_changes[i] if pd.notna(fold_changes[i]) else 0, data_fmt)
-            ws.write(r, col_e, sems[i] if pd.notna(sems[i]) else 0, data_fmt)
+            ws.cell(row=r, column=3, value=conditions[i])
+            fc = fold_changes[i]
+            ws.cell(row=r, column=4, value=fc if pd.notna(fc) else 0)
+            sem = sems[i]
+            ws.cell(row=r, column=5, value=sem if pd.notna(sem) else 0)
             pv = p_values[i] if i < len(p_values) else None
-            ws.write(r, col_f, pv if pd.notna(pv) else "", sci_fmt)
+            ws.cell(row=r, column=6, value=pv if pd.notna(pv) else None)
             sig = significances[i] if i < len(significances) else ""
-            ws.write(r, col_g, sig if pd.notna(sig) else "", data_fmt)
+            ws.cell(row=r, column=7, value=sig if pd.notna(sig) else "")
             if has_p2:
                 pv2 = p_values_2[i] if i < len(p_values_2) else None
-                ws.write(r, col_g + 1, pv2 if pd.notna(pv2) else "", sci_fmt)
+                ws.cell(row=r, column=8, value=pv2 if pd.notna(pv2) else None)
                 s2 = sig_2[i] if i < len(sig_2) else ""
-                ws.write(r, col_g + 2, s2 if pd.notna(s2) else "", data_fmt)
+                ws.cell(row=r, column=9, value=s2 if pd.notna(s2) else "")
 
         last_data_row = data_start + n_rows - 1
 
-        # Create editable bar chart
-        chart = workbook.add_chart({"type": "column"})
-        chart.add_series({
-            "name": "Fold Change",
-            "categories": [sheet_name, data_start, col_c, last_data_row, col_c],
-            "values": [sheet_name, data_start, col_d, last_data_row, col_d],
-            "fill": {"color": "#4472C4"},
-            "border": {"color": "#2F5597"},
-            "gap": 219,
-            "y_error_bars": {
-                "type": "custom",
-                "plus_values": [sheet_name, data_start, col_e, last_data_row, col_e],
-                "minus_values": [sheet_name, data_start, col_e, last_data_row, col_e],
-                "end_style": 1,
-                "line": {"color": "#595959", "width": 0.75},
-            },
-        })
+        # ---- Phase 1: Create chart via openpyxl API ----
+        chart = BarChart()
+        chart.type = "col"
+        chart.grouping = "clustered"
+        chart.varyColors = False
+        chart.legend = None
+        chart.title = None
+        chart.width = 15
+        chart.height = 7.5
+        chart.gapWidth = 219
+        chart.overlap = -27
 
-        chart.set_title({"name": gene, "name_font": {"size": 14, "bold": True}})
-        chart.set_x_axis({
-            "name": "Condition",
-            "name_font": {"size": 11},
-            "num_font": {"size": 9, "rotation": -45},
-        })
-        chart.set_y_axis({
-            "name": "Relative Expression (Fold Change)",
-            "name_font": {"size": 11},
-            "num_font": {"size": 9},
-            "major_gridlines": {"visible": True, "line": {"color": "#D9D9D9"}},
-        })
-        chart.set_legend({"none": True})
-        chart.set_size({"width": 720, "height": 432})
-        chart.set_plotarea({
-            "border": {"color": "#D9D9D9"},
-            "fill": {"color": "#FFFFFF"},
-        })
+        cats = Reference(ws, min_col=3, min_row=data_start, max_row=last_data_row)
+        vals = Reference(ws, min_col=4, min_row=data_start, max_row=last_data_row)
+        chart.add_data(vals, titles_from_data=False)
+        chart.set_categories(cats)
 
-        ws.insert_chart("I3", chart)
+        series = chart.series[0]
+
+        # Bar style: white fill (bg1), black outline (tx1) 0.5pt
+        bar_sp_xml = (
+            '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+            ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            '<a:solidFill><a:schemeClr val="bg1"/></a:solidFill>'
+            '<a:ln w="6350"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill>'
+            '<a:prstDash val="solid"/></a:ln></c:spPr>'
+        )
+        series.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(bar_sp_xml))
+
+        # Error bars: custom SEM both directions, gray line, end caps
+        sem_formula = f"'{sheet_name}'!$E${data_start}:$E${last_data_row}"
+        eb_sp_xml = (
+            '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+            ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            '<a:noFill/>'
+            '<a:ln w="9525" cap="flat" cmpd="sng" algn="ctr">'
+            '<a:solidFill><a:schemeClr val="tx1">'
+            '<a:lumMod val="65000"/><a:lumOff val="35000"/>'
+            '</a:schemeClr></a:solidFill>'
+            '<a:prstDash val="solid"/><a:round/></a:ln></c:spPr>'
+        )
+        eb_sp = GraphicalProperties.from_tree(etree.fromstring(eb_sp_xml))
+        series.errBars = ErrorBars(
+            errValType="cust", errBarType="both", noEndCap=False,
+            minus=NumDataSource(numRef=NumRef(f=sem_formula)),
+            plus=NumDataSource(numRef=NumRef(f=sem_formula)),
+            spPr=eb_sp,
+        )
+
+        # X-axis: black line 0.5pt, no tick marks
+        chart.x_axis.delete = False
+        chart.x_axis.majorTickMark = "none"
+        chart.x_axis.minorTickMark = "none"
+        xax_sp_xml = (
+            '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+            ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            '<a:noFill/>'
+            '<a:ln w="6350" cap="flat" cmpd="sng" algn="ctr">'
+            '<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>'
+            '<a:prstDash val="solid"/><a:round/></a:ln></c:spPr>'
+        )
+        chart.x_axis.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(xax_sp_xml))
+
+        # Y-axis: black line 0.5pt, tick out, min=0, no gridlines
+        chart.y_axis.delete = False
+        chart.y_axis.majorTickMark = "out"
+        chart.y_axis.minorTickMark = "none"
+        chart.y_axis.scaling.min = 0
+        chart.y_axis.majorGridlines = None
+        yax_sp_xml = (
+            '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+            ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            '<a:noFill/>'
+            '<a:ln w="6350"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill>'
+            '<a:prstDash val="solid"/></a:ln></c:spPr>'
+        )
+        chart.y_axis.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(yax_sp_xml))
+
+        ws.add_chart(chart, "I3")
+
+        # Track chart index for this gene (0-based among all charts in workbook)
+        chart_idx = sum(len(s._charts) for s in wb.worksheets) - 1
+        gene_chart_map[f"xl/charts/chart{chart_idx}.xml"] = gene
+
+    # ---- Phase 1 complete: save workbook to bytes ----
+    phase1_buf = io.BytesIO()
+    wb.save(phase1_buf)
+
+    # ---- Phase 2: post-process chart XMLs in the XLSX zip ----
+    C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    nsmap = {"c": C, "a": A}
+
+    phase1_buf.seek(0)
+    zf_in = zipfile.ZipFile(phase1_buf, "r")
+
+    # Identify which chart files are gene charts (the ones we just added)
+    all_chart_files = sorted(
+        n for n in zf_in.namelist()
+        if n.startswith("xl/charts/chart") and n.endswith(".xml")
+    )
+    # Gene chart files are the last N chart files (one per gene with data)
+    genes_with_data = [g for g, gd in processed_data.items() if gd is not None and not gd.empty]
+    n_gene_charts = len(genes_with_data)
+    gene_chart_files = all_chart_files[-n_gene_charts:] if n_gene_charts > 0 else []
+    gene_for_chart = dict(zip(gene_chart_files, genes_with_data))
+
+    result = io.BytesIO()
+    zf_out = zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED)
+
+    for item in zf_in.infolist():
+        data = zf_in.read(item.filename)
+
+        if item.filename in gene_for_chart:
+            gene = gene_for_chart[item.filename]
+            root = etree.fromstring(data)
+
+            cat_ax = root.find(".//c:catAx", nsmap)
+            val_ax = root.find(".//c:valAx", nsmap)
+
+            # X-axis: add txPr for 9pt gray Arial labels
+            if cat_ax is not None:
+                cat_ax.append(_build_axis_txpr(C, A))
+
+            if val_ax is not None:
+                # Hidden gridlines (noFill)
+                mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
+                mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
+                mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
+                etree.SubElement(mg_ln, f"{{{A}}}noFill")
+
+                # Y-axis tick label font
+                val_ax.append(_build_axis_txpr(C, A))
+
+                # Rich text Y-axis title
+                _build_yaxis_title(val_ax, gene, hk_gene, C, A)
+
+            # Chart area: white fill, light gray border
+            chart_space = root
+            cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
+            sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
+            etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
+            ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
+            ln_cs.set("w", "9525")
+            sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
+            sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
+            sc_ln.set("val", "tx1")
+            etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
+            etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
+
+            data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+        zf_out.writestr(item, data)
+
+    zf_in.close()
+    zf_out.close()
+    result.seek(0)
+    return result
+
+
+def _build_axis_txpr(C, A):
+    """Build txPr element for axis tick labels: 9pt gray Arial."""
+    from lxml import etree
+
+    txpr = etree.Element(f"{{{C}}}txPr")
+    bp = etree.SubElement(txpr, f"{{{A}}}bodyPr")
+    bp.set("rot", "-60000000")
+    bp.set("vert", "horz")
+    bp.set("wrap", "square")
+    etree.SubElement(txpr, f"{{{A}}}lstStyle")
+    p = etree.SubElement(txpr, f"{{{A}}}p")
+    pPr = etree.SubElement(p, f"{{{A}}}pPr")
+    dRPr = etree.SubElement(pPr, f"{{{A}}}defRPr")
+    dRPr.set("sz", "900")
+    dRPr.set("b", "0")
+    sf = etree.SubElement(dRPr, f"{{{A}}}solidFill")
+    sc = etree.SubElement(sf, f"{{{A}}}schemeClr")
+    sc.set("val", "tx1")
+    etree.SubElement(sc, f"{{{A}}}lumMod").set("val", "65000")
+    etree.SubElement(sc, f"{{{A}}}lumOff").set("val", "35000")
+    lat = etree.SubElement(dRPr, f"{{{A}}}latin")
+    lat.set("typeface", "Arial")
+    cs = etree.SubElement(dRPr, f"{{{A}}}cs")
+    cs.set("typeface", "Arial")
+    return txpr
+
+
+def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
+    """Build rich text Y-axis title: 'Relative mRNA expression level of' + gene(RED)/HK(black)."""
+    from lxml import etree
+
+    title_el = etree.SubElement(val_ax, f"{{{C}}}title")
+    tx = etree.SubElement(title_el, f"{{{C}}}tx")
+    rich = etree.SubElement(tx, f"{{{C}}}rich")
+    body = etree.SubElement(rich, f"{{{A}}}bodyPr")
+    body.set("rot", "-5400000")
+    body.set("vert", "horz")
+    body.set("wrap", "square")
+    body.set("anchor", "ctr")
+    body.set("anchorCtr", "1")
+    etree.SubElement(rich, f"{{{A}}}lstStyle")
+
+    # Paragraph 1: "Relative mRNA expression level of"
+    p1 = etree.SubElement(rich, f"{{{A}}}p")
+    p1Pr = etree.SubElement(p1, f"{{{A}}}pPr")
+    etree.SubElement(p1Pr, f"{{{A}}}defRPr")
+    r1 = etree.SubElement(p1, f"{{{A}}}r")
+    rPr1 = etree.SubElement(r1, f"{{{A}}}rPr")
+    rPr1.set("lang", "en-US")
+    rPr1.set("sz", "800")
+    rPr1.set("b", "1")
+    sf1 = etree.SubElement(rPr1, f"{{{A}}}solidFill")
+    sc1 = etree.SubElement(sf1, f"{{{A}}}sysClr")
+    sc1.set("val", "windowText")
+    sc1.set("lastClr", "000000")
+    lat1 = etree.SubElement(rPr1, f"{{{A}}}latin")
+    lat1.set("typeface", "Arial")
+    cs1 = etree.SubElement(rPr1, f"{{{A}}}cs")
+    cs1.set("typeface", "Arial")
+    t1 = etree.SubElement(r1, f"{{{A}}}t")
+    t1.text = "Relative mRNA expression level of"
+
+    # Paragraph 2: gene name (RED) + /HK_gene (black)
+    p2 = etree.SubElement(rich, f"{{{A}}}p")
+    p2Pr = etree.SubElement(p2, f"{{{A}}}pPr")
+    etree.SubElement(p2Pr, f"{{{A}}}defRPr")
+
+    # Gene name run (RED #FF0000)
+    r2 = etree.SubElement(p2, f"{{{A}}}r")
+    rPr2 = etree.SubElement(r2, f"{{{A}}}rPr")
+    rPr2.set("lang", "en-US")
+    rPr2.set("sz", "800")
+    rPr2.set("b", "1")
+    sf2 = etree.SubElement(rPr2, f"{{{A}}}solidFill")
+    etree.SubElement(sf2, f"{{{A}}}srgbClr").set("val", "FF0000")
+    lat2 = etree.SubElement(rPr2, f"{{{A}}}latin")
+    lat2.set("typeface", "Arial")
+    cs2 = etree.SubElement(rPr2, f"{{{A}}}cs")
+    cs2.set("typeface", "Arial")
+    t2 = etree.SubElement(r2, f"{{{A}}}t")
+    t2.text = gene
+
+    # /HK_gene run (black)
+    r3 = etree.SubElement(p2, f"{{{A}}}r")
+    rPr3 = etree.SubElement(r3, f"{{{A}}}rPr")
+    rPr3.set("lang", "en-US")
+    rPr3.set("sz", "800")
+    rPr3.set("b", "1")
+    sf3 = etree.SubElement(rPr3, f"{{{A}}}solidFill")
+    sc3 = etree.SubElement(sf3, f"{{{A}}}sysClr")
+    sc3.set("val", "windowText")
+    sc3.set("lastClr", "000000")
+    lat3 = etree.SubElement(rPr3, f"{{{A}}}latin")
+    lat3.set("typeface", "Arial")
+    cs3 = etree.SubElement(rPr3, f"{{{A}}}cs")
+    cs3.set("typeface", "Arial")
+    t3 = etree.SubElement(r3, f"{{{A}}}t")
+    t3.text = f"/{hk_gene}"
+
+    etree.SubElement(title_el, f"{{{C}}}overlay").set("val", "0")
 
 
 # ==================== UI ====================
