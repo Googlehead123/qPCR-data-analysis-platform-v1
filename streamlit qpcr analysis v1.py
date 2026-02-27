@@ -717,7 +717,11 @@ class QPCRParser:
             for enc in ["utf-8", "utf-16", "utf-16-le", "latin-1", "cp1252"]:
                 try:
                     df = pd.read_csv(
-                        file, encoding=enc, low_memory=False, skip_blank_lines=False
+                        file, encoding=enc, low_memory=False, skip_blank_lines=False,
+                        keep_default_na=False,
+                        na_values=["", "NA", "N/A", "NaN", "#N/A", "#N/A N/A",
+                                   "#NA", "-NaN", "-nan", "nan", "<NA>",
+                                   "Undetermined", "undetermined"],
                     )
                     break
                 except (UnicodeDecodeError, UnicodeError):
@@ -1563,18 +1567,16 @@ class AnalysisEngine:
         processed: pd.DataFrame,
         compare_condition: str,
         compare_condition_2: str = None,
+        compare_condition_3: str = None,
         raw_data: pd.DataFrame = None,
         hk_gene: str = None,
         sample_mapping: dict = None,
         ttest_type: str = "welch",
         excluded_wells=None,
     ) -> pd.DataFrame:
-        """T-test comparing each condition to compare_condition (and optionally compare_condition_2).
+        """T-test comparing each condition to compare_condition (and optionally 2nd/3rd).
 
-        Args:
-            ttest_type: "welch" for Welch's t-test (unequal variance), "student" for Student's t-test (equal variance)
-            excluded_wells: Either a dict {(gene, sample): set_of_wells} for
-                per-gene-sample exclusions, or a flat set of well IDs, or None.
+        Significance symbols: * (1st), # (2nd), † (3rd).
         """
 
         # Use session_state fallbacks
@@ -1605,10 +1607,13 @@ class AnalysisEngine:
         _onesamp_warnings = []
         _stats_skipped = []
 
-        # Add second p-value columns if compare_condition_2 is provided
+        # Add second/third p-value columns if compare conditions are provided
         if compare_condition_2:
             results["p_value_2"] = np.nan
             results["significance_2"] = ""
+        if compare_condition_3:
+            results["p_value_3"] = np.nan
+            results["significance_3"] = ""
 
         for target in results["Target"].unique():
             if pd.isna(target):
@@ -1663,6 +1668,8 @@ class AnalysisEngine:
 
             # FIRST COMPARISON: compare_condition
             ref_vals = rel_expr.get(compare_condition, np.array([]))
+            if ref_vals.size == 0:
+                _stats_skipped.append(f"{target}: no data for comparison condition '{compare_condition}'")
             if ref_vals.size >= 1:
                 for cond, vals in rel_expr.items():
                     if cond == compare_condition or vals.size == 0:
@@ -1740,12 +1747,54 @@ class AnalysisEngine:
                             elif p_val_2 < 0.05:
                                 results.loc[mask, "significance_2"] = "#"
 
+            # THIRD COMPARISON: compare_condition_3 (if provided)
+            if compare_condition_3:
+                ref_vals_3 = rel_expr.get(compare_condition_3, np.array([]))
+                if ref_vals_3.size >= 1:
+                    for cond, vals in rel_expr.items():
+                        if cond == compare_condition_3 or vals.size == 0:
+                            continue
+
+                        try:
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore", RuntimeWarning)
+                                equal_var = ttest_type == "student"
+                                if ref_vals_3.size >= 2 and vals.size >= 2:
+                                    _, p_val_3 = stats.ttest_ind(
+                                        ref_vals_3, vals, equal_var=equal_var
+                                    )
+                                elif vals.size == 1 and ref_vals_3.size >= 2:
+                                    _, p_val_3 = stats.ttest_1samp(ref_vals_3, vals[0])
+                                elif ref_vals_3.size == 1 and vals.size >= 2:
+                                    _, p_val_3 = stats.ttest_1samp(vals, ref_vals_3[0])
+                                else:
+                                    p_val_3 = np.nan
+                        except (ValueError, TypeError):
+                            p_val_3 = np.nan
+
+                        mask = (results["Target"] == target) & (
+                            results["Condition"] == cond
+                        )
+                        results.loc[mask, "p_value_3"] = p_val_3
+
+                        if not np.isnan(p_val_3):
+                            if p_val_3 < 0.001:
+                                results.loc[mask, "significance_3"] = "\u2020\u2020\u2020"
+                            elif p_val_3 < 0.01:
+                                results.loc[mask, "significance_3"] = "\u2020\u2020"
+                            elif p_val_3 < 0.05:
+                                results.loc[mask, "significance_3"] = "\u2020"
+
         results = AnalysisEngine._apply_fdr_correction(
             results, "p_value", "p_value_fdr", "significance_fdr", "*"
         )
         if compare_condition_2:
             results = AnalysisEngine._apply_fdr_correction(
                 results, "p_value_2", "p_value_fdr_2", "significance_fdr_2", "#"
+            )
+        if compare_condition_3:
+            results = AnalysisEngine._apply_fdr_correction(
+                results, "p_value_3", "p_value_fdr_3", "significance_fdr_3", "\u2020"
             )
 
         # FIX-16: Attach one-sample t-test warnings for caller to display
@@ -1798,7 +1847,8 @@ class AnalysisEngine:
 
     @staticmethod
     def run_full_analysis(
-        ref_sample_key: str, compare_sample_key: str, compare_sample_key_2: str = None
+        ref_sample_key: str, compare_sample_key: str,
+        compare_sample_key_2: str = None, compare_sample_key_3: str = None,
     ):
         """
         Run ΔΔCt + statistical analysis and store results in st.session_state.
@@ -1856,14 +1906,22 @@ class AnalysisEngine:
                 cmp_condition_2 = mapping.get(compare_sample_key_2, {}).get(
                     "condition", compare_sample_key_2
                 )
+            cmp_condition_3 = None
+            if compare_sample_key_3:
+                cmp_condition_3 = mapping.get(compare_sample_key_3, {}).get(
+                    "condition", compare_sample_key_3
+                )
 
             st.session_state.analysis_ref_condition = ref_condition
             st.session_state.analysis_cmp_condition = cmp_condition
             st.session_state.analysis_cmp_condition_2 = cmp_condition_2
+            st.session_state.analysis_cmp_condition_3 = cmp_condition_3
 
             msg = f"Running full analysis using reference '{ref_condition}' and comparison '{cmp_condition}'"
             if cmp_condition_2:
                 msg += f" + secondary comparison '{cmp_condition_2}'"
+            if cmp_condition_3:
+                msg += f" + tertiary comparison '{cmp_condition_3}'"
 
             with st.spinner(msg + "..."):
                 # --- ΔΔCt calculation ---
@@ -1897,6 +1955,7 @@ class AnalysisEngine:
                         processed_df,
                         cmp_condition,
                         cmp_condition_2,
+                        cmp_condition_3,
                         raw_data=data,
                         hk_gene=hk_gene,
                         sample_mapping=mapping,
@@ -1955,9 +2014,19 @@ import textwrap
 class GraphGenerator:
     @staticmethod
     def _wrap_text(text: str, width: int = 15) -> str:
-        """Wrap text for x-axis labels using <br> for Plotly compatibility"""
+        """Wrap text for x-axis labels using <br> for Plotly compatibility."""
         wrapped = textwrap.fill(text, width=width)
         return wrapped.replace("\n", "<br>")
+
+    @staticmethod
+    def _auto_wrap_width(n_bars: int, fig_width_cm: float = 28) -> int:
+        """Calculate optimal wrap width based on number of bars and figure width.
+
+        Adapts like Excel cell wrapping: more bars → narrower wrap.
+        """
+        px_per_bar = (fig_width_cm * 37.8) / max(n_bars, 1)
+        chars_per_bar = max(int(px_per_bar / 8), 6)
+        return min(chars_per_bar, 25)
 
     @staticmethod
     def create_gene_graph(
@@ -2149,74 +2218,47 @@ class GraphGenerator:
                 bar_key, {"show_sig": True, "show_err": True}
             )
 
-            # Get both significance values
+            # Get all significance values
             sig_1 = row.get("significance", "")
             sig_2 = row.get("significance_2", "")
+            sig_3 = row.get("significance_3", "")
 
             # Calculate base y position (top of error bar)
             bar_height = row["Relative_Expression"]
             error_bar_height = error_visible_array[idx]
             base_y_position = bar_height + error_bar_height
 
-            # Font sizes - asterisk at normal size, hashtag reduced to match visually
+            # Font sizes - asterisk at normal size, hashtag/dagger reduced
             asterisk_font_size = 16
-            hashtag_font_size = 10  # Reduced by 6 to match asterisk visual size
+            hashtag_font_size = 10
+            dagger_font_size = 10
 
             # Check if we need to show significance
             if show_sig_global and bar_config.get("show_sig", True):
                 symbols_to_show = []
                 font_sizes = []
 
-                # Add first significance (asterisks)
                 if sig_1 in ["*", "**", "***"]:
                     symbols_to_show.append(sig_1)
                     font_sizes.append(asterisk_font_size)
 
-                # Add second significance (hashtags)
                 if sig_2 in ["#", "##", "###"]:
                     symbols_to_show.append(sig_2)
                     font_sizes.append(hashtag_font_size)
 
-                # Display symbols with FIXED ABSOLUTE SPACING
-                if len(symbols_to_show) == 2:
-                    # Two symbols: stack with FIXED absolute spacing
-                    # Bottom symbol (asterisk) - positioned above error bar
-                    fig.add_annotation(
-                        x=idx,
-                        y=base_y_position + (fixed_symbol_spacing * 0.2),
-                        text=symbols_to_show[0],
-                        showarrow=False,
-                        font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
-                        xref="x",
-                        yref="y",
-                        xanchor="center",
-                        yanchor="bottom",
-                    )
+                if sig_3 in ["\u2020", "\u2020\u2020", "\u2020\u2020\u2020"]:
+                    symbols_to_show.append(sig_3)
+                    font_sizes.append(dagger_font_size)
 
-                    # Top symbol (hashtag) - FIXED absolute distance above bottom symbol
-                    # The vertical gap is always fixed_symbol_spacing regardless of bar height
+                # Stack symbols with fixed absolute spacing
+                for si, (sym, fs) in enumerate(zip(symbols_to_show, font_sizes)):
+                    y_pos = base_y_position + (fixed_symbol_spacing * 0.2) + (si * fixed_symbol_spacing)
                     fig.add_annotation(
                         x=idx,
-                        y=base_y_position
-                        + (fixed_symbol_spacing * 0.2)
-                        + fixed_symbol_spacing,
-                        text=symbols_to_show[1],
+                        y=y_pos,
+                        text=sym,
                         showarrow=False,
-                        font=dict(size=font_sizes[1], color="black", family=PLOTLY_FONT_FAMILY),
-                        xref="x",
-                        yref="y",
-                        xanchor="center",
-                        yanchor="bottom",
-                    )
-
-                elif len(symbols_to_show) == 1:
-                    # Single symbol - positioned just above error bar
-                    fig.add_annotation(
-                        x=idx,
-                        y=base_y_position + (fixed_symbol_spacing * 0.2),
-                        text=symbols_to_show[0],
-                        showarrow=False,
-                        font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
+                        font=dict(size=fs, color="black", family=PLOTLY_FONT_FAMILY),
                         xref="x",
                         yref="y",
                         xanchor="center",
@@ -2230,7 +2272,7 @@ class GraphGenerator:
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
-                font=dict(size=settings.get(f"{gene}_ylabel_size", 14), family=PLOTLY_FONT_FAMILY),
+                font=dict(size=settings.get(f"{gene}_ylabel_size", 14), family=PLOTLY_FONT_FAMILY, color="black"),
                 standoff=15,
             ),
             showgrid=False,
@@ -2267,9 +2309,12 @@ class GraphGenerator:
         )
         gene_tick_size = settings.get(f"{gene}_tick_size", 12)
 
-        # Wrap x-axis labels - all of them
+        # Wrap x-axis labels - adaptive width based on number of bars
+        wrap_w = GraphGenerator._auto_wrap_width(
+            n_bars, settings.get("figure_width", 28)
+        )
         wrapped_labels = [
-            GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names
+            GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
         ]
 
         # FIX-19: Dynamic bottom margin based on max label line count
@@ -2299,6 +2344,16 @@ class GraphGenerator:
                 f"<br><b>2nd Comparison{legend_ref_label_2}:</b>  # p<0.05  ## p<0.01  ### p<0.001"
             )
 
+        if (
+            "significance_3" in gene_data_indexed.columns
+            and gene_data_indexed["significance_3"].notna().any()
+        ):
+            cmp_ref_name_3 = st.session_state.get("analysis_cmp_condition_3", "")
+            legend_ref_label_3 = f" (vs {cmp_ref_name_3})" if cmp_ref_name_3 else ""
+            legend_text += (
+                f"<br><b>3rd Comparison{legend_ref_label_3}:</b>  \u2020 p<0.05  \u2020\u2020 p<0.01  \u2020\u2020\u2020 p<0.001"
+            )
+
         fig_h_px = int(settings.get("figure_height", 16) * CM_TO_PX)
         b_margin_px = gene_margins.get("b", 200)
         t_margin_px = gene_margins.get("t", 60)
@@ -2317,7 +2372,7 @@ class GraphGenerator:
                 tickmode="array",
                 tickvals=list(range(n_bars)),
                 ticktext=wrapped_labels,
-                tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY),
+                tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY, color="black"),
                 tickangle=0,
                 ticks="outside",
                 ticklen=8,
@@ -2329,7 +2384,7 @@ class GraphGenerator:
             ),
             yaxis=y_axis_config,
             template=settings.get("color_scheme", "plotly_white"),
-            font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY),
+            font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY, color="black"),
             height=fig_h_px,
             width=int(settings.get("figure_width", 28) * CM_TO_PX),
             bargap=gene_bar_gap,
@@ -2592,7 +2647,7 @@ class ReportGenerator:
             width=1000,
             height=550,
             margin=dict(l=60, r=60, t=60, b=80),
-            font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+            font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
         )
 
         img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2670,7 +2725,7 @@ class ReportGenerator:
                 width=600,
                 height=450,
                 margin=dict(l=50, r=30, t=40, b=60),
-                font=dict(size=11, family=PLOTLY_FONT_FAMILY),
+                font=dict(size=11, family=PLOTLY_FONT_FAMILY, color="black"),
             )
 
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2721,8 +2776,8 @@ class ReportGenerator:
                 width=350,
                 height=280,
                 margin=dict(l=40, r=20, t=35, b=40),
-                font=dict(size=9, family=PLOTLY_FONT_FAMILY),
-                title=dict(text=gene, font=dict(size=12, family=PLOTLY_FONT_FAMILY)),
+                font=dict(size=9, family=PLOTLY_FONT_FAMILY, color="black"),
+                title=dict(text=gene, font=dict(size=12, family=PLOTLY_FONT_FAMILY, color="black")),
             )
 
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -2769,10 +2824,18 @@ class ReportGenerator:
             f"Efficacy Type: {analysis_params.get('Efficacy_Type', 'N/A')}",
             f"Housekeeping Gene: {analysis_params.get('Housekeeping_Gene', 'N/A')}",
             f"Reference Condition: {analysis_params.get('Reference_Sample', 'N/A')}",
-            f"Comparison Condition: {analysis_params.get('Compare_To', 'N/A')}",
+            f"Comparison (*): {analysis_params.get('Compare_To', 'N/A')}",
+        ]
+        cmp2 = analysis_params.get("Compare_To_2")
+        if cmp2:
+            params_text.append(f"Comparison (#): {cmp2}")
+        cmp3 = analysis_params.get("Compare_To_3")
+        if cmp3:
+            params_text.append(f"Comparison (\u2020): {cmp3}")
+        params_text.extend([
             f"Genes Analyzed: {len(processed_data)}",
             f"Analysis Date: {analysis_params.get('Date', 'N/A')}",
-        ]
+        ])
 
         for text in params_text:
             para = summary_frame.add_paragraph()
@@ -2996,12 +3059,20 @@ class PPTGenerator:
         add_meta_line("Analysis Parameters", bold=True)
         add_meta_line(f"HK Gene: {analysis_params.get('Housekeeping_Gene', '-')}")
         add_meta_line(f"Ref Sample: {analysis_params.get('Reference_Sample', '-')}")
-        add_meta_line(f"Compare: {analysis_params.get('Compare_To', '-')}")
+        add_meta_line(f"Compare (*): {analysis_params.get('Compare_To', '-')}")
+        compare_2 = analysis_params.get("Compare_To_2")
+        if compare_2:
+            add_meta_line(f"Compare (#): {compare_2}")
+        compare_3 = analysis_params.get("Compare_To_3")
+        if compare_3:
+            add_meta_line(f"Compare (\u2020): {compare_3}")
         add_meta_line("")
         add_meta_line("통계적 유의성 (Significance)", bold=True)
-        add_meta_line("* p < 0.05")
-        add_meta_line("** p < 0.01")
-        add_meta_line("*** p < 0.001")
+        add_meta_line("* p < 0.05   ** p < 0.01   *** p < 0.001")
+        if compare_2:
+            add_meta_line("# p < 0.05   ## p < 0.01   ### p < 0.001")
+        if compare_3:
+            add_meta_line("\u2020 p < 0.05   \u2020\u2020 p < 0.01   \u2020\u2020\u2020 p < 0.001")
 
         # Logo Placeholder
         logo_box = slide.shapes.add_textbox(
@@ -3447,6 +3518,9 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
         has_p2 = "p_value_2" in gene_data.columns
         p_values_2 = gene_data.get("p_value_2", pd.Series()).tolist() if has_p2 else []
         sig_2 = gene_data.get("significance_2", pd.Series()).tolist() if has_p2 else []
+        has_p3 = "p_value_3" in gene_data.columns
+        p_values_3 = gene_data.get("p_value_3", pd.Series()).tolist() if has_p3 else []
+        sig_3 = gene_data.get("significance_3", pd.Series()).tolist() if has_p3 else []
 
         n_rows = len(conditions)
         if n_rows == 0:
@@ -3456,6 +3530,8 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
         headers = ["Condition", "Fold_Change", "SEM", "p_value", "significance"]
         if has_p2:
             headers.extend(["p_value_2", "significance_2"])
+        if has_p3:
+            headers.extend(["p_value_3", "significance_3"])
         for ci, h in enumerate(headers):
             ws.cell(row=hdr_row, column=3 + ci, value=h)
         ws.column_dimensions["C"].width = 18
@@ -3478,6 +3554,12 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
                 ws.cell(row=r, column=8, value=pv2 if pd.notna(pv2) else None)
                 s2 = sig_2[i] if i < len(sig_2) else ""
                 ws.cell(row=r, column=9, value=s2 if pd.notna(s2) else "")
+            p3_col_offset = 10 if has_p2 else 8
+            if has_p3:
+                pv3 = p_values_3[i] if i < len(p_values_3) else None
+                ws.cell(row=r, column=p3_col_offset, value=pv3 if pd.notna(pv3) else None)
+                s3_val = sig_3[i] if i < len(sig_3) else ""
+                ws.cell(row=r, column=p3_col_offset + 1, value=s3_val if pd.notna(s3_val) else "")
 
         last_data_row = data_start + n_rows - 1
 
@@ -3776,21 +3858,12 @@ with st.sidebar:
         st.info("Upload data to begin")
 
     st.markdown("")
-    with st.expander("Navigation Tips"):
+    with st.expander("Tips"):
         st.markdown("""
-        **Tab Navigation**
-        - Click tab headers to switch
-        - Use Tab/Shift+Tab in forms
-        
-        **Keyboard Shortcuts**
-        - `Ctrl+Enter` - Submit forms
-        - `Esc` - Close dialogs
-        - `R` - Refresh (browser)
-        
         **Quick Tips**
-        - Drag column headers to resize tables
         - Double-click graph to reset zoom
         - Hover bars for exact values
+        - Use the gene pill buttons to switch between genes
         """)
 
 # Main tabs
@@ -3855,6 +3928,7 @@ with tab1:
                     "selected_gene_idx",
                     "analysis_cmp_condition",
                     "analysis_cmp_condition_2",
+                    "analysis_cmp_condition_3",
                     "analysis_ref_condition",
                 ]:
                     if key in st.session_state:
@@ -3862,16 +3936,25 @@ with tab1:
                 # Re-initialize graph_settings to defaults
                 st.session_state.graph_settings = {
                     "color_scheme": "plotly_white",
+                    "title_size": 20,
                     "font_size": 14,
+                    "sig_font_size": 18,
                     "figure_height": 16,
                     "figure_width": 28,
+                    "show_error": True,
+                    "show_significance": True,
+                    "show_grid": True,
                     "show_legend": False,
+                    "xlabel": "Condition",
+                    "ylabel": "Relative mRNA Expression Level",
+                    "bar_colors": {},
                     "bar_gap": 0.15,
-                    "show_error_bars": True,
-                    "show_pvalues": True,
-                    "y_auto_range": True,
+                    "orientation": "v",
                     "bar_opacity": 0.95,
                     "marker_line_width": 1,
+                    "y_log_scale": False,
+                    "y_min": None,
+                    "y_max": None,
                     "plot_bgcolor": "#FFFFFF",
                 }
 
@@ -4749,32 +4832,55 @@ with tab2:
             st.markdown("### 🔀 Drag to Reorder Samples")
             st.caption("Drag included samples to set the display order for graphs and exports.")
 
-            if sort_items is not None:
-                current_order = st.session_state.sample_order
-                # Filter to only included samples
-                included_order = [
-                    s for s in current_order
-                    if st.session_state.sample_mapping.get(s, {}).get("include", True)
-                ]
+            current_order = st.session_state.sample_order
+            included_order = [
+                s for s in current_order
+                if st.session_state.sample_mapping.get(s, {}).get("include", True)
+            ]
+            excluded_samples_list = [
+                s for s in current_order
+                if not st.session_state.sample_mapping.get(s, {}).get("include", True)
+            ]
+
+            reorder_mode = st.radio(
+                "Reorder method",
+                ["Arrow buttons (fast)", "Drag-and-drop"],
+                horizontal=True,
+                key="reorder_mode",
+                label_visibility="collapsed",
+            )
+
+            if reorder_mode == "Arrow buttons (fast)":
+                for i, sample in enumerate(included_order):
+                    cond = st.session_state.sample_mapping.get(sample, {}).get("condition", sample)
+                    lbl = f"{cond}  ({sample})" if cond != sample else sample
+                    btn_cols = st.columns([0.5, 0.5, 5])
+                    with btn_cols[0]:
+                        if i > 0 and st.button("\u2191", key=f"up_{sample}", help="Move up"):
+                            included_order[i], included_order[i - 1] = included_order[i - 1], included_order[i]
+                            st.session_state.sample_order = included_order + excluded_samples_list
+                            st.rerun()
+                    with btn_cols[1]:
+                        if i < len(included_order) - 1 and st.button("\u2193", key=f"dn_{sample}", help="Move down"):
+                            included_order[i], included_order[i + 1] = included_order[i + 1], included_order[i]
+                            st.session_state.sample_order = included_order + excluded_samples_list
+                            st.rerun()
+                    with btn_cols[2]:
+                        st.markdown(f"<span style='font-size:0.9rem;'>{lbl}</span>", unsafe_allow_html=True)
+            elif sort_items is not None:
                 # Build unique labels: "Condition Name  (Original)" format
                 order_labels = []
                 label_to_sample = {}
                 for s in included_order:
                     cond = st.session_state.sample_mapping.get(s, {}).get("condition", s)
                     label = f"{cond}  ({s})" if cond != s else s
-                    # Handle potential duplicate labels by appending index
                     if label in label_to_sample:
                         label = f"{cond}  ({s}) #{included_order.index(s) + 1}"
                     order_labels.append(label)
                     label_to_sample[label] = s
 
-                # Compact drag-and-drop styling
                 st.markdown("""
                 <style>
-                div[data-testid="stVerticalBlock"] div[data-baseweb="tag"] {
-                    font-size: 0.85rem !important;
-                    padding: 4px 12px !important;
-                }
                 .sortable-item {
                     padding: 6px 14px !important;
                     margin: 2px 0 !important;
@@ -4794,12 +4900,6 @@ with tab2:
                         sorted_labels = sort_items(items=order_labels, direction="vertical")
 
                 new_included_order = [label_to_sample[lbl] for lbl in sorted_labels]
-
-                # Rebuild full order: included in new order + excluded appended at end
-                excluded_samples_list = [
-                    s for s in current_order
-                    if not st.session_state.sample_mapping.get(s, {}).get("include", True)
-                ]
                 new_order = new_included_order + excluded_samples_list
 
                 if new_order != st.session_state.sample_order:
@@ -4949,11 +5049,10 @@ with tab2:
                 )
 
                 if use_second_comparison:
-                    # Filter out the first comparison from options
                     condition_list_2 = [c for c in condition_list if c != cmp_condition]
                     if condition_list_2:
                         cmp_condition_2 = st.selectbox(
-                            "📊 P-value Reference 2 (#)",
+                            "P-value Reference 2 (#)",
                             condition_list_2,
                             index=0,
                             key="cmp_choice_pval_2",
@@ -4967,6 +5066,34 @@ with tab2:
                         cmp_sample_key_2 = None
                 else:
                     cmp_sample_key_2 = None
+
+                # Third comparison (†)
+                use_third_comparison = st.checkbox(
+                    "Enable 3rd comparison (†)",
+                    value=False,
+                    key="use_third_pval",
+                    help="Add a third statistical comparison with dagger symbols",
+                ) if use_second_comparison else False
+
+                if use_third_comparison:
+                    used = {cmp_condition, cmp_condition_2} if use_second_comparison and cmp_sample_key_2 else {cmp_condition}
+                    condition_list_3 = [c for c in condition_list if c not in used]
+                    if condition_list_3:
+                        cmp_condition_3 = st.selectbox(
+                            "P-value Reference 3 (†)",
+                            condition_list_3,
+                            index=0,
+                            key="cmp_choice_pval_3",
+                            help="Third control group for statistical testing (dagger symbols)",
+                        )
+                        cmp_sample_key_3 = sample_to_condition[cmp_condition_3]
+                        st.caption(f"→ Sample: **{cmp_sample_key_3}**")
+                    else:
+                        st.warning("Need at least 4 conditions for triple comparison")
+                        use_third_comparison = False
+                        cmp_sample_key_3 = None
+                else:
+                    cmp_sample_key_3 = None
 
             # Statistical options
             st.markdown("#### ⚙️ Statistical Options")
@@ -5038,6 +5165,8 @@ with tab2:
                 """
                 if use_second_comparison and cmp_sample_key_2:
                     summary_html += f"<p><b>P-values (#):</b> Compared to <code>{cmp_condition_2}</code></p>"
+                if use_third_comparison and cmp_sample_key_3:
+                    summary_html += f"<p><b>P-values (†):</b> Compared to <code>{cmp_condition_3}</code></p>"
                 summary_html += "</div>"
                 st.markdown(summary_html, unsafe_allow_html=True)
 
@@ -5045,6 +5174,7 @@ with tab2:
             st.session_state['_last_ref_sample_key'] = ref_sample_key
             st.session_state['_last_cmp_sample_key'] = cmp_sample_key
             st.session_state['_last_cmp_sample_key_2'] = cmp_sample_key_2 if use_second_comparison else None
+            st.session_state['_last_cmp_sample_key_3'] = cmp_sample_key_3 if use_third_comparison else None
 
             # Run button
             if st.button("Run Full Analysis", type="primary", use_container_width=True):
@@ -5052,11 +5182,14 @@ with tab2:
                     ref_sample_key,
                     cmp_sample_key,
                     cmp_sample_key_2 if use_second_comparison else None,
+                    cmp_sample_key_3 if use_third_comparison else None,
                 )
                 if ok:
-                    success_msg = f"✅ Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values (*) vs: **{cmp_condition}**"
+                    success_msg = f"Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values (*) vs: **{cmp_condition}**"
                     if use_second_comparison and cmp_sample_key_2:
                         success_msg += f"\n- P-values (#) vs: **{cmp_condition_2}**"
+                    if use_third_comparison and cmp_sample_key_3:
+                        success_msg += f"\n- P-values (†) vs: **{cmp_condition_3}**"
                     st.success(success_msg)
                     st.rerun()
                 else:
@@ -5082,6 +5215,7 @@ with tab3:
                 st.session_state['_last_ref_sample_key'],
                 st.session_state['_last_cmp_sample_key'],
                 st.session_state.get('_last_cmp_sample_key_2'),
+                st.session_state.get('_last_cmp_sample_key_3'),
             )
             st.info("Analysis auto-updated to reflect changes in QC exclusions or settings.")
 
@@ -5096,11 +5230,14 @@ with tab3:
             st.session_state.processed_data.values(), ignore_index=True
         )
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Genes Analyzed", len(st.session_state.processed_data))
         col2.metric("Conditions", all_results["Condition"].nunique())
         sig_count = (all_results["p_value"] < 0.05).sum()
-        col3.metric("Significant (p<0.05)", f"{sig_count}/{len(all_results)}")
+        total_testable = all_results["p_value"].notna().sum()
+        col3.metric("Significant (p<0.05)", f"{sig_count}/{total_testable}")
+        excluded_well_count = sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells)
+        col4.metric("Excluded Wells", excluded_well_count)
 
         # Show results per gene
         st.subheader("Gene-by-Gene Results")
@@ -5182,8 +5319,8 @@ with tab4:
                 "title_size": 20,
                 "font_size": 14,
                 "sig_font_size": 18,
-                "figure_width": 15,
-                "figure_height": 9,
+                "figure_width": 28,
+                "figure_height": 16,
                 "color_scheme": "plotly_white",
                 "show_error": True,
                 "show_significance": True,
@@ -5279,6 +5416,14 @@ with tab4:
                 st.session_state.graph_settings[show_sig_key] = True
                 st.session_state.graph_settings[show_err_key] = True
                 st.session_state.graph_settings[bar_gap_key] = 0.25
+                for per_gene_key in [
+                    f"{current_gene}_figure_width", f"{current_gene}_figure_height",
+                    f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
+                    f"{current_gene}_marker_line_width", f"{current_gene}_tick_size",
+                    f"{current_gene}_ylabel_size", f"{current_gene}_bg_color",
+                    f"{current_gene}_y_min", f"{current_gene}_y_max",
+                ]:
+                    st.session_state.graph_settings.pop(per_gene_key, None)
                 st.rerun()
 
         # Toolbar row 2: ref line selector
@@ -5341,25 +5486,28 @@ with tab4:
                     st.caption("**Figure Size**")
                     fig_width_cm = st.slider(
                         "Width (cm)", 10.0, 40.0,
-                        value=float(st.session_state.graph_settings.get("figure_width", 28)),
+                        value=float(st.session_state.graph_settings.get(f"{current_gene}_figure_width",
+                            st.session_state.graph_settings.get("figure_width", 28))),
                         step=0.5, key=f"fig_w_{current_gene}",
                     )
                     fig_height_cm = st.slider(
                         "Height (cm)", 6.0, 25.0,
-                        value=float(st.session_state.graph_settings.get("figure_height", 16)),
+                        value=float(st.session_state.graph_settings.get(f"{current_gene}_figure_height",
+                            st.session_state.graph_settings.get("figure_height", 16))),
                         step=0.5, key=f"fig_h_{current_gene}",
                     )
-                    st.session_state.graph_settings["figure_width"] = fig_width_cm
-                    st.session_state.graph_settings["figure_height"] = fig_height_cm
+                    st.session_state.graph_settings[f"{current_gene}_figure_width"] = fig_width_cm
+                    st.session_state.graph_settings[f"{current_gene}_figure_height"] = fig_height_cm
 
                 with s_col3:
                     st.caption("**Fonts**")
                     global_font = st.slider(
                         "Global font", 8, 28,
-                        value=st.session_state.graph_settings.get("font_size", 14),
+                        value=st.session_state.graph_settings.get(f"{current_gene}_font_size",
+                            st.session_state.graph_settings.get("font_size", 14)),
                         key=f"gf_{current_gene}",
                     )
-                    st.session_state.graph_settings["font_size"] = global_font
+                    st.session_state.graph_settings[f"{current_gene}_font_size"] = global_font
                     tick_size = st.slider(
                         "X-tick labels", 8, 24,
                         value=st.session_state.graph_settings.get(f"{current_gene}_tick_size", 12),
@@ -5377,38 +5525,47 @@ with tab4:
                     st.caption("**Bar Style**")
                     bar_opacity = st.slider(
                         "Bar opacity", 0.3, 1.0,
-                        value=float(st.session_state.graph_settings.get("bar_opacity", 0.95)),
+                        value=float(st.session_state.graph_settings.get(f"{current_gene}_bar_opacity",
+                            st.session_state.graph_settings.get("bar_opacity", 0.95))),
                         step=0.05, key=f"bo_{current_gene}",
                     )
-                    st.session_state.graph_settings["bar_opacity"] = bar_opacity
+                    st.session_state.graph_settings[f"{current_gene}_bar_opacity"] = bar_opacity
                     outline_width = st.slider(
                         "Outline width", 0, 3,
-                        value=int(st.session_state.graph_settings.get("marker_line_width", 1)),
+                        value=int(st.session_state.graph_settings.get(f"{current_gene}_marker_line_width",
+                            st.session_state.graph_settings.get("marker_line_width", 1))),
                         key=f"ow_{current_gene}",
                     )
-                    st.session_state.graph_settings["marker_line_width"] = outline_width
+                    st.session_state.graph_settings[f"{current_gene}_marker_line_width"] = outline_width
+                    y_min_key = f"{current_gene}_y_min"
+                    y_max_key = f"{current_gene}_y_max"
                     y_min_input = st.number_input(
                         "Y-axis min",
-                        value=None,
+                        value=st.session_state.graph_settings.get(y_min_key),
                         placeholder="Auto",
                         key=f"ymin_{current_gene}",
                         help="Leave empty for auto range",
                     )
                     y_max_input = st.number_input(
                         "Y-axis max",
-                        value=None,
+                        value=st.session_state.graph_settings.get(y_max_key),
                         placeholder="Auto",
                         key=f"ymax_{current_gene}",
                         help="Leave empty for auto range",
                     )
+                    if (y_min_input is not None and y_max_input is not None
+                            and y_min_input >= y_max_input):
+                        st.warning("Y-axis min must be less than max. Using auto range.")
+                        y_min_input = None
+                        y_max_input = None
                     if y_min_input is not None:
-                        st.session_state.graph_settings["y_min"] = y_min_input
-                    elif "y_min" in st.session_state.graph_settings:
-                        del st.session_state.graph_settings["y_min"]
+                        st.session_state.graph_settings[y_min_key] = y_min_input
+                    elif y_min_key in st.session_state.graph_settings:
+                        del st.session_state.graph_settings[y_min_key]
                     if y_max_input is not None:
-                        st.session_state.graph_settings["y_max"] = y_max_input
-                    elif "y_max" in st.session_state.graph_settings:
-                        del st.session_state.graph_settings["y_max"]
+                        st.session_state.graph_settings[y_max_key] = y_max_input
+                    elif y_max_key in st.session_state.graph_settings:
+                        del st.session_state.graph_settings[y_max_key]
 
                 st.markdown("---")
 
@@ -5460,6 +5617,15 @@ with tab4:
         current_settings["bar_gap"] = st.session_state.graph_settings.get(
             bar_gap_key, 0.25
         )
+        # Override global defaults with per-gene values
+        gs = st.session_state.graph_settings
+        current_settings["figure_width"] = gs.get(f"{current_gene}_figure_width", gs.get("figure_width", 28))
+        current_settings["figure_height"] = gs.get(f"{current_gene}_figure_height", gs.get("figure_height", 16))
+        current_settings["font_size"] = gs.get(f"{current_gene}_font_size", gs.get("font_size", 14))
+        current_settings["bar_opacity"] = gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.95))
+        current_settings["marker_line_width"] = gs.get(f"{current_gene}_marker_line_width", gs.get("marker_line_width", 1))
+        current_settings["y_min"] = gs.get(f"{current_gene}_y_min")
+        current_settings["y_max"] = gs.get(f"{current_gene}_y_max")
 
         display_gene_name = st.session_state.gene_display_names.get(current_gene, current_gene)
 
@@ -5550,11 +5716,14 @@ with tab5:
             "Housekeeping_Gene": st.session_state.hk_gene,
             "Reference_Sample": st.session_state.get("analysis_ref_condition", "N/A"),
             "Compare_To": st.session_state.get("analysis_cmp_condition", "N/A"),
+            "Compare_To_2": st.session_state.get("analysis_cmp_condition_2"),
+            "Compare_To_3": st.session_state.get("analysis_cmp_condition_3"),
             "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
             "concentration": st.session_state.experiment_desc.get("concentration", "1 ppm"),
             "treatment_time": st.session_state.experiment_desc.get("treatment_time", "24 h"),
+            "ttest_type": st.session_state.get("ttest_type", "welch"),
         }
 
         # ---- Group 1: Reports ----
@@ -5565,20 +5734,25 @@ with tab5:
         with rpt_col1:
             st.markdown("**Excel Report**")
             st.caption("Parameters, mapping, raw data, calculations, QC, FC matrix")
-            excel_data = export_to_excel(
-                st.session_state.data,
-                st.session_state.processed_data,
-                analysis_params,
-                st.session_state.sample_mapping,
-            )
-            st.download_button(
-                label="Download Excel",
-                data=excel_data,
-                file_name=f"qPCR_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True,
-            )
+            try:
+                excel_data = export_to_excel(
+                    st.session_state.data,
+                    st.session_state.processed_data,
+                    analysis_params,
+                    st.session_state.sample_mapping,
+                )
+            except Exception as e:
+                st.error(f"Excel export failed: {e}")
+                excel_data = None
+            if excel_data:
+                st.download_button(
+                    label="Download Excel",
+                    data=excel_data,
+                    file_name=f"qPCR_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
 
         with rpt_col2:
             st.markdown("**All Graphs (HTML)**")
@@ -5634,17 +5808,20 @@ with tab5:
                 key="gen_ppt_tab5",
             ):
                 with st.spinner("Generating PowerPoint..."):
-                    ppt_bytes = PPTGenerator.generate_presentation(
-                        st.session_state.graphs,
-                        st.session_state.processed_data,
-                        analysis_params,
-                        graph_settings=st.session_state.get("graph_settings"),
-                    )
-                    if ppt_bytes:
-                        st.session_state["ppt_export"] = ppt_bytes
-                        st.success("Generated!")
-                    else:
-                        st.error("Failed to generate PPT")
+                    try:
+                        ppt_bytes = PPTGenerator.generate_presentation(
+                            st.session_state.graphs,
+                            st.session_state.processed_data,
+                            analysis_params,
+                            graph_settings=st.session_state.get("graph_settings"),
+                        )
+                        if ppt_bytes:
+                            st.session_state["ppt_export"] = ppt_bytes
+                            st.success("Generated!")
+                        else:
+                            st.error("Failed to generate PPT — no data returned")
+                    except Exception as e:
+                        st.error(f"PPT generation failed: {e}")
 
             if "ppt_export" in st.session_state:
                 st.download_button(
@@ -5688,8 +5865,8 @@ with tab5:
                         fig_copy.update_layout(
                             width=img_width,
                             height=img_height,
-                            font=dict(size=14, family=PLOTLY_FONT_FAMILY),
-                            title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY)),
+                            font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
+                            title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY, color="black")),
                             margin=dict(b=180),
                         )
                         if "PNG" in img_format:
