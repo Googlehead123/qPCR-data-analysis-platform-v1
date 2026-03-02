@@ -2346,11 +2346,14 @@ class GraphGenerator:
         elif label_mode == "Angled 45\u00b0":
             max_label_len = max((len(str(c)) for c in condition_names), default=5)
             dynamic_b_margin = 140 + max_label_len * 4
+            max_label_lines = max(1, dynamic_b_margin // 22)
         elif label_mode == "Angled 90\u00b0":
             max_label_len = max((len(str(c)) for c in condition_names), default=5)
             dynamic_b_margin = 120 + max_label_len * 6
+            max_label_lines = max(1, dynamic_b_margin // 22)
         else:
             dynamic_b_margin = 140
+            max_label_lines = 1
 
         default_margins = gene_margins.copy()
         if default_margins.get("b", 200) < dynamic_b_margin:
