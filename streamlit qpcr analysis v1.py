@@ -2234,20 +2234,20 @@ class GraphGenerator:
             hashtag_font_size = 10
             dagger_font_size = 10
 
-            # Check if we need to show significance
-            if show_sig_global and bar_config.get("show_sig", True):
+            # Check if we need to show significance (per-symbol toggles)
+            if show_sig_global:
                 symbols_to_show = []
                 font_sizes = []
 
-                if sig_1 in ["*", "**", "***"]:
+                if sig_1 in ["*", "**", "***"] and bar_config.get("show_sig_1", bar_config.get("show_sig", True)):
                     symbols_to_show.append(sig_1)
                     font_sizes.append(asterisk_font_size)
 
-                if sig_2 in ["#", "##", "###"]:
+                if sig_2 in ["#", "##", "###"] and bar_config.get("show_sig_2", bar_config.get("show_sig", True)):
                     symbols_to_show.append(sig_2)
                     font_sizes.append(hashtag_font_size)
 
-                if sig_3 in ["\u2020", "\u2020\u2020", "\u2020\u2020\u2020"]:
+                if sig_3 in ["\u2020", "\u2020\u2020", "\u2020\u2020\u2020"] and bar_config.get("show_sig_3", bar_config.get("show_sig", True)):
                     symbols_to_show.append(sig_3)
                     font_sizes.append(dagger_font_size)
 
@@ -2319,20 +2319,39 @@ class GraphGenerator:
         if n_bars > 12 and gene_tick_size > 9:
             gene_tick_size = max(9, gene_tick_size - (n_bars - 12) // 3)
 
-        # Wrap x-axis labels - adaptive width based on number of bars
-        wrap_w = GraphGenerator._auto_wrap_width(
-            n_bars, effective_fig_width
-        )
-        wrapped_labels = [
-            GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
-        ]
+        # X-axis label mode: Auto-wrap / Angled 45° / Angled 90° / Horizontal
+        label_mode = settings.get("label_mode", "Auto-wrap")
+        x_tick_angle = 0
 
-        # FIX-19: Dynamic bottom margin based on max label line count
-        max_label_lines = max(
-            (label.count("<br>") + 1 for label in wrapped_labels), default=1
-        )
-        # Base margin + extra per line beyond 1 (~18px per line)
-        dynamic_b_margin = 180 + max(0, max_label_lines - 1) * 22
+        if label_mode == "Auto-wrap":
+            wrap_w = GraphGenerator._auto_wrap_width(n_bars, effective_fig_width)
+            wrapped_labels = [
+                GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
+            ]
+        elif label_mode == "Angled 45\u00b0":
+            wrapped_labels = [str(c) for c in condition_names]
+            x_tick_angle = -45
+        elif label_mode == "Angled 90\u00b0":
+            wrapped_labels = [str(c) for c in condition_names]
+            x_tick_angle = -90
+        else:  # Horizontal
+            wrapped_labels = [str(c) for c in condition_names]
+
+        # Dynamic bottom margin based on label mode and content
+        if label_mode == "Auto-wrap":
+            max_label_lines = max(
+                (label.count("<br>") + 1 for label in wrapped_labels), default=1
+            )
+            dynamic_b_margin = 180 + max(0, max_label_lines - 1) * 22
+        elif label_mode == "Angled 45\u00b0":
+            max_label_len = max((len(str(c)) for c in condition_names), default=5)
+            dynamic_b_margin = 140 + max_label_len * 4
+        elif label_mode == "Angled 90\u00b0":
+            max_label_len = max((len(str(c)) for c in condition_names), default=5)
+            dynamic_b_margin = 120 + max_label_len * 6
+        else:
+            dynamic_b_margin = 140
+
         default_margins = gene_margins.copy()
         if default_margins.get("b", 200) < dynamic_b_margin:
             default_margins["b"] = dynamic_b_margin
@@ -2383,7 +2402,7 @@ class GraphGenerator:
                 tickvals=list(range(n_bars)),
                 ticktext=wrapped_labels,
                 tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY, color="black"),
-                tickangle=0,
+                tickangle=x_tick_angle,
                 ticks="outside",
                 ticklen=8,
                 tickcolor="rgba(0,0,0,0)",
@@ -5446,11 +5465,17 @@ with tab4:
                     f"{current_gene}_marker_line_width", f"{current_gene}_tick_size",
                     f"{current_gene}_ylabel_size", f"{current_gene}_bg_color",
                     f"{current_gene}_y_min", f"{current_gene}_y_max",
+                    f"{current_gene}_label_mode",
                 ]:
                     st.session_state.graph_settings.pop(per_gene_key, None)
                 st.rerun()
 
-        # Toolbar row 2: ref line selector
+        # Toolbar row 2: ref line + label mode
+        label_mode_key = f"{current_gene}_label_mode"
+        label_modes = ["Auto-wrap", "Angled 45\u00b0", "Angled 90\u00b0", "Horizontal"]
+        if label_mode_key not in st.session_state.graph_settings:
+            st.session_state.graph_settings[label_mode_key] = "Auto-wrap"
+
         tb_row2 = st.columns([2, 2])
         with tb_row2[0]:
             selected_ref = st.selectbox(
@@ -5463,6 +5488,15 @@ with tab4:
                 help="Horizontal dashed line at a condition's expression level",
             )
             st.session_state.graph_settings[ref_line_key] = selected_ref
+        with tb_row2[1]:
+            label_mode = st.selectbox(
+                "Label Mode",
+                label_modes,
+                index=label_modes.index(st.session_state.graph_settings.get(label_mode_key, "Auto-wrap")),
+                key=f"lbl_mode_{current_gene}",
+                help="How x-axis labels handle long text",
+            )
+            st.session_state.graph_settings[label_mode_key] = label_mode
 
         if f"{current_gene}_bar_settings" not in st.session_state:
             st.session_state[f"{current_gene}_bar_settings"] = {}
@@ -5478,8 +5512,16 @@ with tab4:
                 st.session_state[f"{current_gene}_bar_settings"][bar_key] = {
                     "color": default_color,
                     "show_sig": True,
+                    "show_sig_1": True,
+                    "show_sig_2": True,
+                    "show_sig_3": True,
                     "show_err": True,
                 }
+            # Migrate old entries missing per-symbol keys
+            bs = st.session_state[f"{current_gene}_bar_settings"][bar_key]
+            for sk in ("show_sig_1", "show_sig_2", "show_sig_3"):
+                if sk not in bs:
+                    bs[sk] = bs.get("show_sig", True)
 
         with st.expander("Settings & Colors", expanded=False):
                 s_col1, s_col2, s_col3, s_col4 = st.columns(4)
@@ -5593,41 +5635,50 @@ with tab4:
 
                 st.markdown("---")
 
-                st.markdown("**Bar Colors**")
-                n_bars = len(gene_data)
-                n_cols = min(n_bars, 4)
-                color_cols = st.columns(n_cols)
+                st.markdown("**Per-Bar Settings**")
+                # Header row
+                hdr = st.columns([3, 0.8, 0.6, 0.6, 0.6, 0.6])
+                hdr[0].markdown("<small>**Sample**</small>", unsafe_allow_html=True)
+                hdr[1].markdown("<small>**Color**</small>", unsafe_allow_html=True)
+                hdr[2].markdown("<small>**\\***</small>", unsafe_allow_html=True)
+                hdr[3].markdown("<small>**#**</small>", unsafe_allow_html=True)
+                hdr[4].markdown("<small>**\u2020**</small>", unsafe_allow_html=True)
+                hdr[5].markdown("<small>**\u00b1**</small>", unsafe_allow_html=True)
 
                 for idx, (_, row) in enumerate(gene_data.iterrows()):
                     condition = row["Condition"]
                     group = row.get("Group", "Treatment")
                     bar_key = f"{current_gene}_{condition}"
+                    bs = st.session_state[f"{current_gene}_bar_settings"][bar_key]
 
-                    with color_cols[idx % n_cols]:
-                        lbl = condition if len(condition) <= 15 else condition[:12] + "..."
-                        st.caption(f"**{lbl}** ({group})")
-                        new_color = st.color_picker(
-                            "Color",
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"],
-                            key=f"cp_{current_gene}_{idx}",
-                            help=condition,
-                        )
-                        st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"] = new_color
-                        st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = new_color
-
-                        cb1, cb2 = st.columns(2)
-                        with cb1:
-                            sig_bar = st.checkbox(
-                                "*", st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_sig"],
-                                key=f"sb_{current_gene}_{idx}", help="Significance",
-                            )
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_sig"] = sig_bar
-                        with cb2:
-                            err_bar = st.checkbox(
-                                "±", st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_err"],
-                                key=f"eb_{current_gene}_{idx}", help="Error bar",
-                            )
-                            st.session_state[f"{current_gene}_bar_settings"][bar_key]["show_err"] = err_bar
+                    rc = st.columns([3, 0.8, 0.6, 0.6, 0.6, 0.6])
+                    lbl = condition if len(condition) <= 22 else condition[:19] + "..."
+                    rc[0].markdown(f"<small>{lbl} <span style='color:#888;'>({group})</span></small>", unsafe_allow_html=True)
+                    new_color = rc[1].color_picker(
+                        "c", bs["color"],
+                        key=f"cp_{current_gene}_{idx}",
+                        label_visibility="collapsed",
+                    )
+                    bs["color"] = new_color
+                    st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = new_color
+                    bs["show_sig_1"] = rc[2].checkbox(
+                        "s1", bs.get("show_sig_1", True),
+                        key=f"s1_{current_gene}_{idx}", label_visibility="collapsed",
+                    )
+                    bs["show_sig_2"] = rc[3].checkbox(
+                        "s2", bs.get("show_sig_2", True),
+                        key=f"s2_{current_gene}_{idx}", label_visibility="collapsed",
+                    )
+                    bs["show_sig_3"] = rc[4].checkbox(
+                        "s3", bs.get("show_sig_3", True),
+                        key=f"s3_{current_gene}_{idx}", label_visibility="collapsed",
+                    )
+                    bs["show_err"] = rc[5].checkbox(
+                        "err", bs.get("show_err", True),
+                        key=f"eb_{current_gene}_{idx}", label_visibility="collapsed",
+                    )
+                    # Keep legacy show_sig in sync (all-or-nothing fallback)
+                    bs["show_sig"] = bs["show_sig_1"] or bs["show_sig_2"] or bs["show_sig_3"]
 
                 _bar_settings = st.session_state[f"{current_gene}_bar_settings"]
 
@@ -5650,6 +5701,7 @@ with tab4:
         current_settings["marker_line_width"] = gs.get(f"{current_gene}_marker_line_width", gs.get("marker_line_width", 1))
         current_settings["y_min"] = gs.get(f"{current_gene}_y_min")
         current_settings["y_max"] = gs.get(f"{current_gene}_y_max")
+        current_settings["label_mode"] = gs.get(f"{current_gene}_label_mode", "Auto-wrap")
 
         display_gene_name = st.session_state.gene_display_names.get(current_gene, current_gene)
 
