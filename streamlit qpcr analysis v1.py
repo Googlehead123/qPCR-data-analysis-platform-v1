@@ -2386,10 +2386,14 @@ class GraphGenerator:
                 f"<br><b>3rd Comparison{legend_ref_label_3}:</b>  \u2020 p<0.05  \u2020\u2020 p<0.01  \u2020\u2020\u2020 p<0.001"
             )
 
+        # Reserve extra bottom margin for the significance legend below labels
+        legend_line_count = legend_text.count("<br>") + 1
+        legend_extra_px = legend_line_count * 18 + 20
+
         fig_h_px = int(settings.get("figure_height", 16) * CM_TO_PX)
         b_margin_px = gene_margins.get("b", 200)
         t_margin_px = gene_margins.get("t", 60)
-        plot_h_px = max(fig_h_px - b_margin_px - t_margin_px, 100)
+        plot_h_px = max(fig_h_px - b_margin_px - legend_extra_px - t_margin_px, 100)
 
         fig.update_layout(
             title="",
@@ -2421,21 +2425,23 @@ class GraphGenerator:
             paper_bgcolor="#FFFFFF",
             margin=dict(
                 l=gene_margins.get("l", 80),
-                r=max(gene_margins.get("r", 40), 220),
+                r=gene_margins.get("r", 40),
                 t=t_margin_px,
-                b=b_margin_px,
+                b=b_margin_px + legend_extra_px,
             ),
         )
 
-        # Place significance legend outside the plot to the right so it
-        # never overlaps bars or gets clipped by bottom margin in exports.
+        # Place significance legend below the plot, beneath x-axis labels.
+        # legend_extra_px of bottom margin was reserved above so it never clips.
+        label_px_est = max_label_lines * 18 + 10
+        legend_y_frac = -((label_px_est + 8) / plot_h_px)
         fig.add_annotation(
             text=legend_text,
             xref="paper",
             yref="paper",
-            x=1.02,
-            y=1.0,
-            xanchor="left",
+            x=1.0,
+            y=legend_y_frac,
+            xanchor="right",
             yanchor="top",
             showarrow=False,
             font=dict(size=9, color="#666666", family=PLOTLY_FONT_FAMILY),
@@ -2676,11 +2682,10 @@ class ReportGenerator:
         # Preserve the figure's bottom margin (may be large for angled labels)
         orig_margin = fig.layout.margin
         orig_b = orig_margin.b if orig_margin and orig_margin.b else 140
-        orig_r = orig_margin.r if orig_margin and orig_margin.r else 60
         fig_copy.update_layout(
-            width=1000 + max(0, orig_r - 60),
+            width=1000,
             height=550 + max(0, orig_b - 80),
-            margin=dict(l=60, r=max(60, orig_r), t=60, b=max(80, orig_b)),
+            margin=dict(l=60, r=60, t=60, b=max(80, orig_b)),
             font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
         )
 
@@ -3025,8 +3030,7 @@ class PPTGenerator:
         try:
             orig_m = fig.layout.margin
             extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
-            extra_r = max(0, (orig_m.r if orig_m and orig_m.r else 0) - 60)
-            img_bytes = fig.to_image(format="png", scale=2, width=1200 + extra_r, height=900 + extra_b)
+            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=900 + extra_b)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
@@ -5947,13 +5951,12 @@ with tab5:
                         fig_copy = go.Figure(fig)
                         _orig_m = fig.layout.margin
                         _pub_b = max(180, _orig_m.b if _orig_m and _orig_m.b else 180)
-                        _pub_r = max(60, _orig_m.r if _orig_m and _orig_m.r else 60)
                         fig_copy.update_layout(
-                            width=img_width + max(0, _pub_r - 60),
+                            width=img_width,
                             height=img_height + max(0, _pub_b - 180),
                             font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
                             title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY, color="black")),
-                            margin=dict(b=_pub_b, r=_pub_r),
+                            margin=dict(b=_pub_b),
                         )
                         if "PNG" in img_format:
                             img_bytes = fig_copy.to_image(
@@ -6025,15 +6028,13 @@ with tab5:
                                     fig_copy = go.Figure(fig)
                                     _zm = fig.layout.margin
                                     _zb = max(180, _zm.b if _zm and _zm.b else 180)
-                                    _zr = max(60, _zm.r if _zm and _zm.r else 60)
-                                    _zw = img_width + max(0, _zr - 60)
                                     _zh = img_height + max(0, _zb - 180)
                                     fig_copy.update_layout(
-                                        width=_zw, height=_zh, margin=dict(b=_zb, r=_zr),
+                                        width=img_width, height=_zh, margin=dict(b=_zb),
                                         font=dict(family=PLOTLY_FONT_FAMILY),
                                     )
                                     png_bytes = fig_copy.to_image(
-                                        format="png", scale=3, width=_zw, height=_zh,
+                                        format="png", scale=3, width=img_width, height=_zh,
                                     )
                                     zf.writestr(f"{gene}_300dpi.png", png_bytes)
                                     svg_bytes = fig_copy.to_image(
@@ -6134,15 +6135,13 @@ with tab5:
                                 fig_copy = go.Figure(fig)
                                 _rm = fig.layout.margin
                                 _rb = max(180, _rm.b if _rm and _rm.b else 180)
-                                _rr = max(60, _rm.r if _rm and _rm.r else 60)
-                                _rw = img_width + max(0, _rr - 60)
                                 _rh = img_height + max(0, _rb - 180)
                                 fig_copy.update_layout(
-                                    width=_rw, height=_rh, margin=dict(b=_rb, r=_rr),
+                                    width=img_width, height=_rh, margin=dict(b=_rb),
                                     font=dict(family=PLOTLY_FONT_FAMILY),
                                 )
                                 png_bytes = fig_copy.to_image(
-                                    format="png", scale=3, width=_rw, height=_rh,
+                                    format="png", scale=3, width=img_width, height=_rh,
                                 )
                                 zf.writestr(f"figures/{gene}_300dpi.png", png_bytes)
                                 svg_bytes = fig_copy.to_image(
