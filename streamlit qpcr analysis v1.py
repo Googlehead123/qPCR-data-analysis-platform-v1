@@ -2023,10 +2023,11 @@ class GraphGenerator:
         """Calculate optimal wrap width based on number of bars and figure width.
 
         Adapts like Excel cell wrapping: more bars → narrower wrap.
+        Minimum 10 chars to keep labels readable even with 20+ bars.
         """
         px_per_bar = (fig_width_cm * 37.8) / max(n_bars, 1)
-        chars_per_bar = max(int(px_per_bar / 8), 6)
-        return min(chars_per_bar, 25)
+        chars_per_bar = max(int(px_per_bar / 7), 10)
+        return min(chars_per_bar, 30)
 
     @staticmethod
     def create_gene_graph(
@@ -2309,9 +2310,18 @@ class GraphGenerator:
         )
         gene_tick_size = settings.get(f"{gene}_tick_size", 12)
 
+        # Auto-scale figure width for many bars (minimum 1.4cm per bar)
+        configured_width = settings.get("figure_width", 28)
+        min_width_for_bars = n_bars * 1.4
+        effective_fig_width = max(configured_width, min_width_for_bars)
+
+        # Auto-reduce tick font for dense graphs (>12 bars)
+        if n_bars > 12 and gene_tick_size > 9:
+            gene_tick_size = max(9, gene_tick_size - (n_bars - 12) // 3)
+
         # Wrap x-axis labels - adaptive width based on number of bars
         wrap_w = GraphGenerator._auto_wrap_width(
-            n_bars, settings.get("figure_width", 28)
+            n_bars, effective_fig_width
         )
         wrapped_labels = [
             GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
@@ -2386,7 +2396,7 @@ class GraphGenerator:
             template=settings.get("color_scheme", "plotly_white"),
             font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY, color="black"),
             height=fig_h_px,
-            width=int(settings.get("figure_width", 28) * CM_TO_PX),
+            width=int(effective_fig_width * CM_TO_PX),
             bargap=gene_bar_gap,
             showlegend=settings.get("show_legend", False),
             plot_bgcolor=gene_bg_color,
@@ -3005,9 +3015,12 @@ class PPTGenerator:
             )
             err_box.text = f"Graph Error: {str(e)}"
 
-        # Data Table
+        # Data Table (limit to 12 rows to prevent slide overflow)
         if gene_data is not None and not gene_data.empty:
-            rows = len(gene_data) + 1
+            max_table_rows = 12
+            display_data = gene_data.head(max_table_rows) if len(gene_data) > max_table_rows else gene_data
+            overflow_note = f" (+{len(gene_data) - max_table_rows} more in Excel)" if len(gene_data) > max_table_rows else ""
+            rows = len(display_data) + 1
             cols = 4  # Sample, Condition, Fold Change, P-value
             table_height = Inches(0.3 * rows)
             table_shape = slide.shapes.add_table(
@@ -3024,9 +3037,8 @@ class PPTGenerator:
                 cell.text_frame.paragraphs[0].font.bold = True
 
             # Data
-            for i, row in enumerate(gene_data.itertuples()):
+            for i, row in enumerate(display_data.itertuples()):
                 r = i + 1
-                # Handle potential missing columns gracefully
                 sample_val = getattr(row, "Original_Sample", getattr(row, "Sample", ""))
                 cond_val = getattr(row, "Condition", "")
                 fc_val = getattr(
@@ -3035,13 +3047,21 @@ class PPTGenerator:
                 pval = getattr(row, "p_value", None)
                 sig = getattr(row, "significance", "")
 
-                table.cell(r, 0).text = str(sample_val)
-                table.cell(r, 1).text = str(cond_val)
+                table.cell(r, 0).text = str(sample_val)[:30]
+                table.cell(r, 1).text = str(cond_val)[:30]
                 table.cell(r, 2).text = f"{fc_val:.2f}" if pd.notna(fc_val) else "-"
                 table.cell(r, 3).text = f"{pval:.4f} {sig}" if pd.notna(pval) else "-"
 
                 for j in range(4):
                     table.cell(r, j).text_frame.paragraphs[0].font.size = Pt(9)
+
+            if overflow_note:
+                note_box = slide.shapes.add_textbox(
+                    Inches(0.5), Inches(5.8 + 0.3 * rows), Inches(6.0), Inches(0.3)
+                )
+                note_box.text_frame.paragraphs[0].text = f"Showing {max_table_rows}/{len(gene_data)} conditions{overflow_note}"
+                note_box.text_frame.paragraphs[0].font.size = Pt(8)
+                note_box.text_frame.paragraphs[0].font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
         # Metadata Box
         meta_box = slide.shapes.add_textbox(
@@ -3534,7 +3554,8 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
             headers.extend(["p_value_3", "significance_3"])
         for ci, h in enumerate(headers):
             ws.cell(row=hdr_row, column=3 + ci, value=h)
-        ws.column_dimensions["C"].width = 18
+        max_cond_len = max((len(str(c)) for c in conditions), default=10)
+        ws.column_dimensions["C"].width = max(18, min(max_cond_len + 2, 45))
         for col_letter in ("D", "E", "F", "G"):
             ws.column_dimensions[col_letter].width = 14
 
@@ -3570,7 +3591,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
         chart.varyColors = False
         chart.legend = None
         chart.title = None
-        chart.width = 15
+        chart.width = max(15, n_rows * 1.2)
         chart.height = 7.5
         chart.gapWidth = 219
         chart.overlap = -27
@@ -4798,6 +4819,7 @@ with tab2:
                         key=f"cond_{sample}_{i}",
                         label_visibility="collapsed",
                         placeholder="Enter condition name...",
+                        max_chars=50,
                     )
                     st.session_state.sample_mapping[sample]["condition"] = cond
 
@@ -4853,7 +4875,9 @@ with tab2:
             if reorder_mode == "Arrow buttons (fast)":
                 for i, sample in enumerate(included_order):
                     cond = st.session_state.sample_mapping.get(sample, {}).get("condition", sample)
-                    lbl = f"{cond}  ({sample})" if cond != sample else sample
+                    cond_short = cond if len(cond) <= 25 else cond[:22] + "..."
+                    sample_short = sample if len(sample) <= 20 else sample[:17] + "..."
+                    lbl = f"{cond_short}  ({sample_short})" if cond != sample else sample_short
                     btn_cols = st.columns([0.5, 0.5, 5])
                     with btn_cols[0]:
                         if i > 0 and st.button("\u2191", key=f"up_{sample}", help="Move up"):
