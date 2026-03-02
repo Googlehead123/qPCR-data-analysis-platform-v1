@@ -2391,10 +2391,6 @@ class GraphGenerator:
         t_margin_px = gene_margins.get("t", 60)
         plot_h_px = max(fig_h_px - b_margin_px - t_margin_px, 100)
 
-        # Dynamic legend y: place below x-axis labels with gap
-        label_px_est = max_label_lines * 18 + 10
-        legend_y = -((label_px_est / plot_h_px) + 0.06)
-
         fig.update_layout(
             title="",
             xaxis=dict(
@@ -2431,20 +2427,22 @@ class GraphGenerator:
             ),
         )
 
+        # Place significance legend inside the plot (top-right) so it never
+        # gets clipped by bottom margin in PPT/image exports.
         fig.add_annotation(
             text=legend_text,
             xref="paper",
             yref="paper",
             x=1.0,
-            y=legend_y,
+            y=1.0,
             xanchor="right",
             yanchor="top",
             showarrow=False,
-            font=dict(size=10, color="#888888", family=PLOTLY_FONT_FAMILY),
-            bgcolor="rgba(255,255,255,0.85)",
-            bordercolor="#DDDDDD",
+            font=dict(size=9, color="#666666", family=PLOTLY_FONT_FAMILY),
+            bgcolor="rgba(255,255,255,0.90)",
+            bordercolor="#CCCCCC",
             borderwidth=1,
-            borderpad=3,
+            borderpad=4,
         )
 
         if ref_line_value is not None and pd.notna(ref_line_value):
@@ -2675,10 +2673,13 @@ class ReportGenerator:
             graph_top = Inches(1.2)
 
         fig_copy = go.Figure(fig)
+        # Preserve the figure's bottom margin (may be large for angled labels)
+        orig_margin = fig.layout.margin
+        orig_b = orig_margin.b if orig_margin and orig_margin.b else 140
         fig_copy.update_layout(
             width=1000,
-            height=550,
-            margin=dict(l=60, r=60, t=60, b=80),
+            height=550 + max(0, orig_b - 80),
+            margin=dict(l=60, r=60, t=60, b=max(80, orig_b)),
             font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
         )
 
@@ -3021,8 +3022,9 @@ class PPTGenerator:
 
         # Graph
         try:
-            # Convert fig to image
-            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=900)
+            orig_m = fig.layout.margin
+            extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
+            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=900 + extra_b)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
@@ -5941,12 +5943,14 @@ with tab5:
                 with img_cols[col_idx]:
                     try:
                         fig_copy = go.Figure(fig)
+                        _orig_m = fig.layout.margin
+                        _pub_b = max(180, _orig_m.b if _orig_m and _orig_m.b else 180)
                         fig_copy.update_layout(
                             width=img_width,
-                            height=img_height,
+                            height=img_height + max(0, _pub_b - 180),
                             font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
                             title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY, color="black")),
-                            margin=dict(b=180),
+                            margin=dict(b=_pub_b),
                         )
                         if "PNG" in img_format:
                             img_bytes = fig_copy.to_image(
