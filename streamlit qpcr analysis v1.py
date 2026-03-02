@@ -4761,8 +4761,8 @@ with tab2:
                 st.session_state.sample_mapping[sample]["include"] = True
 
         # Header row matching column proportions below
-        hdr0, hdr_ord, hdr1, hdr2, hdr3 = st.columns([0.5, 0.8, 2, 3.5, 2.5])
-        hdr0.markdown("**Incl.**")
+        hdr0, hdr_ord, hdr1, hdr2, hdr3 = st.columns([0.6, 0.5, 2, 3.5, 2.5])
+        hdr0.markdown("**Use**")
         hdr_ord.markdown("**#**")
         hdr1.markdown("**Original**")
         hdr2.markdown("**Condition Name**")
@@ -4779,7 +4779,7 @@ with tab2:
             # Container for each row
             with st.container():
                 col0, col_order, col1, col2, col3 = st.columns(
-                    [0.5, 0.8, 2, 3.5, 2.5]
+                    [0.6, 0.5, 2, 3.5, 2.5]
                 )
 
                 # Include checkbox
@@ -5255,13 +5255,13 @@ with tab3:
         )
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Genes Analyzed", len(st.session_state.processed_data))
+        col1.metric("Genes", len(st.session_state.processed_data))
         col2.metric("Conditions", all_results["Condition"].nunique())
         sig_count = (all_results["p_value"] < 0.05).sum()
         total_testable = all_results["p_value"].notna().sum()
-        col3.metric("Significant (p<0.05)", f"{sig_count}/{total_testable}")
+        col3.metric("Sig. (p<0.05)", f"{sig_count}/{total_testable}")
         excluded_well_count = sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells)
-        col4.metric("Excluded Wells", excluded_well_count)
+        col4.metric("Excluded", excluded_well_count)
 
         # Show results per gene
         st.subheader("Gene-by-Gene Results")
@@ -5410,10 +5410,10 @@ with tab4:
             st.session_state.graph_settings[ref_line_key] = "None"
 
         # Toolbar row 1: toggles and reset
-        tb_row1 = st.columns([1, 1, 1, 1])
+        tb_row1 = st.columns([1.2, 1.2, 1.5, 0.8])
         with tb_row1[0]:
             sig_on = st.toggle(
-                "Significance",
+                "Sig. */#/\u2020",
                 st.session_state.graph_settings[show_sig_key],
                 key=f"tgl_sig_{current_gene}",
             )
