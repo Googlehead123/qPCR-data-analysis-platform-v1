@@ -5647,6 +5647,27 @@ with tab4:
                 st.markdown("---")
 
                 st.markdown("**Per-Bar Settings**")
+                # Sort gene_data to match graph bar order (sample_order → condition)
+                _bar_display_data = gene_data.copy()
+                _so = st.session_state.get("sample_order", [])
+                _sm = st.session_state.get("sample_mapping", {})
+                if _so and _sm:
+                    _cond_order = []
+                    _seen = set()
+                    for _s in _so:
+                        if _sm.get(_s, {}).get("include", True):
+                            _c = _sm.get(_s, {}).get("condition", _s)
+                            if _c in _bar_display_data["Condition"].values and _c not in _seen:
+                                _cond_order.append(_c)
+                                _seen.add(_c)
+                    for _c in _bar_display_data["Condition"].unique():
+                        if _c not in _seen:
+                            _cond_order.append(_c)
+                    _bar_display_data["Condition"] = pd.Categorical(
+                        _bar_display_data["Condition"], categories=_cond_order, ordered=True
+                    )
+                    _bar_display_data = _bar_display_data.sort_values("Condition").reset_index(drop=True)
+
                 # Header row
                 hdr = st.columns([3, 0.8, 0.6, 0.6, 0.6, 0.6])
                 hdr[0].markdown("<small>**Sample**</small>", unsafe_allow_html=True)
@@ -5656,7 +5677,7 @@ with tab4:
                 hdr[4].markdown("<small>**\u2020**</small>", unsafe_allow_html=True)
                 hdr[5].markdown("<small>**\u00b1**</small>", unsafe_allow_html=True)
 
-                for idx, (_, row) in enumerate(gene_data.iterrows()):
+                for idx, (_, row) in enumerate(_bar_display_data.iterrows()):
                     condition = row["Condition"]
                     group = row.get("Group", "Treatment")
                     bar_key = f"{current_gene}_{condition}"
