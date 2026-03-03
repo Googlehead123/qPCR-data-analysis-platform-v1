@@ -2993,7 +2993,7 @@ class PPTGenerator:
         p.alignment = PP_ALIGN.RIGHT
 
     @staticmethod
-    def create_gene_slide(prs, gene, fig, gene_data, analysis_params):
+    def create_gene_slide(prs, gene, fig, gene_data, analysis_params, graph_settings=None):
         from pptx.util import Inches, Pt
         from pptx.enum.text import PP_ALIGN
         from pptx.enum.shapes import MSO_SHAPE
@@ -3026,11 +3026,14 @@ class PPTGenerator:
         line.fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.NAVY_BLUE)
         line.line.fill.background()
 
-        # Graph
+        # Graph — use per-gene dimensions from graph_settings if available
+        gs = graph_settings or {}
+        fb_w = max(int(gs.get(f"{gene}_figure_width", gs.get("figure_width", 28)) * CM_TO_PX), 800)
+        fb_h = max(int(gs.get(f"{gene}_figure_height", gs.get("figure_height", 16)) * CM_TO_PX), 500)
         try:
             orig_m = fig.layout.margin
             extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
-            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=900 + extra_b)
+            img_bytes = fig.to_image(format="png", scale=2, width=fb_w, height=fb_h + extra_b)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
@@ -3274,8 +3277,8 @@ class PPTGenerator:
 
         # Add graph image
         gs = graph_settings or {}
-        w_cm = gs.get("figure_width", 28)
-        h_cm = gs.get("figure_height", 16)
+        w_cm = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
+        h_cm = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
 
         fig_copy = go.Figure(fig)
         fig_copy.update_layout(
@@ -3384,7 +3387,7 @@ class PPTGenerator:
                 fig = graphs[gene]
                 gene_data = processed_data.get(gene)
                 PPTGenerator.create_gene_slide(
-                    prs, gene, fig, gene_data, analysis_params
+                    prs, gene, fig, gene_data, analysis_params, graph_settings=gs
                 )
 
         output = io.BytesIO()
@@ -5791,6 +5794,26 @@ with tab4:
                 gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.25)
                 gs["figure_height"] = 12
                 gs["figure_width"] = 20
+                gs["font_size"] = gs.get(f"{gene}_font_size", gs.get("font_size", 14))
+                gs["bar_opacity"] = gs.get(f"{gene}_bar_opacity", gs.get("bar_opacity", 0.95))
+                gs["marker_line_width"] = gs.get(f"{gene}_marker_line_width", gs.get("marker_line_width", 1))
+                gs["y_min"] = gs.get(f"{gene}_y_min")
+                gs["y_max"] = gs.get(f"{gene}_y_max")
+                gs["label_mode"] = gs.get(f"{gene}_label_mode", "Auto-wrap")
+                gs["tick_size"] = gs.get(f"{gene}_tick_size", gs.get("tick_size", 12))
+                gs["ylabel_size"] = gs.get(f"{gene}_ylabel_size", gs.get("ylabel_size", 14))
+                gs["bg_color"] = gs.get(f"{gene}_bg_color", gs.get("bg_color", "#FFFFFF"))
+
+                qv_ref_condition = st.session_state.graph_settings.get(f"{gene}_ref_line", "None")
+                qv_ref_val = None
+                qv_ref_lbl = None
+                if qv_ref_condition != "None":
+                    qv_ref_rows = gd[gd["Condition"] == qv_ref_condition]
+                    if not qv_ref_rows.empty:
+                        _qv_rv = qv_ref_rows["Relative_Expression"].values[0]
+                        if pd.notna(_qv_rv):
+                            qv_ref_val = _qv_rv
+                            qv_ref_lbl = f"{qv_ref_condition}: {_qv_rv:.2f}"
 
                 f = GraphGenerator.create_gene_graph(
                     gd,
@@ -5800,13 +5823,14 @@ with tab4:
                     sample_order=st.session_state.get("sample_order"),
                     condition_colors=st.session_state.get("condition_colors", {}),
                     display_gene_name=st.session_state.gene_display_names.get(gene, gene),
+                    ref_line_value=qv_ref_val,
+                    ref_line_label=qv_ref_lbl,
                 )
 
                 with all_gene_cols[idx % len(all_gene_cols)]:
                     st.markdown(f"**{gene}**")
                     st.plotly_chart(f, use_container_width=True, key=f"mini_{gene}")
-                    if gene not in st.session_state.graphs:
-                        st.session_state.graphs[gene] = f
+                    st.session_state.graphs[gene] = f
     else:
         st.info(
             "⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'"
