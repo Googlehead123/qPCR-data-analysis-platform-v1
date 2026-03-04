@@ -1267,8 +1267,10 @@ class QualityControl:
 
         for r_idx, row_letter in enumerate(rows):
             for c_idx, col_num in enumerate(cols):
+                # Check both zero-padded (A01) and unpadded (A1) formats
                 well_name = f"{row_letter}{col_num}"
-                if well_name in excluded_wells:
+                well_name_padded = f"{row_letter}{col_num:02d}"
+                if well_name in excluded_wells or well_name_padded in excluded_wells:
                     fig.add_annotation(
                         x=str(col_num),
                         y=row_letter,
@@ -1508,18 +1510,19 @@ class AnalysisEngine:
                 ddct_clamped = np.clip(ddct, -50, 50)
                 rel_expr = 2 ** (-ddct_clamped)
 
-                target_sd = target_ct_values.std() if len(target_ct_values) > 1 else 0
-                hk_sd = hk_ct_values.std() if len(hk_ct_values) > 1 else 0
+                target_sd = target_ct_values.std(ddof=1) if len(target_ct_values) > 1 else np.nan
+                hk_sd = hk_ct_values.std(ddof=1) if len(hk_ct_values) > 1 else np.nan
                 n_target = len(target_ct_values)
                 n_hk = len(hk_ct_values)
 
-                target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else 0
+                target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else np.nan
 
                 # SD and SEM reflect target gene CT variation only.
                 # HK gene variability is tracked separately (HK_Ct_SD) but
                 # should not inflate the error bars on relative expression graphs.
-                sd = target_sd
-                sem = target_sem
+                # NaN for n=1 means "unknown" — error bars won't be drawn.
+                sd = target_sd if pd.notna(target_sd) else 0
+                sem = target_sem if pd.notna(target_sem) else 0
 
                 # Get original sample name and group
                 original_sample = cond_data["Sample"].iloc[0]
@@ -1950,21 +1953,30 @@ class AnalysisEngine:
 
                 # --- Statistical test ---
                 ttest_type = st.session_state.get("ttest_type", "welch")
+                # Pre-filter raw_data by excluded samples so statistics
+                # never sees data the user chose to exclude
+                stats_raw = data[
+                    ~data["Sample"].isin(st.session_state.get("excluded_samples", set()))
+                ].copy()
                 try:
                     processed_with_stats = AnalysisEngine.calculate_statistics(
                         processed_df,
                         cmp_condition,
                         cmp_condition_2,
                         cmp_condition_3,
-                        raw_data=data,
+                        raw_data=stats_raw,
                         hk_gene=hk_gene,
                         sample_mapping=mapping,
                         ttest_type=ttest_type,
                         excluded_wells=st.session_state.get("excluded_wells", {}),
                     )
-                except TypeError:
+                except TypeError as te:
+                    st.warning(f"Statistics fallback triggered (secondary/tertiary comparisons dropped): {te}")
                     processed_with_stats = AnalysisEngine.calculate_statistics(
-                        processed_df, cmp_condition, ttest_type=ttest_type
+                        processed_df, cmp_condition, ttest_type=ttest_type,
+                        raw_data=stats_raw, hk_gene=hk_gene,
+                        sample_mapping=mapping,
+                        excluded_wells=st.session_state.get("excluded_wells", {}),
                     )
 
                 # FIX-16: Display warning when one-sample t-test was used
@@ -2194,15 +2206,14 @@ class GraphGenerator:
         )
 
         # Calculate y-axis range FIRST (needed for absolute positioning of significance)
-        max_y_value = gene_data_indexed["Relative_Expression"].max()
-        if pd.isna(max_y_value) or max_y_value <= 0:
-            max_y_value = 1.0  # Fallback for all-NaN or zero expression
-        max_error = error_array.max() if len(error_array) > 0 else 0
-        if pd.isna(max_error):
-            max_error = 0
-        y_max_auto = (
-            max_y_value + max_error + (max_y_value * 0.15)
-        )
+        # Use per-bar top (expression + error) to avoid over-estimation when
+        # the tallest bar and the largest error bar are on different bars
+        expr_vals = gene_data_indexed["Relative_Expression"].values
+        per_bar_tops = expr_vals + error_array if len(error_array) == len(expr_vals) else expr_vals
+        max_bar_top = np.nanmax(per_bar_tops) if len(per_bar_tops) > 0 else 1.0
+        if pd.isna(max_bar_top) or max_bar_top <= 0:
+            max_bar_top = 1.0
+        y_max_auto = max_bar_top + (max_bar_top * 0.15)
         if ref_line_value is not None and pd.notna(ref_line_value):
             y_max_auto = max(y_max_auto, ref_line_value * 1.20)
 
@@ -3048,9 +3059,9 @@ class PPTGenerator:
             )
             err_box.text = f"Graph Error: {str(e)}"
 
-        # Data Table (limit to 12 rows to prevent slide overflow)
+        # Data Table (limit to 5 rows to prevent slide overflow — slide height is 7.5")
         if gene_data is not None and not gene_data.empty:
-            max_table_rows = 12
+            max_table_rows = 5
             display_data = gene_data.head(max_table_rows) if len(gene_data) > max_table_rows else gene_data
             overflow_note = f" (+{len(gene_data) - max_table_rows} more in Excel)" if len(gene_data) > max_table_rows else ""
             rows = len(display_data) + 1
@@ -3397,6 +3408,20 @@ class PPTGenerator:
 
 
 # ==================== EXPORT FUNCTIONS ====================
+def _sanitize_sheet_name(name: str, used_names: set) -> str:
+    """Sanitize Excel sheet name: remove invalid chars, truncate, deduplicate."""
+    import re
+    safe = re.sub(r'[\\/*\[\]:?]', '_', name)[:31]
+    base = safe
+    counter = 1
+    while safe in used_names:
+        suffix = f"_{counter}"
+        safe = base[: 31 - len(suffix)] + suffix
+        counter += 1
+    used_names.add(safe)
+    return safe
+
+
 def export_to_excel(
     raw_data: pd.DataFrame,
     processed_data: Dict[str, pd.DataFrame],
@@ -3435,8 +3460,9 @@ def export_to_excel(
         raw_export.to_excel(writer, sheet_name="Raw_Data", index=False)
 
         # Gene-by-gene calculations with statistical test method column
+        _used_sheet_names = {"Analysis_Parameters", "Raw_Data"}
         for gene, gene_data in processed_data.items():
-            sheet_name = f"{gene}_Analysis"[:31]
+            sheet_name = _sanitize_sheet_name(f"{gene}_Analysis", _used_sheet_names)
             gene_export = gene_data.copy()
             if "p_value" in gene_export.columns:
                 ttest_type = params.get("ttest_type", "welch")
@@ -3554,12 +3580,13 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
 
     # Track which chart files correspond to which gene (for phase 2)
     gene_chart_map = {}
+    _used_sheet_names = set(wb.sheetnames)
 
     for gene, gene_data in processed_data.items():
         if gene_data is None or gene_data.empty:
             continue
 
-        sheet_name = f"{gene}_Chart"[:31]
+        sheet_name = _sanitize_sheet_name(f"{gene}_Chart", _used_sheet_names)
         ws = wb.create_sheet(sheet_name)
 
         # Build data columns
@@ -3978,12 +4005,22 @@ with tab1:
                 st.session_state.hk_gene = None
                 st.session_state.selected_efficacy = None
                 st.session_state.condition_colors = {}
+                st.session_state.gene_display_names = {}
+                st.session_state.experiment_desc = {}
                 for key in [
                     "selected_gene_idx",
                     "analysis_cmp_condition",
                     "analysis_cmp_condition_2",
                     "analysis_cmp_condition_3",
                     "analysis_ref_condition",
+                    "mapping_finalized",
+                    "_exclusion_snapshot",
+                    "_last_ref_sample_key",
+                    "_last_cmp_sample_key",
+                    "_last_cmp_sample_key_2",
+                    "_last_cmp_sample_key_3",
+                    "hk_select",
+                    "hk_select_manual",
                 ]:
                     if key in st.session_state:
                         del st.session_state[key]
@@ -5057,7 +5094,12 @@ with tab2:
                 if mapping_info.get("include", True):
                     condition = mapping_info.get("condition", sample)
                     condition_list.append(condition)
-                    sample_to_condition[condition] = sample
+                    # Keep first sample for each condition (not last)
+                    if condition not in sample_to_condition:
+                        sample_to_condition[condition] = sample
+        # Deduplicate condition_list while preserving order
+        seen = set()
+        condition_list = [c for c in condition_list if not (c in seen or seen.add(c))]
 
         if condition_list:
             # Enhanced layout with clear separation
@@ -5402,6 +5444,8 @@ with tab4:
         gene_list = list(st.session_state.processed_data.keys())
 
         if "selected_gene_idx" not in st.session_state:
+            st.session_state.selected_gene_idx = 0
+        if st.session_state.selected_gene_idx >= len(gene_list):
             st.session_state.selected_gene_idx = 0
 
         # Gene pill selector with container
@@ -6003,9 +6047,10 @@ with tab5:
                             title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY, color="black")),
                             margin=dict(b=_pub_b),
                         )
+                        _adj_height = img_height + max(0, _pub_b - 180)
                         if "PNG" in img_format:
                             img_bytes = fig_copy.to_image(
-                                format="png", scale=3, width=img_width, height=img_height,
+                                format="png", scale=3, width=img_width, height=_adj_height,
                             )
                             st.download_button(
                                 label=f"{gene}.png",
@@ -6017,7 +6062,7 @@ with tab5:
                             )
                         elif "SVG" in img_format:
                             svg_bytes = fig_copy.to_image(
-                                format="svg", width=img_width, height=img_height
+                                format="svg", width=img_width, height=_adj_height
                             )
                             st.download_button(
                                 label=f"{gene}.svg",
@@ -6029,7 +6074,7 @@ with tab5:
                             )
                         else:
                             pdf_bytes = fig_copy.to_image(
-                                format="pdf", width=img_width, height=img_height
+                                format="pdf", width=img_width, height=_adj_height
                             )
                             st.download_button(
                                 label=f"{gene}.pdf",
