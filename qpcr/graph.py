@@ -112,19 +112,29 @@ class GraphGenerator:
 
         fig = go.Figure()
 
-        # Error bars - use SEM or SD based on user preference
+        # Error bars - use fold-change domain asymmetric bars (Livak method)
+        # Falls back to Ct-domain SD/SEM if FC columns are missing
+        has_fc_errors = "FC_Error_Upper" in gene_data_indexed.columns and "FC_Error_Lower" in gene_data_indexed.columns
         error_bar_type = st.session_state.get("error_bar_type", "sem")
-        error_col = "SD" if error_bar_type == "sd" else "SEM"
-        if error_col not in gene_data_indexed.columns:
-            error_col = "SEM"
-        error_array = gene_data_indexed[error_col].values
+
+        if has_fc_errors:
+            error_upper_array = gene_data_indexed["FC_Error_Upper"].fillna(0).values
+            error_lower_array = gene_data_indexed["FC_Error_Lower"].fillna(0).values
+        else:
+            # Legacy fallback: Ct-domain SD/SEM (symmetric, less accurate)
+            error_col = "SD" if error_bar_type == "sd" else "SEM"
+            if error_col not in gene_data_indexed.columns:
+                error_col = "SEM"
+            error_upper_array = gene_data_indexed[error_col].fillna(0).values
+            error_lower_array = gene_data_indexed[error_col].fillna(0).values
 
         gene_bar_settings = st.session_state.get(f"{gene}_bar_settings", {})
 
         show_error_global = settings.get("show_error", True)
         show_sig_global = settings.get("show_significance", True)
 
-        error_visible_array = []
+        error_visible_upper = []
+        error_visible_lower = []
 
         for idx in range(n_bars):
             row = gene_data_indexed.iloc[idx]
@@ -136,9 +146,11 @@ class GraphGenerator:
             )
 
             if show_error_global and bar_config.get("show_err", True):
-                error_visible_array.append(error_array[idx])
+                error_visible_upper.append(error_upper_array[idx])
+                error_visible_lower.append(error_lower_array[idx])
             else:
-                error_visible_array.append(0)
+                error_visible_upper.append(0)
+                error_visible_lower.append(0)
 
         fig.add_trace(
             go.Bar(
@@ -146,8 +158,8 @@ class GraphGenerator:
                 y=gene_data_indexed["Relative_Expression"],
                 error_y=dict(
                     type="data",
-                    array=error_visible_array,
-                    arrayminus=[0] * n_bars,
+                    array=error_visible_upper,
+                    arrayminus=error_visible_lower,
                     visible=True,
                     thickness=2,
                     width=4,
@@ -168,7 +180,7 @@ class GraphGenerator:
         max_y_value = gene_data_indexed["Relative_Expression"].max()
         if pd.isna(max_y_value) or max_y_value <= 0:
             max_y_value = 1.0  # Fallback for all-NaN or zero expression
-        max_error = error_array.max() if len(error_array) > 0 else 0
+        max_error = error_upper_array.max() if len(error_upper_array) > 0 else 0
         if pd.isna(max_error):
             max_error = 0
         y_max_auto = (

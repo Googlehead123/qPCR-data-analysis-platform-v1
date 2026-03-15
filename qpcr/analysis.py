@@ -140,15 +140,16 @@ class AnalysisEngine:
                 ddct_clamped = np.clip(ddct, -50, 50)
                 rel_expr = 2 ** (-ddct_clamped)
 
-                target_sd = target_ct_values.std() if len(target_ct_values) > 1 else 0
-                hk_sd = hk_ct_values.std() if len(hk_ct_values) > 1 else 0
+                target_sd = target_ct_values.std(ddof=1) if len(target_ct_values) > 1 else np.nan
+                hk_sd = hk_ct_values.std(ddof=1) if len(hk_ct_values) > 1 else np.nan
                 n_target = len(target_ct_values)
                 n_hk = len(hk_ct_values)
 
-                target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else 0
+                target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else np.nan
 
-                sd = target_sd
-                sem = target_sem
+                # Convert NaN to 0 for graph rendering (NaN would break Plotly error bars)
+                sd = target_sd if pd.notna(target_sd) else 0
+                sem = target_sem if pd.notna(target_sem) else 0
 
                 original_sample = cond_data["Sample"].iloc[0]
                 group = sample_mapping.get(original_sample, {}).get(
@@ -181,6 +182,10 @@ class AnalysisEngine:
                         "SEM": sem,
                         "SD": sd,
                         "Fold_Change": rel_expr,
+                        # Fold-change domain error bars (Livak method)
+                        # Upper/lower bounds account for nonlinear 2^x transform
+                        "FC_Error_Upper": (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr) if sd > 0 else 0,
+                        "FC_Error_Lower": (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50)))) if sd > 0 else 0,
                     }
                 )
 
@@ -285,11 +290,22 @@ class AnalysisEngine:
                 rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
 
             # FIRST COMPARISON: compare_condition
+            # NOTE: When each condition has a single biological sample with technical
+            # replicates, this t-test assesses technical reproducibility only.
+            # For biological significance, biological replicates (independent samples)
+            # are required. Results should be interpreted accordingly.
             ref_vals = rel_expr.get(compare_condition, np.array([]))
             if ref_vals.size >= 1:
                 for cond, vals in rel_expr.items():
                     if cond == compare_condition or vals.size == 0:
                         continue
+
+                    # Warn when sample sizes are very small (likely technical replicates only)
+                    if ref_vals.size <= 3 and vals.size <= 3:
+                        _onesamp_warnings.append(
+                            f"{target}/{cond}: n={vals.size} vs ref n={ref_vals.size} "
+                            f"(technical replicates — interpret p-values with caution)"
+                        )
 
                     try:
                         with warnings.catch_warnings():
