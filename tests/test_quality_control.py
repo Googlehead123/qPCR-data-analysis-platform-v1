@@ -453,3 +453,55 @@ class TestFindHighSdOutliers:
         )
         assert len(results) == 1
         assert results[0]["Target"] == "COL1A1"
+
+
+class TestExcelExportFixes:
+    def test_export_with_qc_stats_populates_qc_sheet(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        from qpcr.export import export_to_excel
+        from qpcr.analysis import AnalysisEngine
+        from qpcr.quality_control import QualityControl
+        import openpyxl
+        import io
+
+        processed = {"COL1A1": AnalysisEngine.calculate_ddct(
+            sample_qpcr_raw_data, "GAPDH", "Non-treated", set(), set(), sample_mapping
+        )}
+        params = {"Housekeeping_Gene": "GAPDH", "Reference_Sample": "Non-treated"}
+        replicate_stats = QualityControl.get_replicate_stats(sample_qpcr_raw_data)
+        qc_stats = {"total_wells": 18, "excluded_wells": 0, "active_wells": 18,
+                     "ct_mean": 20.0, "ct_std": 3.0, "ct_min": 18.0, "ct_max": 26.0,
+                     "high_ct_count": 0, "low_ct_count": 0, "total_triplicates": 6,
+                     "healthy_triplicates": 6, "warning_triplicates": 0, "error_triplicates": 0,
+                     "avg_cv_pct": 0.5, "max_cv_pct": 1.0, "health_score": 100.0}
+
+        result = export_to_excel(
+            sample_qpcr_raw_data, processed, params, sample_mapping,
+            qc_stats=qc_stats, replicate_stats=replicate_stats,
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result))
+        assert "QC_Report" in wb.sheetnames
+        ws = wb["QC_Report"]
+        assert ws.cell(1, 1).value == "Metric"
+        assert ws.cell(2, 2).value == 18  # total_wells
+
+    def test_export_with_excluded_wells_adds_replicate_fc_sheet(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        from qpcr.export import export_to_excel
+        from qpcr.analysis import AnalysisEngine
+        import openpyxl
+        import io
+
+        processed = {"COL1A1": AnalysisEngine.calculate_ddct(
+            sample_qpcr_raw_data, "GAPDH", "Non-treated", set(), set(), sample_mapping
+        )}
+        params = {"Housekeeping_Gene": "GAPDH", "Reference_Sample": "Non-treated"}
+
+        result = export_to_excel(
+            sample_qpcr_raw_data, processed, params, sample_mapping,
+            excluded_wells=set(),
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result))
+        assert "Replicate_FC" in wb.sheetnames
+        ws = wb["Replicate_FC"]
+        assert ws.cell(1, 1).value == "Target"
+        assert ws.cell(1, 4).value == "Replicate_FC"
+        assert ws.max_row >= 10  # header + 9 data rows

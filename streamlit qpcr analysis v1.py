@@ -400,6 +400,9 @@ for key in [
 if "mapping_finalized" not in st.session_state:
     st.session_state.mapping_finalized = False
 
+if "analysis_stale" not in st.session_state:
+    st.session_state.analysis_stale = False
+
 if "gene_display_names" not in st.session_state:
     st.session_state.gene_display_names = {}
 
@@ -4565,6 +4568,87 @@ with tab_qc:
                 if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
                     st.rerun()
 
+            # ---- Auto-Exclude High SD Outliers ----
+            st.markdown("---")
+            auto_excl_cols = st.columns([2, 1, 1])
+            with auto_excl_cols[0]:
+                sd_thresh = st.slider(
+                    "SD Threshold (Ct)",
+                    min_value=0.3, max_value=1.0, value=0.5, step=0.1,
+                    key="sd_threshold_slider",
+                    help="Triplicates with CT SD above this will be flagged",
+                )
+            with auto_excl_cols[1]:
+                find_all_btn = st.button(
+                    "🔍 Find All Outliers", key="find_all_sd_outliers", use_container_width=True
+                )
+            with auto_excl_cols[2]:
+                # Per-gene button — read gene filter from previous render cycle
+                _prev_gene = st.session_state.get("qc_gene_filter", "All Genes")
+                if _prev_gene and _prev_gene != "All Genes":
+                    clean_gene_btn = st.button(
+                        f"🧹 Clean {_prev_gene}", key="clean_gene_btn", use_container_width=True
+                    )
+                else:
+                    clean_gene_btn = False
+
+            # Handle find buttons
+            if find_all_btn:
+                suggestions = QualityControl.find_high_sd_outliers(
+                    data, st.session_state.get("excluded_wells", {}), sd_threshold=sd_thresh,
+                )
+                st.session_state["_sd_outlier_suggestions"] = suggestions
+
+            if clean_gene_btn:
+                suggestions = QualityControl.find_high_sd_outliers(
+                    data, st.session_state.get("excluded_wells", {}),
+                    sd_threshold=sd_thresh, gene_filter=_prev_gene,
+                )
+                st.session_state["_sd_outlier_suggestions"] = suggestions
+
+            # Display preview table
+            suggestions = st.session_state.get("_sd_outlier_suggestions", [])
+            if suggestions:
+                st.markdown(f"**Found {len(suggestions)} high-SD outlier(s):**")
+                preview_df = pd.DataFrame(suggestions)
+                preview_df.insert(0, "Exclude", True)
+                edited = st.data_editor(
+                    preview_df[["Exclude", "Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"]],
+                    disabled=["Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"],
+                    key="sd_outlier_preview",
+                    use_container_width=True,
+                )
+
+                apply_cols = st.columns([3, 1])
+                with apply_cols[1]:
+                    if st.button("Apply Selected", key="apply_sd_exclusions", type="primary", use_container_width=True):
+                        selected = edited[edited["Exclude"]]
+                        # Save undo history
+                        if "excluded_wells_history" in st.session_state:
+                            st.session_state.excluded_wells_history.append(
+                                {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                            )
+                        excl_dict = st.session_state.get("excluded_wells", {})
+                        if not isinstance(excl_dict, dict):
+                            excl_dict = {}
+                        for _, row in selected.iterrows():
+                            key = (row["Target"], row["Sample"])
+                            if key not in excl_dict:
+                                excl_dict[key] = set()
+                            excl_dict[key].add(row["Well"])
+                        st.session_state.excluded_wells = excl_dict
+                        st.session_state.pop("_sd_outlier_suggestions", None)
+                        st.success(f"Excluded {len(selected)} well(s).")
+                        st.rerun()
+                with apply_cols[0]:
+                    if st.button("Dismiss", key="dismiss_sd_suggestions"):
+                        st.session_state.pop("_sd_outlier_suggestions", None)
+                        st.rerun()
+            elif find_all_btn or clean_gene_btn:
+                st.info("No triplicates exceed the SD threshold.")
+
+            st.markdown("---")
+
             # ---- Flagged Wells Alert Banner ----
             qc_results = QualityControl.detect_outliers(data, hk_gene)
             flagged = qc_results[qc_results["Flagged"]].copy()
@@ -5166,12 +5250,19 @@ with tab2:
 
                 st.markdown("")
 
-        if st.button("Finalize Mapping", type="primary", use_container_width=True, key="finalize_mapping"):
+        if st.button("Finalize & Run Analysis", type="primary", use_container_width=True, key="finalize_mapping"):
             st.session_state.mapping_finalized = True
+            st.session_state.analysis_stale = False
             st.rerun()
-        st.caption("Lock in condition names and groups, then reorder samples below.")
+        st.caption("Lock in condition names and groups, then proceed to Analysis tab.")
 
         if st.session_state.get("mapping_finalized", False):
+            edit_col1, edit_col2 = st.columns([3, 1])
+            with edit_col2:
+                if st.button("✏️ Edit Mapping", key="edit_mapping", use_container_width=True):
+                    st.session_state.mapping_finalized = False
+                    st.session_state.analysis_stale = True
+                    st.rerun()
             st.markdown("### 🔀 Drag to Reorder Samples")
             st.caption("Drag included samples to set the display order for graphs and exports.")
 
@@ -5540,6 +5631,7 @@ with tab2:
                         success_msg += f"\n- P-values (#) vs: **{cmp_condition_2}**"
                     if use_third_comparison and cmp_sample_key_3:
                         success_msg += f"\n- P-values (†) vs: **{cmp_condition_3}**"
+                    st.session_state.analysis_stale = False
                     st.success(success_msg)
                     st.rerun()
                 else:
@@ -5568,6 +5660,19 @@ with tab3:
                 st.session_state.get('_last_cmp_sample_key_3'),
             )
             st.info("Analysis auto-updated to reflect changes in QC exclusions or settings.")
+
+    if st.session_state.get("analysis_stale", False):
+        st.warning("⚠️ Mapping changed since last analysis. Results may be outdated.")
+        if st.button("Re-run Analysis", key="rerun_stale_analysis", type="primary"):
+            ref_key = st.session_state.get("_last_ref_sample_key")
+            cmp_key = st.session_state.get("_last_cmp_sample_key")
+            if ref_key and cmp_key:
+                ok = AnalysisEngine.run_full_analysis(ref_key, cmp_key,
+                    st.session_state.get("_last_cmp_sample_key_2"),
+                    st.session_state.get("_last_cmp_sample_key_3"))
+                if ok:
+                    st.session_state.analysis_stale = False
+                    st.rerun()
 
     render_step_indicator("analysis")
     st.header("Analysis Results")
@@ -5660,6 +5765,9 @@ with tab3:
 with tab4:
     render_step_indicator("graphs")
     st.header("Individual Gene Graphs")
+
+    if st.session_state.get("analysis_stale", False):
+        st.warning("⚠️ Mapping changed since last analysis. Go to Analysis tab to re-run.")
 
     # Graph tab styles handled by global theme
 
@@ -6300,6 +6408,32 @@ with tab5:
             "ttest_type": st.session_state.get("ttest_type", "welch"),
         }
 
+        def _build_export_extras():
+            """Build qc_stats, replicate_stats, and excluded_wells for export."""
+            qc_stats = None
+            replicate_stats_df = None
+            excl = st.session_state.get("excluded_wells", {})
+
+            if st.session_state.get("data") is not None:
+                from qpcr.quality_control import QualityControl
+
+                excl_flat = set()
+                if isinstance(excl, dict):
+                    for well_set in excl.values():
+                        excl_flat.update(well_set)
+                elif excl:
+                    excl_flat = set(excl)
+
+                qc_data = st.session_state.data.copy()
+                if excl_flat:
+                    qc_data = qc_data[~qc_data["Well"].isin(excl_flat)]
+
+                replicate_stats_df = QualityControl.get_replicate_stats(qc_data)
+                qc_summary = QualityControl.get_qc_summary_stats(st.session_state.data, excl_flat or None)
+                qc_stats = qc_summary if qc_summary else None
+
+            return qc_stats, replicate_stats_df, excl
+
         # ---- Unified ZIP Export ----
         if st.session_state.get("graphs"):
             if st.button("📦 Export All (ZIP)", key="export_all_zip", type="primary", use_container_width=True):
@@ -6314,11 +6448,15 @@ with tab5:
                         # 1. Excel report
                         progress.progress(10, text="Generating Excel...")
                         try:
+                            _qc, _rep, _excl = _build_export_extras()
                             excel_bytes = export_to_excel(
                                 st.session_state.data,
                                 st.session_state.processed_data,
                                 analysis_params,
                                 st.session_state.sample_mapping,
+                                qc_stats=_qc,
+                                replicate_stats=_rep,
+                                excluded_wells=_excl,
                             )
                             zf.writestr("qPCR_Report.xlsx", excel_bytes)
                         except Exception as e:
@@ -6395,11 +6533,15 @@ with tab5:
             st.markdown("**Excel Report**")
             st.caption("Parameters, mapping, raw data, calculations, QC, FC matrix")
             try:
+                _qc, _rep, _excl = _build_export_extras()
                 excel_data = export_to_excel(
                     st.session_state.data,
                     st.session_state.processed_data,
                     analysis_params,
                     st.session_state.sample_mapping,
+                    qc_stats=_qc,
+                    replicate_stats=_rep,
+                    excluded_wells=_excl,
                 )
             except Exception as e:
                 st.error(f"Excel export failed: {e}")
@@ -6671,6 +6813,7 @@ with tab5:
                                 1 / total_steps, text="Generating Excel report..."
                             )
                             current_step += 1
+                            _qc, _rep, _excl = _build_export_extras()
                             zf.writestr(
                                 "analysis_report.xlsx",
                                 export_to_excel(
@@ -6678,6 +6821,9 @@ with tab5:
                                     st.session_state.processed_data,
                                     analysis_params,
                                     st.session_state.sample_mapping,
+                                    qc_stats=_qc,
+                                    replicate_stats=_rep,
+                                    excluded_wells=_excl,
                                 ),
                             )
                             progress_bar.progress(
