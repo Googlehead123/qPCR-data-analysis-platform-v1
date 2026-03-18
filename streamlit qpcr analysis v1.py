@@ -5988,7 +5988,8 @@ with tab4:
                 index=preset_names.index(current_preset),
                 key=f"preset_{current_gene}",
             )
-            if selected_preset != "Custom" and selected_preset != st.session_state.graph_settings.get(color_preset_key):
+            # Apply preset colors whenever a non-Custom preset is active
+            if selected_preset != "Custom":
                 preset_colors = GRAPH_PRESETS[selected_preset]
                 for _, row in gene_data.iterrows():
                     condition = row["Condition"]
@@ -6098,10 +6099,14 @@ with tab4:
         if "bar_colors_per_sample" not in st.session_state.graph_settings:
             st.session_state.graph_settings["bar_colors_per_sample"] = {}
 
+        # Use active preset colors for initialization (not hardcoded Classic)
+        _active_preset = st.session_state.graph_settings.get(color_preset_key, "Classic")
+        _preset_colors = GRAPH_PRESETS.get(_active_preset, DEFAULT_GROUP_COLORS)
+
         for idx, (_, row) in enumerate(gene_data.iterrows()):
             condition = row["Condition"]
             group = row.get("Group", "Treatment")
-            default_color = DEFAULT_GROUP_COLORS.get(group, "#D3D3D3")
+            default_color = _preset_colors.get(group, DEFAULT_GROUP_COLORS.get(group, "#D3D3D3"))
             bar_key = f"{current_gene}_{condition}"
             if bar_key not in st.session_state[f"{current_gene}_bar_settings"]:
                 st.session_state[f"{current_gene}_bar_settings"][bar_key] = {
