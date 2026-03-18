@@ -1907,6 +1907,66 @@ class AnalysisEngine:
         return results
 
     @staticmethod
+    def compute_replicate_fold_changes(
+        raw_data: pd.DataFrame,
+        hk_gene: str,
+        ref_sample: str,
+        sample_mapping: dict,
+        excluded_wells=None,
+    ) -> pd.DataFrame:
+        """Compute per-replicate fold change values for data point overlay."""
+        data = raw_data.copy()
+
+        if isinstance(excluded_wells, dict):
+            mask = data.apply(
+                lambda r: r["Well"] not in excluded_wells.get(
+                    (r["Target"], r["Sample"]), set()
+                ),
+                axis=1,
+            )
+            data = data[mask]
+        elif excluded_wells:
+            data = data[~data["Well"].isin(excluded_wells)]
+
+        data["Condition"] = data["Sample"].map(
+            lambda x: sample_mapping.get(x, {}).get("condition", x)
+        )
+
+        hk_data = data[data["Target"].str.upper() == hk_gene.upper()]
+        hk_means = hk_data.groupby("Condition")["CT"].mean().to_dict()
+
+        results = []
+        for target in data["Target"].unique():
+            if target.upper() == hk_gene.upper():
+                continue
+
+            target_data = data[data["Target"] == target]
+
+            ref_rows = target_data[target_data["Condition"] == ref_sample]
+            ref_hk_mean = hk_means.get(ref_sample, np.nan)
+            if np.isnan(ref_hk_mean) or ref_rows.empty:
+                continue
+            ref_dct_mean = ref_rows["CT"].mean() - ref_hk_mean
+
+            for _, row in target_data.iterrows():
+                condition = row["Condition"]
+                cond_hk_mean = hk_means.get(condition, np.nan)
+                if np.isnan(cond_hk_mean):
+                    continue
+                dct_i = row["CT"] - cond_hk_mean
+                ddct_i = dct_i - ref_dct_mean
+                ddct_clamped = np.clip(ddct_i, -50, 50)
+                fc_i = 2 ** (-ddct_clamped)
+                results.append({
+                    "Target": target,
+                    "Condition": condition,
+                    "Well": row["Well"],
+                    "Replicate_FC": fc_i,
+                })
+
+        return pd.DataFrame(results)
+
+    @staticmethod
     def run_full_analysis(
         ref_sample_key: str, compare_sample_key: str,
         compare_sample_key_2: str = None, compare_sample_key_3: str = None,
@@ -2539,9 +2599,7 @@ class GraphGenerator:
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14), family=PLOTLY_FONT_FAMILY),
                 standoff=15,
             ),
-            showgrid=True,
-            gridcolor="rgba(0,0,0,0.08)",
-            gridwidth=0.5,
+            showgrid=False,
             zeroline=True,
             zerolinewidth=1,
             zerolinecolor="black",
