@@ -233,3 +233,37 @@ class TestVisualPolish:
             data=processed_gene_data, gene="COL1A1", settings=graph_settings
         )
         assert fig.data[0].error_y.width == 6
+
+
+class TestDataPointOverlay:
+    def test_no_scatter_trace_when_disabled(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings,
+            show_data_points=False,
+        )
+        assert len(fig.data) == 1  # Only bar trace
+
+    def test_scatter_trace_when_enabled(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        import pandas as pd
+        replicate_data = pd.DataFrame({
+            "Target": ["COL1A1"] * 9,
+            "Condition": ["Non-treated"] * 3 + ["Treatment1"] * 3 + ["Treatment2"] * 3,
+            "Well": [f"A{i}" for i in range(1, 10)],
+            "Replicate_FC": [0.95, 1.02, 1.03, 2.4, 2.6, 2.55, 0.35, 0.38, 0.37],
+        })
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings,
+            show_data_points=True, replicate_data=replicate_data,
+        )
+        assert len(fig.data) == 2  # Bar + scatter
+        assert fig.data[1].mode == "markers"
+
+    def test_no_scatter_when_enabled_but_no_replicate_data(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings,
+            show_data_points=True, replicate_data=None,
+        )
+        assert len(fig.data) == 1  # Only bar, no scatter

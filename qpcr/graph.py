@@ -14,6 +14,18 @@ import streamlit as st
 from qpcr.constants import DEFAULT_GROUP_COLORS, PLOTLY_FONT_FAMILY, CM_TO_PX
 
 
+def _darken_hex(hex_color: str, factor: float = 0.3) -> str:
+    """Darken a hex color by the given factor (0-1)."""
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) != 6:
+        return "#666666"
+    r, g, b = int(hex_color[:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    r = int(r * (1 - factor))
+    g = int(g * (1 - factor))
+    b = int(b * (1 - factor))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 class GraphGenerator:
     @staticmethod
     def _wrap_text(text: str, width: int = 15) -> str:
@@ -33,6 +45,8 @@ class GraphGenerator:
         display_gene_name: str = None,
         ref_line_value: float = None,
         ref_line_label: str = None,
+        show_data_points: bool = False,
+        replicate_data: pd.DataFrame = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -176,6 +190,35 @@ class GraphGenerator:
                 showlegend=False,
             )
         )
+
+        # Data point overlay (jittered scatter on top of bars)
+        if show_data_points and replicate_data is not None and not replicate_data.empty:
+            import hashlib
+            scatter_x = []
+            scatter_y = []
+            scatter_colors = []
+            for idx, condition in enumerate(condition_names):
+                cond_replicates = replicate_data[replicate_data["Condition"] == condition]
+                if cond_replicates.empty:
+                    continue
+                seed = int(hashlib.md5(f"{gene}_{condition}".encode()).hexdigest()[:8], 16)
+                rng = np.random.RandomState(seed)
+                n_pts = len(cond_replicates)
+                jitter = rng.uniform(-0.15, 0.15, size=n_pts)
+                scatter_x.extend([idx + j for j in jitter])
+                scatter_y.extend(cond_replicates["Replicate_FC"].tolist())
+                base_color = bar_colors[idx] if idx < len(bar_colors) else "#666666"
+                scatter_colors.extend([_darken_hex(base_color, 0.3)] * n_pts)
+
+            if scatter_x:
+                fig.add_trace(go.Scatter(
+                    x=scatter_x,
+                    y=scatter_y,
+                    mode="markers",
+                    marker=dict(size=5, color=scatter_colors, opacity=0.65, line=dict(width=0)),
+                    showlegend=False,
+                    hoverinfo="y",
+                ))
 
         max_y_value = gene_data_indexed["Relative_Expression"].max()
         if pd.isna(max_y_value) or max_y_value <= 0:
