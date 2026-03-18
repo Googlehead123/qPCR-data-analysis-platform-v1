@@ -48,36 +48,53 @@ The platform generates Plotly bar charts for qPCR relative expression data. Curr
 GRAPH_PRESETS = {
     "Steel": {
         "Baseline": "#C8D6E0",
-        "Treatment": "#4A7A9F",
-        "Positive Control": "#2C5F7F",
+        "Non-treated": "#C8D6E0",
+        "Control": "#C8D6E0",
         "Negative Control": "#C8D6E0",
+        "Treatment": "#4A7A9F",
+        "Inducer": "#2C5F7F",
+        "Positive Control": "#2C5F7F",
     },
     "Warm Neutral": {
         "Baseline": "#FFFFFF",
-        "Treatment": "#D4B896",
-        "Positive Control": "#B89A70",
+        "Non-treated": "#FFFFFF",
+        "Control": "#FFFFFF",
         "Negative Control": "#FFFFFF",
+        "Treatment": "#D4B896",
+        "Inducer": "#B89A70",
+        "Positive Control": "#B89A70",
     },
     "Classic": {
         "Baseline": "#FFFFFF",
-        "Treatment": "#D3D3D3",
-        "Positive Control": "#909090",
+        "Non-treated": "#FFFFFF",
+        "Control": "#FFFFFF",
         "Negative Control": "#FFFFFF",
+        "Treatment": "#D3D3D3",
+        "Inducer": "#909090",
+        "Positive Control": "#909090",
     },
     "Sage": {
         "Baseline": "#E8E8E8",
-        "Treatment": "#8BAF9A",
-        "Positive Control": "#5C8A6E",
+        "Non-treated": "#E8E8E8",
+        "Control": "#E8E8E8",
         "Negative Control": "#E8E8E8",
+        "Treatment": "#8BAF9A",
+        "Inducer": "#5C8A6E",
+        "Positive Control": "#5C8A6E",
     },
     "Slate": {
         "Baseline": "#EDEDED",
-        "Treatment": "#8E8EA0",
-        "Positive Control": "#5B5B78",
+        "Non-treated": "#EDEDED",
+        "Control": "#EDEDED",
         "Negative Control": "#EDEDED",
+        "Treatment": "#8E8EA0",
+        "Inducer": "#5B5B78",
+        "Positive Control": "#5B5B78",
     },
 }
 ```
+
+**Group fallback:** If a bar's Group is not found in the preset, fall back to the Treatment color. This handles any user-defined custom group names.
 
 ### Behavior
 - Selecting a preset overwrites all bar colors for the current gene based on each bar's Group assignment
@@ -106,6 +123,8 @@ GRAPH_PRESETS = {
 - Significance symbol (*, **, ***, #, ##, ###) centered above the bracket
 - Multiple brackets stack vertically with 12px spacing
 - Y-position calculated from: max(bar_height + error_bar) + stacking_offset
+- **Max 6 brackets per graph.** If more comparisons exist, auto-fall back to Direct mode with an info message: "Too many comparisons for bracket display — using direct labels."
+- Y-axis auto-range calculation accounts for bracket stack height (bracket_count × 12px in data units)
 
 ### Implementation
 
@@ -136,12 +155,30 @@ Bracket pairs are derived from existing significance data:
 - Dot color: bar color darkened 30%, opacity 0.65
 - Dot size: 5px (Plotly marker size)
 - Jitter: random horizontal offset ±15% of bar width
-- Jitter seeded by condition name for reproducibility across re-renders
+- Jitter seeded by `f"{gene}_{condition}"` for reproducibility across re-renders (unique per gene-condition pair)
 - One dot per biological replicate
 
 ### Data Source
-- Replicate-level fold change values already computed by AnalysisEngine
-- GraphGenerator receives replicate data as additional parameter
+Replicate-level fold changes are **not** currently computed by AnalysisEngine — only per-condition aggregates exist. A new helper method is needed:
+
+```python
+# New method in AnalysisEngine
+def compute_replicate_fold_changes(self, gene: str) -> pd.DataFrame:
+    """Compute per-replicate fold change values for data point overlay.
+
+    For each replicate i in condition c:
+      dCt_i = Ct_target_i - Ct_hk_mean_of_condition
+      ddCt_i = dCt_i - dCt_mean_of_reference
+      FC_i = 2^(-ddCt_i)
+
+    Uses per-condition HK mean (not per-replicate HK) to isolate
+    target gene variability from housekeeping variability.
+
+    Returns DataFrame with columns: [Condition, Replicate, Fold_Change]
+    """
+```
+
+This method draws from the same raw Ct data already stored in the analysis pipeline. The per-condition HK mean approach is standard (matches Livak method assumptions). GraphGenerator receives this as an additional parameter.
 
 ### API Change
 ```python
@@ -212,7 +249,11 @@ def create_gene_graph(
 - Confirmation: `st.warning("Apply current settings to all N genes?")` + confirm button
 
 ### Session State
-- Iterates all gene keys in `graph_settings` and overwrites per-gene overrides
+- Iterates the known gene list (from analysis results)
+- For each target gene, copies these per-gene key suffixes from the source gene:
+  `_color_preset`, `_figure_width`, `_figure_height`, `_font_size`, `_tick_size`, `_ylabel_size`, `_bar_opacity`, `_marker_line_width`, `_bg_color`, `_bar_gap`, `_sig_style`, `_show_data_points`, `_label_mode`, `_ref_line`
+- If preset is not "Custom": re-derives bar colors from each target gene's own Group assignments (handles different condition counts across genes)
+- If preset is "Custom": copies only bar colors for conditions that exist in the target gene; ignores orphaned colors
 
 ---
 
@@ -244,9 +285,10 @@ Condition | Color | Options
 
 - **Condition**: text label (read-only)
 - **Color**: color picker (same as current)
-- **Options**: `st.multiselect` with compact choices: `["✱ sig1", "# sig2", "† sig3", "± error"]`
-  - Default: all enabled (matching current behavior)
-  - Removing an item disables that annotation for the bar
+- **Options**: `st.pills` (Streamlit 1.33+) with `selection_mode="multi"` for compact toggles: `["✱", "#", "†", "±"]`
+  - Default: all selected (matching current behavior)
+  - Deselecting a pill disables that annotation for the bar
+  - Fallback: if Streamlit version lacks `st.pills`, use 4 inline `st.checkbox` in a sub-column layout
 
 ### Benefits
 - 50% fewer columns — less cramped
@@ -260,6 +302,8 @@ Condition | Color | Options
 ### Size Preset Definitions (constants.py)
 
 ```python
+# All dimensions in centimeters (converted via CM_TO_PX = 37.7953 for Plotly,
+# CM_TO_EMU = 360000 for PPT export)
 FIGURE_SIZE_PRESETS = {
     "PPT Full": {"width": 28, "height": 16},
     "PPT Half": {"width": 14, "height": 10},
@@ -302,6 +346,7 @@ qPCR_Export_{efficacy}_{timestamp}.zip
 - PPT uses current experiment description defaults (editable below in the tab)
 - PNG export at 300 DPI (scale=2, 1200px width)
 - Progress bar during generation
+- **Best-effort assembly:** if any component fails (e.g., kaleido PNG timeout), skip it, include a `_errors.txt` manifest listing what failed and why. Do not fail the entire ZIP.
 - Individual export buttons remain below for selective downloads
 
 ---
