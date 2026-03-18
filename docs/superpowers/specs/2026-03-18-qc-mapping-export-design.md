@@ -32,7 +32,7 @@ Following the graph improvements round, three other platform areas need attentio
 |---|---------|-------|--------|
 | 1 | QC auto-exclude high SD outliers (global + per-gene) | main UI, qpcr/quality_control.py | Medium |
 | 2 | Reversible Finalize Mapping + "Analysis stale" badge | main UI | Medium |
-| 3 | Excel: fix empty QC_Report sheet | qpcr/export.py, main UI | Simple |
+| 3 | Excel: fix empty QC_Report sheet | main UI (call sites only) | Simple |
 | 4 | Excel: add Replicate_FC sheet | qpcr/export.py | Simple |
 
 ---
@@ -76,16 +76,18 @@ def find_high_sd_outliers(
 ```
 
 **Logic:**
-1. Group raw data by (Target, Sample), excluding already-excluded wells
-2. For each group with n >= 3 replicates: compute SD
-3. If SD > sd_threshold: find the well with max |CT - mean|
-4. Return that well as a suggestion
-5. If gene_filter is set, only process groups where Target == gene_filter
+1. Group raw data by (Target, Sample)
+2. Apply exclusions: `excluded_wells` is a dict `{(gene, sample): set(well_ids)}`. For each group, filter out wells in the corresponding exclusion set. If `excluded_wells` is a flat `set` instead, filter globally (backward compat).
+3. For each group with n >= 3 remaining replicates: compute SD
+4. If SD > sd_threshold: find the well with max |CT - mean|. On ties, take first encountered.
+5. Return that well as a suggestion
+6. If gene_filter is set, only process groups where Target == gene_filter
 
 **Edge cases:**
-- Groups with n < 3: skip (can't meaningfully compute SD)
+- Groups with n < 3 (after exclusion): skip (can't meaningfully compute SD with n=2; users should handle those manually)
 - Groups with all wells already excluded: skip
 - HK gene groups: include (HK SD matters too)
+- `excluded_wells` format: accept both dict `{(gene, sample): set}` and flat `set` (normalize internally, matching `AnalysisEngine.calculate_ddct` pattern)
 
 ### 1b. Global Button: "Auto-exclude High SD Outliers"
 
@@ -186,30 +188,40 @@ if st.session_state.get("analysis_stale", False):
 
 **At each call site** (3 locations in main file: standalone Excel download, ZIP export, Complete Report ZIP), compute and pass QC stats:
 
+**IMPORTANT:** `QualityControl.get_replicate_stats(data)` accepts ONLY a DataFrame — no `excluded_wells` parameter. Pre-filter the data before passing:
+
 ```python
 qc_stats = None
+replicate_stats_df = None
 if st.session_state.get("data") is not None:
     from qpcr.quality_control import QualityControl
-    replicate_stats = QualityControl.get_replicate_stats(
-        st.session_state.data,
-        excluded_wells=st.session_state.get("excluded_wells", {}),
-    )
+
+    # Pre-filter data to exclude wells before computing stats
+    qc_data = st.session_state.data.copy()
+    excl = st.session_state.get("excluded_wells", {})
+    if isinstance(excl, dict):
+        # Dict format: {(gene, sample): set(well_ids)}
+        excl_flat = set()
+        for well_set in excl.values():
+            excl_flat.update(well_set)
+        qc_data = qc_data[~qc_data["Well"].isin(excl_flat)]
+    elif excl:
+        qc_data = qc_data[~qc_data["Well"].isin(excl)]
+
+    replicate_stats_df = QualityControl.get_replicate_stats(qc_data)
+
     qc_stats = {
-        "replicate_stats": replicate_stats,
-        "excluded_wells": st.session_state.get("excluded_wells", {}),
+        "replicate_stats": replicate_stats_df,
+        "excluded_wells": excl,
         "excluded_count": sum(
-            len(ws) for ws in st.session_state.get("excluded_wells", {}).values()
-        ) if isinstance(st.session_state.get("excluded_wells"), dict) else 0,
+            len(ws) for ws in excl.values()
+        ) if isinstance(excl, dict) else len(excl or set()),
     }
 ```
 
-Then pass `qc_stats=qc_stats` to `export_to_excel()`.
+Then pass `qc_stats=qc_stats` and `replicate_stats=replicate_stats_df` to `export_to_excel()`.
 
-**No changes to export.py needed** — the QC_Report sheet logic already handles `replicate_stats` DataFrame. It just needs data.
-
-### Verify
-- `QualityControl.get_replicate_stats()` signature: check it accepts `excluded_wells` param
-- If it doesn't, pass raw data only (without exclusion filtering) — still better than empty sheet
+**No changes to `get_replicate_stats()` needed** — we pre-filter the data instead.
 
 ---
 
@@ -258,7 +270,7 @@ def export_to_excel(
     raw_data, processed_data, params, mapping,
     qc_stats=None, replicate_stats=None,
     excluded_wells=None,  # NEW
-) -> io.BytesIO:
+) -> bytes:  # NOTE: returns bytes via output.getvalue(), not BytesIO
 ```
 
 All call sites already have `excluded_wells` available in session state — pass it through.
