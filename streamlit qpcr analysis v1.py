@@ -6310,8 +6310,7 @@ with tab4:
             mapping = st.session_state.get("sample_mapping", {})
             excl = st.session_state.get("excluded_wells", set())
             if raw is not None and hk and ref:
-                from qpcr.analysis import AnalysisEngine as _AE
-                all_replicates = _AE.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
+                all_replicates = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
                 replicate_df = all_replicates[all_replicates["Target"] == current_gene]
 
         current_settings["sig_style"] = st.session_state.graph_settings.get(
@@ -6361,8 +6360,8 @@ with tab4:
                 gs["show_significance"] = gs.get(f"{gene}_show_sig", True)
                 gs["show_error"] = gs.get(f"{gene}_show_err", True)
                 gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.25)
-                gs["figure_height"] = 12
-                gs["figure_width"] = 20
+                gs["figure_height"] = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
+                gs["figure_width"] = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
                 gs["font_size"] = gs.get(f"{gene}_font_size", gs.get("font_size", 14))
                 gs["bar_opacity"] = gs.get(f"{gene}_bar_opacity", gs.get("bar_opacity", 0.95))
                 gs["marker_line_width"] = gs.get(f"{gene}_marker_line_width", gs.get("marker_line_width", 1))
@@ -6372,6 +6371,7 @@ with tab4:
                 gs["tick_size"] = gs.get(f"{gene}_tick_size", gs.get("tick_size", 12))
                 gs["ylabel_size"] = gs.get(f"{gene}_ylabel_size", gs.get("ylabel_size", 14))
                 gs["bg_color"] = gs.get(f"{gene}_bg_color", gs.get("bg_color", "#FFFFFF"))
+                gs["sig_style"] = gs.get(f"{gene}_sig_style", "direct")
 
                 qv_ref_condition = st.session_state.graph_settings.get(f"{gene}_ref_line", "None")
                 qv_ref_val = None
@@ -6384,6 +6384,19 @@ with tab4:
                             qv_ref_val = _qv_rv
                             qv_ref_lbl = f"{qv_ref_condition}: {_qv_rv:.2f}"
 
+                # Data points for quick view
+                qv_show_dp = gs.get(f"{gene}_show_data_points", False)
+                qv_replicate_df = None
+                if qv_show_dp:
+                    raw = st.session_state.get("data")
+                    hk = st.session_state.get("hk_gene")
+                    ref = st.session_state.get("analysis_ref_condition")
+                    mapping = st.session_state.get("sample_mapping", {})
+                    excl = st.session_state.get("excluded_wells", set())
+                    if raw is not None and hk and ref:
+                        all_reps = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
+                        qv_replicate_df = all_reps[all_reps["Target"] == gene]
+
                 f = GraphGenerator.create_gene_graph(
                     gd,
                     gene,
@@ -6394,6 +6407,8 @@ with tab4:
                     display_gene_name=st.session_state.gene_display_names.get(gene, gene),
                     ref_line_value=qv_ref_val,
                     ref_line_label=qv_ref_lbl,
+                    show_data_points=qv_show_dp,
+                    replicate_data=qv_replicate_df,
                 )
 
                 with all_gene_cols[idx % len(all_gene_cols)]:
@@ -6434,8 +6449,6 @@ with tab5:
             excl = st.session_state.get("excluded_wells", {})
 
             if st.session_state.get("data") is not None:
-                from qpcr.quality_control import QualityControl
-
                 excl_flat = set()
                 if isinstance(excl, dict):
                     for well_set in excl.values():
