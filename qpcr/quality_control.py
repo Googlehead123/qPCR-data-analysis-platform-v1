@@ -289,60 +289,6 @@ class QualityControl:
         return suggestions
 
     @staticmethod
-    def find_high_sd_outliers(
-        data: pd.DataFrame,
-        excluded_wells,
-        sd_threshold: float = 0.5,
-        gene_filter: str = None,
-    ) -> list:
-        """Find the worst replicate in each gene-sample group exceeding SD threshold."""
-        if data is None or data.empty:
-            return []
-
-        df = data.copy()
-
-        # Normalize excluded_wells and filter
-        if isinstance(excluded_wells, dict):
-            excl_flat = set()
-            for well_set in excluded_wells.values():
-                excl_flat.update(well_set)
-            df = df[~df["Well"].isin(excl_flat)]
-        elif excluded_wells:
-            df = df[~df["Well"].isin(excluded_wells)]
-
-        if gene_filter:
-            df = df[df["Target"] == gene_filter]
-
-        suggestions = []
-        for (target, sample), group in df.groupby(["Target", "Sample"]):
-            if len(group) < 3:
-                continue
-
-            ct_values = group["CT"].values
-            sd = np.std(ct_values, ddof=1)
-
-            if sd <= sd_threshold:
-                continue
-
-            mean_ct = np.mean(ct_values)
-            deviations = np.abs(ct_values - mean_ct)
-            worst_idx = np.argmax(deviations)
-            worst_row = group.iloc[worst_idx]
-
-            suggestions.append({
-                "Target": target,
-                "Sample": sample,
-                "Well": worst_row["Well"],
-                "CT": round(float(worst_row["CT"]), 2),
-                "deviation": round(float(worst_row["CT"] - mean_ct), 3),
-                "group_sd": round(float(sd), 3),
-                "group_mean": round(float(mean_ct), 2),
-                "n_replicates": len(group),
-            })
-
-        return suggestions
-
-    @staticmethod
     def grubbs_test(values: np.ndarray, alpha: float = 0.05) -> Tuple[bool, int]:
         n = len(values)
         if n < 3:

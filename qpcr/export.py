@@ -18,7 +18,6 @@ def export_to_excel(
     mapping: dict,
     qc_stats: dict = None,
     replicate_stats: pd.DataFrame = None,
-    excluded_wells=None,
 ) -> bytes:
     """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix.
 
@@ -29,7 +28,6 @@ def export_to_excel(
         mapping: Sample mapping dict.
         qc_stats: Optional QC summary stats dict from QualityControl.get_qc_summary_stats().
         replicate_stats: Optional replicate stats DataFrame from QualityControl.get_replicate_stats().
-        excluded_wells: Optional set or dict of excluded wells; triggers Replicate_FC sheet generation.
     """
     output = io.BytesIO()
 
@@ -112,25 +110,6 @@ def export_to_excel(
                     )
                     fc_matrix = fc_matrix.round(4)
                     fc_matrix.to_excel(writer, sheet_name="FC_Matrix")
-
-        # --- Replicate-level fold changes ---
-        if excluded_wells is not None and raw_data is not None:
-            hk_gene = params.get("Housekeeping_Gene")
-            ref_sample = params.get("Reference_Sample")
-            if hk_gene and ref_sample:
-                try:
-                    from qpcr.analysis import AnalysisEngine
-                    replicate_fc = AnalysisEngine.compute_replicate_fold_changes(
-                        raw_data=raw_data,
-                        hk_gene=hk_gene,
-                        ref_sample=ref_sample,
-                        sample_mapping=mapping,
-                        excluded_wells=excluded_wells,
-                    )
-                    if not replicate_fc.empty:
-                        replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)
-                except Exception:
-                    pass  # Best-effort
 
         # --- NEW: QC Report sheet ---
         _write_qc_sheet(writer, qc_stats, replicate_stats)
