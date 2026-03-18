@@ -400,6 +400,9 @@ for key in [
 if "mapping_finalized" not in st.session_state:
     st.session_state.mapping_finalized = False
 
+if "analysis_stale" not in st.session_state:
+    st.session_state.analysis_stale = False
+
 if "gene_display_names" not in st.session_state:
     st.session_state.gene_display_names = {}
 
@@ -5000,12 +5003,19 @@ with tab2:
 
                 st.markdown("")
 
-        if st.button("Finalize Mapping", type="primary", use_container_width=True, key="finalize_mapping"):
+        if st.button("Finalize & Run Analysis", type="primary", use_container_width=True, key="finalize_mapping"):
             st.session_state.mapping_finalized = True
+            st.session_state.analysis_stale = False
             st.rerun()
-        st.caption("Lock in condition names and groups, then reorder samples below.")
+        st.caption("Lock in condition names and groups, then proceed to Analysis tab.")
 
         if st.session_state.get("mapping_finalized", False):
+            edit_col1, edit_col2 = st.columns([3, 1])
+            with edit_col2:
+                if st.button("✏️ Edit Mapping", key="edit_mapping", use_container_width=True):
+                    st.session_state.mapping_finalized = False
+                    st.session_state.analysis_stale = True
+                    st.rerun()
             st.markdown("### 🔀 Drag to Reorder Samples")
             st.caption("Drag included samples to set the display order for graphs and exports.")
 
@@ -5374,6 +5384,7 @@ with tab2:
                         success_msg += f"\n- P-values (#) vs: **{cmp_condition_2}**"
                     if use_third_comparison and cmp_sample_key_3:
                         success_msg += f"\n- P-values (†) vs: **{cmp_condition_3}**"
+                    st.session_state.analysis_stale = False
                     st.success(success_msg)
                     st.rerun()
                 else:
@@ -5402,6 +5413,19 @@ with tab3:
                 st.session_state.get('_last_cmp_sample_key_3'),
             )
             st.info("Analysis auto-updated to reflect changes in QC exclusions or settings.")
+
+    if st.session_state.get("analysis_stale", False):
+        st.warning("⚠️ Mapping changed since last analysis. Results may be outdated.")
+        if st.button("Re-run Analysis", key="rerun_stale_analysis", type="primary"):
+            ref_key = st.session_state.get("_last_ref_sample_key")
+            cmp_key = st.session_state.get("_last_cmp_sample_key")
+            if ref_key and cmp_key:
+                ok = AnalysisEngine.run_full_analysis(ref_key, cmp_key,
+                    st.session_state.get("_last_cmp_sample_key_2"),
+                    st.session_state.get("_last_cmp_sample_key_3"))
+                if ok:
+                    st.session_state.analysis_stale = False
+                    st.rerun()
 
     render_step_indicator("analysis")
     st.header("Analysis Results")
@@ -5494,6 +5518,9 @@ with tab3:
 with tab4:
     render_step_indicator("graphs")
     st.header("Individual Gene Graphs")
+
+    if st.session_state.get("analysis_stale", False):
+        st.warning("⚠️ Mapping changed since last analysis. Go to Analysis tab to re-run.")
 
     # Graph tab styles handled by global theme
 
