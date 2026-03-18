@@ -283,17 +283,17 @@ class TestAnalysisEngineCalculateStatistics:
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
         AnalysisEngine = spec.AnalysisEngine
-        
+
         mock_streamlit.session_state['data'] = sample_qpcr_raw_data
         mock_streamlit.session_state['hk_gene'] = 'GAPDH'
         mock_streamlit.session_state['sample_mapping'] = sample_mapping
-        
+
         processed = pd.DataFrame({
             'Target': ['COL1A1', 'COL1A1'],
             'Condition': ['Non-treated', 'Treatment1'],
             'Relative_Expression': [1.0, 5.0],
         })
-        
+
         result = AnalysisEngine.calculate_statistics(
             processed=processed,
             compare_condition='Non-treated',
@@ -301,5 +301,47 @@ class TestAnalysisEngineCalculateStatistics:
             hk_gene='GAPDH',
             sample_mapping=sample_mapping
         )
-        
+
         assert 'significance' in result.columns
+
+
+class TestReplicateFoldChanges:
+    def test_returns_one_row_per_replicate(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        from qpcr.analysis import AnalysisEngine
+        result = AnalysisEngine.compute_replicate_fold_changes(
+            raw_data=sample_qpcr_raw_data,
+            hk_gene="GAPDH",
+            ref_sample="Non-treated",
+            sample_mapping=sample_mapping,
+            excluded_wells=set(),
+        )
+        # 3 samples × 3 replicates each for COL1A1 = 9 rows
+        assert len(result) == 9
+        assert "Condition" in result.columns
+        assert "Replicate_FC" in result.columns
+        assert "Target" in result.columns
+
+    def test_reference_condition_fcs_average_near_one(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        from qpcr.analysis import AnalysisEngine
+        result = AnalysisEngine.compute_replicate_fold_changes(
+            raw_data=sample_qpcr_raw_data,
+            hk_gene="GAPDH",
+            ref_sample="Non-treated",
+            sample_mapping=sample_mapping,
+            excluded_wells=set(),
+        )
+        ref_fcs = result[result["Condition"] == "Non-treated"]["Replicate_FC"]
+        assert abs(ref_fcs.mean() - 1.0) < 0.3
+
+    def test_handles_excluded_wells(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
+        from qpcr.analysis import AnalysisEngine
+        # Exclude a COL1A1 well (index 3 = first COL1A1 replicate, after 3 GAPDH wells)
+        excluded = {sample_qpcr_raw_data["Well"].iloc[3]}
+        result = AnalysisEngine.compute_replicate_fold_changes(
+            raw_data=sample_qpcr_raw_data,
+            hk_gene="GAPDH",
+            ref_sample="Non-treated",
+            sample_mapping=sample_mapping,
+            excluded_wells=excluded,
+        )
+        assert len(result) == 8  # 9 - 1 excluded COL1A1 well
