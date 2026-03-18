@@ -204,7 +204,7 @@ class GraphGenerator:
             sig_2 = row.get("significance_2", "")
 
             bar_height = row["Relative_Expression"]
-            error_bar_height = error_visible_array[idx]
+            error_bar_height = error_visible_upper[idx]
             base_y_position = bar_height + error_bar_height
 
             asterisk_font_size = 16
@@ -397,7 +397,7 @@ class GraphGenerator:
             for _idx in range(n_bars):
                 _row = gene_data_indexed.iloc[_idx]
                 _bar_h = _row["Relative_Expression"]
-                _err_h = error_visible_array[_idx] if _idx < len(error_visible_array) else 0
+                _err_h = error_visible_upper[_idx] if _idx < len(error_visible_upper) else 0
                 _top_y = _bar_h + _err_h + (fixed_symbol_spacing * 1.2)
                 if _top_y > max_annotation_y:
                     max_annotation_y = _top_y

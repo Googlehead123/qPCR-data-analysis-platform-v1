@@ -77,6 +77,32 @@ class TestGraphGeneratorCreateGeneGraph:
         assert fig is not None
         assert len(fig.data) > 0
 
+
+class TestGraphGeneratorBugFixes:
+    def test_significance_symbols_do_not_crash(self, mock_streamlit, graph_settings):
+        from qpcr.graph import GraphGenerator
+        import plotly.graph_objects as go
+
+        data = pd.DataFrame({
+            "Target": ["COL1A1", "COL1A1", "COL1A1"],
+            "Condition": ["Non-treated", "Treatment1", "Treatment2"],
+            "Group": ["Negative Control", "Treatment", "Treatment"],
+            "Relative_Expression": [1.0, 2.5, 0.4],
+            "SEM": [0.1, 0.2, 0.05],
+            "FC_Error_Upper": [0.15, 0.3, 0.08],
+            "FC_Error_Lower": [0.12, 0.25, 0.06],
+            "significance": ["", "**", "*"],
+            "significance_2": ["", "", ""],
+        })
+        graph_settings["show_significance"] = True
+        graph_settings["show_error"] = True
+
+        fig = GraphGenerator.create_gene_graph(
+            data=data, gene="COL1A1", settings=graph_settings
+        )
+        assert isinstance(fig, go.Figure)
+        assert len(fig.layout.annotations) >= 1
+
     def test_create_gene_graph_respects_sample_order(self, mock_streamlit, processed_gene_data, graph_settings, sample_mapping):
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
