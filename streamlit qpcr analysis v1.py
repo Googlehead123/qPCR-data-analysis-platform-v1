@@ -5713,6 +5713,24 @@ with tab4:
 
                 with s_col2:
                     st.caption("**Figure Size**")
+                    size_preset_key = f"{current_gene}_size_preset"
+                    size_preset_names = list(FIGURE_SIZE_PRESETS.keys()) + ["Custom"]
+                    if size_preset_key not in st.session_state.graph_settings:
+                        st.session_state.graph_settings[size_preset_key] = "PPT Full"
+                    current_size_preset = st.session_state.graph_settings.get(size_preset_key, "PPT Full")
+                    if current_size_preset not in size_preset_names:
+                        current_size_preset = "Custom"
+                    selected_size = st.selectbox(
+                        "Size Preset",
+                        size_preset_names,
+                        index=size_preset_names.index(current_size_preset),
+                        key=f"size_preset_{current_gene}",
+                    )
+                    if selected_size != "Custom" and selected_size in FIGURE_SIZE_PRESETS:
+                        preset = FIGURE_SIZE_PRESETS[selected_size]
+                        st.session_state.graph_settings[f"{current_gene}_figure_width"] = preset["width"]
+                        st.session_state.graph_settings[f"{current_gene}_figure_height"] = preset["height"]
+                    st.session_state.graph_settings[size_preset_key] = selected_size
                     fig_width_cm = st.slider(
                         "Width (cm)", 10.0, 40.0,
                         value=float(st.session_state.graph_settings.get(f"{current_gene}_figure_width",
@@ -5727,6 +5745,10 @@ with tab4:
                     )
                     st.session_state.graph_settings[f"{current_gene}_figure_width"] = fig_width_cm
                     st.session_state.graph_settings[f"{current_gene}_figure_height"] = fig_height_cm
+                    if selected_size != "Custom" and selected_size in FIGURE_SIZE_PRESETS:
+                        preset = FIGURE_SIZE_PRESETS[selected_size]
+                        if fig_width_cm != preset["width"] or fig_height_cm != preset["height"]:
+                            st.session_state.graph_settings[size_preset_key] = "Custom"
 
                 with s_col3:
                     st.caption("**Fonts**")
@@ -5821,13 +5843,13 @@ with tab4:
                     _bar_display_data = _bar_display_data.sort_values("Condition").reset_index(drop=True)
 
                 # Header row
-                hdr = st.columns([3, 0.8, 0.6, 0.6, 0.6, 0.6])
-                hdr[0].markdown("<small>**Sample**</small>", unsafe_allow_html=True)
+                hdr = st.columns([3, 0.8, 2.5])
+                hdr[0].markdown("<small>**Condition**</small>", unsafe_allow_html=True)
                 hdr[1].markdown("<small>**Color**</small>", unsafe_allow_html=True)
-                hdr[2].markdown("<small>**\\***</small>", unsafe_allow_html=True)
-                hdr[3].markdown("<small>**#**</small>", unsafe_allow_html=True)
-                hdr[4].markdown("<small>**\u2020**</small>", unsafe_allow_html=True)
-                hdr[5].markdown("<small>**\u00b1**</small>", unsafe_allow_html=True)
+                hdr[2].markdown("<small>**Options**</small>", unsafe_allow_html=True)
+
+                option_labels = ["✱", "#", "†", "±"]
+                option_keys = ["show_sig_1", "show_sig_2", "show_sig_3", "show_err"]
 
                 for idx, (_, row) in enumerate(_bar_display_data.iterrows()):
                     condition = row["Condition"]
@@ -5835,9 +5857,12 @@ with tab4:
                     bar_key = f"{current_gene}_{condition}"
                     bs = st.session_state[f"{current_gene}_bar_settings"][bar_key]
 
-                    rc = st.columns([3, 0.8, 0.6, 0.6, 0.6, 0.6])
+                    rc = st.columns([3, 0.8, 2.5])
                     lbl = condition if len(condition) <= 22 else condition[:19] + "..."
-                    rc[0].markdown(f"<small>{lbl} <span style='color:#888;'>({group})</span></small>", unsafe_allow_html=True)
+                    rc[0].markdown(
+                        f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
+                        unsafe_allow_html=True,
+                    )
                     new_color = rc[1].color_picker(
                         "c", bs["color"],
                         key=f"cp_{current_gene}_{idx}",
@@ -5845,22 +5870,23 @@ with tab4:
                     )
                     bs["color"] = new_color
                     st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = new_color
-                    bs["show_sig_1"] = rc[2].checkbox(
-                        "s1", bs.get("show_sig_1", True),
-                        key=f"s1_{current_gene}_{idx}", label_visibility="collapsed",
-                    )
-                    bs["show_sig_2"] = rc[3].checkbox(
-                        "s2", bs.get("show_sig_2", True),
-                        key=f"s2_{current_gene}_{idx}", label_visibility="collapsed",
-                    )
-                    bs["show_sig_3"] = rc[4].checkbox(
-                        "s3", bs.get("show_sig_3", True),
-                        key=f"s3_{current_gene}_{idx}", label_visibility="collapsed",
-                    )
-                    bs["show_err"] = rc[5].checkbox(
-                        "err", bs.get("show_err", True),
-                        key=f"eb_{current_gene}_{idx}", label_visibility="collapsed",
-                    )
+
+                    # Detect manual color change → switch color preset to Custom
+                    color_preset_key = f"{current_gene}_color_preset"
+                    current_preset_name = st.session_state.graph_settings.get(color_preset_key, "Classic")
+                    if current_preset_name != "Custom":
+                        expected_color = GRAPH_PRESETS.get(current_preset_name, {}).get(group, "#D3D3D3")
+                        if new_color != expected_color:
+                            st.session_state.graph_settings[color_preset_key] = "Custom"
+
+                    with rc[2]:
+                        opt_cols = st.columns(4)
+                        for oi, (ol, ok) in enumerate(zip(option_labels, option_keys)):
+                            bs[ok] = opt_cols[oi].checkbox(
+                                ol, bs.get(ok, True),
+                                key=f"{ok}_{current_gene}_{idx}",
+                                label_visibility="collapsed",
+                            )
                     # Keep legacy show_sig in sync (all-or-nothing fallback)
                     bs["show_sig"] = bs["show_sig_1"] or bs["show_sig_2"] or bs["show_sig_3"]
 
