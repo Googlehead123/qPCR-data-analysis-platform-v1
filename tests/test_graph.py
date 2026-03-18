@@ -267,3 +267,66 @@ class TestDataPointOverlay:
             show_data_points=True, replicate_data=None,
         )
         assert len(fig.data) == 1  # Only bar, no scatter
+
+
+class TestSignificanceBrackets:
+    def test_direct_mode_uses_annotations(self, mock_streamlit, graph_settings):
+        from qpcr.graph import GraphGenerator
+        import plotly.graph_objects as go
+        data = pd.DataFrame({
+            "Target": ["COL1A1", "COL1A1"],
+            "Condition": ["Non-treated", "Treatment1"],
+            "Group": ["Negative Control", "Treatment"],
+            "Relative_Expression": [1.0, 2.5],
+            "SEM": [0.1, 0.2],
+            "FC_Error_Upper": [0.15, 0.3],
+            "FC_Error_Lower": [0.12, 0.25],
+            "significance": ["", "**"],
+            "significance_2": ["", ""],
+        })
+        graph_settings["show_significance"] = True
+        graph_settings["sig_style"] = "direct"
+        fig = GraphGenerator.create_gene_graph(data=data, gene="COL1A1", settings=graph_settings)
+        sig_annotations = [a for a in fig.layout.annotations if a.text in ["*", "**", "***"]]
+        assert len(sig_annotations) >= 1
+
+    def test_bracketed_mode_uses_shapes(self, mock_streamlit, graph_settings):
+        from qpcr.graph import GraphGenerator
+        data = pd.DataFrame({
+            "Target": ["COL1A1", "COL1A1"],
+            "Condition": ["Non-treated", "Treatment1"],
+            "Group": ["Negative Control", "Treatment"],
+            "Relative_Expression": [1.0, 2.5],
+            "SEM": [0.1, 0.2],
+            "FC_Error_Upper": [0.15, 0.3],
+            "FC_Error_Lower": [0.12, 0.25],
+            "significance": ["", "**"],
+            "significance_2": ["", ""],
+        })
+        graph_settings["show_significance"] = True
+        graph_settings["sig_style"] = "bracketed"
+        mock_streamlit.session_state["analysis_cmp_condition"] = "Non-treated"
+        fig = GraphGenerator.create_gene_graph(data=data, gene="COL1A1", settings=graph_settings)
+        bracket_shapes = [s for s in (fig.layout.shapes or []) if s.type == "line"]
+        assert len(bracket_shapes) >= 3  # 1 horizontal + 2 vertical ticks per bracket
+
+    def test_bracket_fallback_when_too_many_comparisons(self, mock_streamlit, graph_settings):
+        from qpcr.graph import GraphGenerator
+        conditions = ["Non-treated"] + [f"T{i}" for i in range(1, 8)]
+        data = pd.DataFrame({
+            "Target": ["COL1A1"] * 8,
+            "Condition": conditions,
+            "Group": ["Negative Control"] + ["Treatment"] * 7,
+            "Relative_Expression": [1.0] + [float(i) for i in range(2, 9)],
+            "SEM": [0.1] * 8,
+            "FC_Error_Upper": [0.15] * 8,
+            "FC_Error_Lower": [0.12] * 8,
+            "significance": [""] + ["**"] * 7,
+            "significance_2": [""] * 8,
+        })
+        graph_settings["show_significance"] = True
+        graph_settings["sig_style"] = "bracketed"
+        mock_streamlit.session_state["analysis_cmp_condition"] = "Non-treated"
+        fig = GraphGenerator.create_gene_graph(data=data, gene="COL1A1", settings=graph_settings)
+        bracket_shapes = [s for s in (fig.layout.shapes or []) if s.type == "line"]
+        assert len(bracket_shapes) == 0  # Fell back to direct mode

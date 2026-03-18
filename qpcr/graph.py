@@ -34,6 +34,53 @@ class GraphGenerator:
         return wrapped.replace("\n", "<br>")
 
     @staticmethod
+    def _add_bracket_annotation(
+        fig: go.Figure,
+        x1: float,
+        x2: float,
+        y_base: float,
+        symbol: str,
+        offset_level: int,
+        font_size: int = 12,
+        spacing: float = 0.05,
+    ) -> None:
+        """Add a significance bracket between two x positions.
+
+        Draws a horizontal bar with vertical tick marks at each end, plus the
+        significance symbol centred above the bracket.
+        """
+        y = y_base + (offset_level * spacing * y_base)
+        tick_h = spacing * y_base * 0.3
+
+        # Horizontal line
+        fig.add_shape(
+            type="line", x0=x1, x1=x2, y0=y, y1=y,
+            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
+        )
+        # Left tick
+        fig.add_shape(
+            type="line", x0=x1, x1=x1, y0=y - tick_h, y1=y,
+            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
+        )
+        # Right tick
+        fig.add_shape(
+            type="line", x0=x2, x1=x2, y0=y - tick_h, y1=y,
+            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
+        )
+        # Symbol centred above the bracket
+        fig.add_annotation(
+            x=(x1 + x2) / 2,
+            y=y + (tick_h * 0.5),
+            text=symbol,
+            showarrow=False,
+            font=dict(size=font_size, color="#2C3E50", family=PLOTLY_FONT_FAMILY),
+            xref="x",
+            yref="y",
+            xanchor="center",
+            yanchor="bottom",
+        )
+
+    @staticmethod
     def create_gene_graph(
         data: pd.DataFrame,
         gene: str,
@@ -234,76 +281,168 @@ class GraphGenerator:
 
         fixed_symbol_spacing = y_max_auto * 0.05
 
-        # Add significance symbols
-        for idx in range(n_bars):
-            row = gene_data_indexed.iloc[idx]
-            condition = row["Condition"]
-            bar_key = f"{gene}_{condition}"
-            bar_config = gene_bar_settings.get(
-                bar_key, {"show_sig": True, "show_err": True}
+        sig_style = settings.get("sig_style", "direct")
+
+        # Count significant comparisons for bracket-mode fallback guard
+        sig_count_1 = sum(
+            1 for idx in range(n_bars)
+            if gene_data_indexed.iloc[idx].get("significance", "") in ["*", "**", "***"]
+        )
+        sig_count_2 = sum(
+            1 for idx in range(n_bars)
+            if gene_data_indexed.iloc[idx].get("significance_2", "") in ["#", "##", "###"]
+        )
+        total_sig_count = sig_count_1 + sig_count_2
+
+        # Fall back to direct when there are too many brackets to render cleanly
+        if sig_style == "bracketed" and total_sig_count > 6:
+            sig_style = "direct"
+
+        if sig_style == "bracketed" and show_sig_global:
+            # Bracket mode: draw horizontal bracket lines from reference bar to each
+            # significant bar.  Falls back to direct when no reference condition is set.
+            ref_condition_1 = st.session_state.get("analysis_cmp_condition", "")
+            ref_condition_2 = st.session_state.get("analysis_cmp_condition_2", "")
+
+            condition_list = gene_data_indexed["Condition"].tolist()
+
+            # Build a lookup: condition name → integer x index
+            condition_to_idx: dict[str, int] = {
+                cond: i for i, cond in enumerate(condition_list)
+            }
+
+            ref_idx_1 = condition_to_idx.get(ref_condition_1)
+            ref_idx_2 = condition_to_idx.get(ref_condition_2)
+
+            # y_base is top of the tallest bar + error bar
+            y_base = max(
+                gene_data_indexed["Relative_Expression"].iloc[i] + error_visible_upper[i]
+                for i in range(n_bars)
             )
+            y_base = max(y_base, max_y_value * 0.1)  # Guard against zero
 
-            sig_1 = row.get("significance", "")
-            sig_2 = row.get("significance_2", "")
+            bracket_level = 0  # Stack brackets vertically
 
-            bar_height = row["Relative_Expression"]
-            error_bar_height = error_visible_upper[idx]
-            base_y_position = bar_height + error_bar_height
+            for idx in range(n_bars):
+                row = gene_data_indexed.iloc[idx]
+                condition = row["Condition"]
+                bar_key = f"{gene}_{condition}"
+                bar_config = gene_bar_settings.get(
+                    bar_key, {"show_sig": True, "show_err": True}
+                )
 
-            asterisk_font_size = 16
-            hashtag_font_size = 10
+                if not bar_config.get("show_sig", True):
+                    continue
 
-            if show_sig_global and bar_config.get("show_sig", True):
-                symbols_to_show = []
-                font_sizes = []
-
-                if sig_1 in ["*", "**", "***"]:
-                    symbols_to_show.append(sig_1)
-                    font_sizes.append(asterisk_font_size)
-
-                if sig_2 in ["#", "##", "###"]:
-                    symbols_to_show.append(sig_2)
-                    font_sizes.append(hashtag_font_size)
-
-                if len(symbols_to_show) == 2:
-                    fig.add_annotation(
-                        x=idx,
-                        y=base_y_position + (fixed_symbol_spacing * 0.2),
-                        text=symbols_to_show[0],
-                        showarrow=False,
-                        font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
-                        xref="x",
-                        yref="y",
-                        xanchor="center",
-                        yanchor="bottom",
+                sig_1 = row.get("significance", "")
+                if sig_1 in ["*", "**", "***"] and ref_idx_1 is not None and idx != ref_idx_1:
+                    x_left = min(ref_idx_1, idx) - 0.0
+                    x_right = max(ref_idx_1, idx) + 0.0
+                    GraphGenerator._add_bracket_annotation(
+                        fig, x_left, x_right, y_base, sig_1, bracket_level,
+                        font_size=14, spacing=0.12,
                     )
+                    bracket_level += 1
 
-                    fig.add_annotation(
-                        x=idx,
-                        y=base_y_position
-                        + (fixed_symbol_spacing * 0.2)
-                        + fixed_symbol_spacing,
-                        text=symbols_to_show[1],
-                        showarrow=False,
-                        font=dict(size=font_sizes[1], color="black", family=PLOTLY_FONT_FAMILY),
-                        xref="x",
-                        yref="y",
-                        xanchor="center",
-                        yanchor="bottom",
-                    )
+            bracket_level_2 = bracket_level  # Continue stacking for 2nd comparison
+            for idx in range(n_bars):
+                row = gene_data_indexed.iloc[idx]
+                condition = row["Condition"]
+                bar_key = f"{gene}_{condition}"
+                bar_config = gene_bar_settings.get(
+                    bar_key, {"show_sig": True, "show_err": True}
+                )
 
-                elif len(symbols_to_show) == 1:
-                    fig.add_annotation(
-                        x=idx,
-                        y=base_y_position + (fixed_symbol_spacing * 0.2),
-                        text=symbols_to_show[0],
-                        showarrow=False,
-                        font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
-                        xref="x",
-                        yref="y",
-                        xanchor="center",
-                        yanchor="bottom",
+                if not bar_config.get("show_sig", True):
+                    continue
+
+                sig_2 = row.get("significance_2", "")
+                if sig_2 in ["#", "##", "###"] and ref_idx_2 is not None and idx != ref_idx_2:
+                    x_left = min(ref_idx_2, idx) - 0.0
+                    x_right = max(ref_idx_2, idx) + 0.0
+                    GraphGenerator._add_bracket_annotation(
+                        fig, x_left, x_right, y_base, sig_2, bracket_level_2,
+                        font_size=11, spacing=0.12,
                     )
+                    bracket_level_2 += 1
+
+            # Expand y_max_auto to accommodate stacked brackets
+            total_bracket_levels = max(bracket_level, bracket_level_2)
+            if total_bracket_levels > 0:
+                bracket_overhead = total_bracket_levels * 0.12 * y_base + y_base * 0.15
+                y_max_auto = max(y_max_auto, y_base + bracket_overhead)
+
+        else:
+            # Direct mode: add significance symbols above each bar (original behaviour)
+            for idx in range(n_bars):
+                row = gene_data_indexed.iloc[idx]
+                condition = row["Condition"]
+                bar_key = f"{gene}_{condition}"
+                bar_config = gene_bar_settings.get(
+                    bar_key, {"show_sig": True, "show_err": True}
+                )
+
+                sig_1 = row.get("significance", "")
+                sig_2 = row.get("significance_2", "")
+
+                bar_height = row["Relative_Expression"]
+                error_bar_height = error_visible_upper[idx]
+                base_y_position = bar_height + error_bar_height
+
+                asterisk_font_size = 16
+                hashtag_font_size = 10
+
+                if show_sig_global and bar_config.get("show_sig", True):
+                    symbols_to_show = []
+                    font_sizes = []
+
+                    if sig_1 in ["*", "**", "***"]:
+                        symbols_to_show.append(sig_1)
+                        font_sizes.append(asterisk_font_size)
+
+                    if sig_2 in ["#", "##", "###"]:
+                        symbols_to_show.append(sig_2)
+                        font_sizes.append(hashtag_font_size)
+
+                    if len(symbols_to_show) == 2:
+                        fig.add_annotation(
+                            x=idx,
+                            y=base_y_position + (fixed_symbol_spacing * 0.2),
+                            text=symbols_to_show[0],
+                            showarrow=False,
+                            font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
+                            xref="x",
+                            yref="y",
+                            xanchor="center",
+                            yanchor="bottom",
+                        )
+
+                        fig.add_annotation(
+                            x=idx,
+                            y=base_y_position
+                            + (fixed_symbol_spacing * 0.2)
+                            + fixed_symbol_spacing,
+                            text=symbols_to_show[1],
+                            showarrow=False,
+                            font=dict(size=font_sizes[1], color="black", family=PLOTLY_FONT_FAMILY),
+                            xref="x",
+                            yref="y",
+                            xanchor="center",
+                            yanchor="bottom",
+                        )
+
+                    elif len(symbols_to_show) == 1:
+                        fig.add_annotation(
+                            x=idx,
+                            y=base_y_position + (fixed_symbol_spacing * 0.2),
+                            text=symbols_to_show[0],
+                            showarrow=False,
+                            font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
+                            xref="x",
+                            yref="y",
+                            xanchor="center",
+                            yanchor="bottom",
+                        )
 
         gene_label = display_gene_name if display_gene_name else gene
         y_label_html = f"<b>Relative <span style='color:red;'>{gene_label}</span> Expression Level</b>"
