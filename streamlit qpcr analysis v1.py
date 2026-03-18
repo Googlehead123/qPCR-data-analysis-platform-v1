@@ -3683,6 +3683,7 @@ def export_to_excel(
     mapping: dict,
     qc_stats: dict = None,
     replicate_stats: pd.DataFrame = None,
+    excluded_wells=None,
 ) -> bytes:
     """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix."""
     output = io.BytesIO()
@@ -3766,6 +3767,24 @@ def export_to_excel(
                     )
                     fc_matrix = fc_matrix.round(4)
                     fc_matrix.to_excel(writer, sheet_name="FC_Matrix")
+
+        # Replicate-level fold changes
+        if raw_data is not None and excluded_wells is not None:
+            hk_gene = params.get("Housekeeping_Gene")
+            ref_sample = params.get("Reference_Sample")
+            if hk_gene and ref_sample:
+                try:
+                    replicate_fc = AnalysisEngine.compute_replicate_fold_changes(
+                        raw_data=raw_data,
+                        hk_gene=hk_gene,
+                        ref_sample=ref_sample,
+                        sample_mapping=mapping,
+                        excluded_wells=excluded_wells,
+                    )
+                    if not replicate_fc.empty:
+                        replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)
+                except Exception:
+                    pass  # Best-effort
 
         # QC Report sheet
         _write_qc_report_sheet(writer, qc_stats, replicate_stats)
