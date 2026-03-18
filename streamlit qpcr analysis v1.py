@@ -4318,6 +4318,87 @@ with tab_qc:
                 if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
                     st.rerun()
 
+            # ---- Auto-Exclude High SD Outliers ----
+            st.markdown("---")
+            auto_excl_cols = st.columns([2, 1, 1])
+            with auto_excl_cols[0]:
+                sd_thresh = st.slider(
+                    "SD Threshold (Ct)",
+                    min_value=0.3, max_value=1.0, value=0.5, step=0.1,
+                    key="sd_threshold_slider",
+                    help="Triplicates with CT SD above this will be flagged",
+                )
+            with auto_excl_cols[1]:
+                find_all_btn = st.button(
+                    "🔍 Find All Outliers", key="find_all_sd_outliers", use_container_width=True
+                )
+            with auto_excl_cols[2]:
+                # Per-gene button — read gene filter from previous render cycle
+                _prev_gene = st.session_state.get("qc_gene_filter", "All Genes")
+                if _prev_gene and _prev_gene != "All Genes":
+                    clean_gene_btn = st.button(
+                        f"🧹 Clean {_prev_gene}", key="clean_gene_btn", use_container_width=True
+                    )
+                else:
+                    clean_gene_btn = False
+
+            # Handle find buttons
+            if find_all_btn:
+                suggestions = QualityControl.find_high_sd_outliers(
+                    data, st.session_state.get("excluded_wells", {}), sd_threshold=sd_thresh,
+                )
+                st.session_state["_sd_outlier_suggestions"] = suggestions
+
+            if clean_gene_btn:
+                suggestions = QualityControl.find_high_sd_outliers(
+                    data, st.session_state.get("excluded_wells", {}),
+                    sd_threshold=sd_thresh, gene_filter=_prev_gene,
+                )
+                st.session_state["_sd_outlier_suggestions"] = suggestions
+
+            # Display preview table
+            suggestions = st.session_state.get("_sd_outlier_suggestions", [])
+            if suggestions:
+                st.markdown(f"**Found {len(suggestions)} high-SD outlier(s):**")
+                preview_df = pd.DataFrame(suggestions)
+                preview_df.insert(0, "Exclude", True)
+                edited = st.data_editor(
+                    preview_df[["Exclude", "Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"]],
+                    disabled=["Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"],
+                    key="sd_outlier_preview",
+                    use_container_width=True,
+                )
+
+                apply_cols = st.columns([3, 1])
+                with apply_cols[1]:
+                    if st.button("Apply Selected", key="apply_sd_exclusions", type="primary", use_container_width=True):
+                        selected = edited[edited["Exclude"]]
+                        # Save undo history
+                        if "excluded_wells_history" in st.session_state:
+                            st.session_state.excluded_wells_history.append(
+                                {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
+                            )
+                        excl_dict = st.session_state.get("excluded_wells", {})
+                        if not isinstance(excl_dict, dict):
+                            excl_dict = {}
+                        for _, row in selected.iterrows():
+                            key = (row["Target"], row["Sample"])
+                            if key not in excl_dict:
+                                excl_dict[key] = set()
+                            excl_dict[key].add(row["Well"])
+                        st.session_state.excluded_wells = excl_dict
+                        st.session_state.pop("_sd_outlier_suggestions", None)
+                        st.success(f"Excluded {len(selected)} well(s).")
+                        st.rerun()
+                with apply_cols[0]:
+                    if st.button("Dismiss", key="dismiss_sd_suggestions"):
+                        st.session_state.pop("_sd_outlier_suggestions", None)
+                        st.rerun()
+            elif find_all_btn or clean_gene_btn:
+                st.info("No triplicates exceed the SD threshold.")
+
+            st.markdown("---")
+
             # ---- Flagged Wells Alert Banner ----
             qc_results = QualityControl.detect_outliers(data, hk_gene)
             flagged = qc_results[qc_results["Flagged"]].copy()
