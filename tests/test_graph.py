@@ -201,3 +201,35 @@ class TestColorPresets:
         from qpcr.constants import FIGURE_SIZE_PRESETS
         for name, dims in FIGURE_SIZE_PRESETS.items():
             assert "width" in dims and "height" in dims, f"Preset '{name}' missing width/height"
+
+
+class TestVisualPolish:
+    def test_axis_color_is_dark(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings
+        )
+        assert fig.layout.yaxis.linecolor == "#2C3E50"
+
+    def test_axis_line_width(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings
+        )
+        assert fig.layout.yaxis.linewidth == 1.5
+
+    def test_default_bar_opacity(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        graph_settings.pop("bar_opacity", None)
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings
+        )
+        assert fig.data[0].marker.opacity == 0.85
+
+    def test_error_bar_cap_width(self, mock_streamlit, processed_gene_data, graph_settings):
+        from qpcr.graph import GraphGenerator
+        graph_settings["show_error"] = True
+        fig = GraphGenerator.create_gene_graph(
+            data=processed_gene_data, gene="COL1A1", settings=graph_settings
+        )
+        assert fig.data[0].error_y.width == 6

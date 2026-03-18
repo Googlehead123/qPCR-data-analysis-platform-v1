@@ -162,7 +162,7 @@ class GraphGenerator:
                     arrayminus=error_visible_lower,
                     visible=True,
                     thickness=2,
-                    width=4,
+                    width=6,
                     color="rgba(0,0,0,0.5)",
                     symmetric=False,
                 ),
@@ -171,7 +171,7 @@ class GraphGenerator:
                     line=dict(
                         width=settings.get("marker_line_width", 1), color="black"
                     ),
-                    opacity=settings.get("bar_opacity", 0.95),
+                    opacity=settings.get("bar_opacity", 0.85),
                 ),
                 showlegend=False,
             )
@@ -263,7 +263,7 @@ class GraphGenerator:
                     )
 
         gene_label = display_gene_name if display_gene_name else gene
-        y_label_html = f"Relative <b style='color:red;'>{gene_label}</b> Expression Level"
+        y_label_html = f"<b>Relative <span style='color:red;'>{gene_label}</span> Expression Level</b>"
 
         y_axis_config = dict(
             title=dict(
@@ -271,13 +271,15 @@ class GraphGenerator:
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14), family=PLOTLY_FONT_FAMILY),
                 standoff=15,
             ),
-            showgrid=False,
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.08)",
+            gridwidth=0.5,
             zeroline=True,
             zerolinewidth=1,
             zerolinecolor="black",
             showline=True,
-            linewidth=1,
-            linecolor="black",
+            linewidth=1.5,
+            linecolor="#2C3E50",
             mirror=False,
             range=[0, y_max_auto],
             fixedrange=False,
