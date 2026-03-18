@@ -377,3 +377,79 @@ class TestAnalysisEngineSEMCalculation:
         ref_rows = result[result["Condition"] == "Non-treated"]
         if len(ref_rows) > 0:
             assert abs(ref_rows["Relative_Expression"].iloc[0] - 1.0) < 0.1
+
+
+class TestFindHighSdOutliers:
+    def test_finds_outlier_in_high_sd_group(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+        data = pd.DataFrame({
+            "Well": ["A1", "A2", "A3", "B1", "B2", "B3"],
+            "Sample": ["S1", "S1", "S1", "S2", "S2", "S2"],
+            "Target": ["COL1A1", "COL1A1", "COL1A1", "COL1A1", "COL1A1", "COL1A1"],
+            "CT": [20.0, 20.1, 22.0, 18.0, 18.1, 18.2],
+        })
+        results = QualityControl.find_high_sd_outliers(data, excluded_wells={}, sd_threshold=0.5)
+        assert len(results) == 1
+        assert results[0]["Sample"] == "S1"
+        assert results[0]["Well"] == "A3"
+        assert results[0]["group_sd"] > 0.5
+
+    def test_skips_clean_groups(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+        data = pd.DataFrame({
+            "Well": ["A1", "A2", "A3"],
+            "Sample": ["S1", "S1", "S1"],
+            "Target": ["COL1A1", "COL1A1", "COL1A1"],
+            "CT": [20.0, 20.05, 20.1],
+        })
+        results = QualityControl.find_high_sd_outliers(data, excluded_wells={}, sd_threshold=0.5)
+        assert len(results) == 0
+
+    def test_skips_groups_with_fewer_than_3_replicates(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+        data = pd.DataFrame({
+            "Well": ["A1", "A2"],
+            "Sample": ["S1", "S1"],
+            "Target": ["COL1A1", "COL1A1"],
+            "CT": [20.0, 25.0],
+        })
+        results = QualityControl.find_high_sd_outliers(data, excluded_wells={}, sd_threshold=0.5)
+        assert len(results) == 0
+
+    def test_respects_excluded_wells_dict(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+        data = pd.DataFrame({
+            "Well": ["A1", "A2", "A3"],
+            "Sample": ["S1", "S1", "S1"],
+            "Target": ["COL1A1", "COL1A1", "COL1A1"],
+            "CT": [20.0, 20.1, 25.0],
+        })
+        excluded = {("COL1A1", "S1"): {"A3"}}
+        results = QualityControl.find_high_sd_outliers(data, excluded_wells=excluded, sd_threshold=0.5)
+        assert len(results) == 0
+
+    def test_respects_flat_set_excluded_wells(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+        data = pd.DataFrame({
+            "Well": ["A1", "A2", "A3"],
+            "Sample": ["S1", "S1", "S1"],
+            "Target": ["COL1A1", "COL1A1", "COL1A1"],
+            "CT": [20.0, 20.1, 25.0],
+        })
+        excluded = {"A3"}
+        results = QualityControl.find_high_sd_outliers(data, excluded_wells=excluded, sd_threshold=0.5)
+        assert len(results) == 0
+
+    def test_gene_filter_limits_scope(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+        data = pd.DataFrame({
+            "Well": ["A1", "A2", "A3", "B1", "B2", "B3"],
+            "Sample": ["S1", "S1", "S1", "S1", "S1", "S1"],
+            "Target": ["COL1A1", "COL1A1", "COL1A1", "ELN", "ELN", "ELN"],
+            "CT": [20.0, 20.1, 25.0, 18.0, 18.1, 23.0],
+        })
+        results = QualityControl.find_high_sd_outliers(
+            data, excluded_wells={}, sd_threshold=0.5, gene_filter="COL1A1"
+        )
+        assert len(results) == 1
+        assert results[0]["Target"] == "COL1A1"
