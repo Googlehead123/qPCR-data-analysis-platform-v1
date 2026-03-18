@@ -13,6 +13,8 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
 
+from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS
+
 try:
     from streamlit_sortables import sort_items
 except ImportError:
@@ -2053,6 +2055,8 @@ class GraphGenerator:
         display_gene_name: str = None,
         ref_line_value: float = None,
         ref_line_label: str = None,
+        show_data_points: bool = False,
+        replicate_data: pd.DataFrame = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -5464,7 +5468,50 @@ with tab4:
                     st.session_state.selected_gene_idx = idx
                     st.rerun()
 
+        PER_GENE_SUFFIXES = [
+            "_color_preset", "_figure_width", "_figure_height", "_font_size",
+            "_tick_size", "_ylabel_size", "_bar_opacity", "_marker_line_width",
+            "_bg_color", "_bar_gap", "_sig_style", "_show_data_points",
+            "_label_mode", "_ref_line", "_show_sig", "_show_err",
+        ]
+
         current_gene = gene_list[st.session_state.selected_gene_idx]
+
+        if len(gene_list) > 1:
+            apply_col1, apply_col2 = st.columns([3, 1])
+            with apply_col2:
+                if st.button(f"Apply to All {len(gene_list)} Genes", key="apply_all_genes", use_container_width=True):
+                    source_gene = current_gene
+                    source_preset = st.session_state.graph_settings.get(f"{source_gene}_color_preset", "Classic")
+                    for target_gene in gene_list:
+                        if target_gene == source_gene:
+                            continue
+                        for suffix in PER_GENE_SUFFIXES:
+                            src_key = f"{source_gene}{suffix}"
+                            tgt_key = f"{target_gene}{suffix}"
+                            if src_key in st.session_state.graph_settings:
+                                st.session_state.graph_settings[tgt_key] = st.session_state.graph_settings[src_key]
+                        if source_preset != "Custom":
+                            preset_colors = GRAPH_PRESETS.get(source_preset, {})
+                            target_data = st.session_state.processed_data.get(target_gene)
+                            if target_data is not None:
+                                if f"{target_gene}_bar_settings" not in st.session_state:
+                                    st.session_state[f"{target_gene}_bar_settings"] = {}
+                                for _, row in target_data.iterrows():
+                                    condition = row["Condition"]
+                                    group = row.get("Group", "Treatment")
+                                    bar_key = f"{target_gene}_{condition}"
+                                    color = preset_colors.get(group, preset_colors.get("Treatment", "#D3D3D3"))
+                                    if bar_key not in st.session_state[f"{target_gene}_bar_settings"]:
+                                        st.session_state[f"{target_gene}_bar_settings"][bar_key] = {
+                                            "color": color, "show_sig": True, "show_err": True,
+                                            "show_sig_1": True, "show_sig_2": True, "show_sig_3": True,
+                                        }
+                                    else:
+                                        st.session_state[f"{target_gene}_bar_settings"][bar_key]["color"] = color
+                                    st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = color
+                    st.success(f"Settings applied to all {len(gene_list)} genes.")
+                    st.rerun()
         gene_data = st.session_state.processed_data[current_gene]
 
         show_sig_key = f"{current_gene}_show_sig"
@@ -5486,23 +5533,62 @@ with tab4:
         if st.session_state.graph_settings.get(ref_line_key, "None") not in ref_options:
             st.session_state.graph_settings[ref_line_key] = "None"
 
-        # Toolbar row 1: toggles and reset
-        tb_row1 = st.columns([1.2, 1.2, 1.5, 0.8])
+        # Initialize color preset key
+        color_preset_key = f"{current_gene}_color_preset"
+        if color_preset_key not in st.session_state.graph_settings:
+            st.session_state.graph_settings[color_preset_key] = "Classic"
+
+        # Initialize data points toggle key
+        show_dp_key = f"{current_gene}_show_data_points"
+        if show_dp_key not in st.session_state.graph_settings:
+            st.session_state.graph_settings[show_dp_key] = False
+
+        # Toolbar row 1: preset, toggles, bar gap, reset
+        tb_row1 = st.columns([1.5, 1.0, 1.0, 1.0, 1.5, 0.7])
         with tb_row1[0]:
+            preset_names = list(GRAPH_PRESETS.keys()) + ["Custom"]
+            current_preset = st.session_state.graph_settings.get(color_preset_key, "Classic")
+            if current_preset not in preset_names:
+                current_preset = "Custom"
+            selected_preset = st.selectbox(
+                "Color Preset",
+                preset_names,
+                index=preset_names.index(current_preset),
+                key=f"preset_{current_gene}",
+            )
+            if selected_preset != "Custom" and selected_preset != st.session_state.graph_settings.get(color_preset_key):
+                preset_colors = GRAPH_PRESETS[selected_preset]
+                for _, row in gene_data.iterrows():
+                    condition = row["Condition"]
+                    group = row.get("Group", "Treatment")
+                    bar_key = f"{current_gene}_{condition}"
+                    color = preset_colors.get(group, preset_colors.get("Treatment", "#D3D3D3"))
+                    if bar_key in st.session_state.get(f"{current_gene}_bar_settings", {}):
+                        st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"] = color
+                    st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
+            st.session_state.graph_settings[color_preset_key] = selected_preset
+        with tb_row1[1]:
             sig_on = st.toggle(
                 "Sig. */#/\u2020",
                 st.session_state.graph_settings[show_sig_key],
                 key=f"tgl_sig_{current_gene}",
             )
             st.session_state.graph_settings[show_sig_key] = sig_on
-        with tb_row1[1]:
+        with tb_row1[2]:
             err_on = st.toggle(
                 "Error Bars",
                 st.session_state.graph_settings[show_err_key],
                 key=f"tgl_err_{current_gene}",
             )
             st.session_state.graph_settings[show_err_key] = err_on
-        with tb_row1[2]:
+        with tb_row1[3]:
+            dp_on = st.toggle(
+                "Data Points",
+                st.session_state.graph_settings[show_dp_key],
+                key=f"tgl_dp_{current_gene}",
+            )
+            st.session_state.graph_settings[show_dp_key] = dp_on
+        with tb_row1[4]:
             gap_val = st.select_slider(
                 "Bar Gap",
                 options=[0.1, 0.15, 0.2, 0.25, 0.3, 0.4],
@@ -5510,13 +5596,16 @@ with tab4:
                 key=f"gap_sl_{current_gene}",
             )
             st.session_state.graph_settings[bar_gap_key] = gap_val
-        with tb_row1[3]:
+        with tb_row1[5]:
             if st.button("Reset", key=f"reset_all_{current_gene}", use_container_width=True):
                 if f"{current_gene}_bar_settings" in st.session_state:
                     del st.session_state[f"{current_gene}_bar_settings"]
                 st.session_state.graph_settings[show_sig_key] = True
                 st.session_state.graph_settings[show_err_key] = True
                 st.session_state.graph_settings[bar_gap_key] = 0.25
+                st.session_state.graph_settings[show_dp_key] = False
+                st.session_state.graph_settings.pop(color_preset_key, None)
+                st.session_state.graph_settings.pop(f"{current_gene}_sig_style", None)
                 for per_gene_key in [
                     f"{current_gene}_figure_width", f"{current_gene}_figure_height",
                     f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
@@ -5527,6 +5616,22 @@ with tab4:
                 ]:
                     st.session_state.graph_settings.pop(per_gene_key, None)
                 st.rerun()
+
+        # Significance style radio (only when sig is enabled)
+        if st.session_state.graph_settings.get(show_sig_key, True):
+            sig_style_key = f"{current_gene}_sig_style"
+            if sig_style_key not in st.session_state.graph_settings:
+                st.session_state.graph_settings[sig_style_key] = "direct"
+            sig_style_col1, sig_style_col2 = st.columns([2, 4])
+            with sig_style_col1:
+                sig_style = st.radio(
+                    "Significance Style",
+                    ["Direct \u2731", "Bracketed \u252c"],
+                    index=0 if st.session_state.graph_settings.get(sig_style_key, "direct") == "direct" else 1,
+                    key=f"sig_style_{current_gene}",
+                    horizontal=True,
+                )
+                st.session_state.graph_settings[sig_style_key] = "direct" if "Direct" in sig_style else "bracketed"
 
         # Toolbar row 2: ref line + label mode
         label_mode_key = f"{current_gene}_label_mode"
@@ -5795,6 +5900,24 @@ with tab4:
                     ref_line_val = _rv
                     ref_line_lbl = f"{ref_condition}: {_rv:.2f}"
 
+        # Prepare data points overlay if enabled
+        replicate_df = None
+        show_dp = st.session_state.graph_settings.get(f"{current_gene}_show_data_points", False)
+        if show_dp:
+            raw = st.session_state.get("data")
+            hk = st.session_state.get("hk_gene")
+            ref = st.session_state.get("analysis_ref_condition")
+            mapping = st.session_state.get("sample_mapping", {})
+            excl = st.session_state.get("excluded_wells", set())
+            if raw is not None and hk and ref:
+                from qpcr.analysis import AnalysisEngine as _AE
+                all_replicates = _AE.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
+                replicate_df = all_replicates[all_replicates["Target"] == current_gene]
+
+        current_settings["sig_style"] = st.session_state.graph_settings.get(
+            f"{current_gene}_sig_style", "direct"
+        )
+
         fig = GraphGenerator.create_gene_graph(
             gene_data,
             current_gene,
@@ -5806,6 +5929,8 @@ with tab4:
             display_gene_name=display_gene_name,
             ref_line_value=ref_line_val,
             ref_line_label=ref_line_lbl,
+            show_data_points=show_dp,
+            replicate_data=replicate_df,
         )
 
         st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
