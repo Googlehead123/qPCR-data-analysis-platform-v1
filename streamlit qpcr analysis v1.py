@@ -6161,6 +6161,32 @@ with tab5:
             "ttest_type": st.session_state.get("ttest_type", "welch"),
         }
 
+        def _build_export_extras():
+            """Build qc_stats, replicate_stats, and excluded_wells for export."""
+            qc_stats = None
+            replicate_stats_df = None
+            excl = st.session_state.get("excluded_wells", {})
+
+            if st.session_state.get("data") is not None:
+                from qpcr.quality_control import QualityControl
+
+                excl_flat = set()
+                if isinstance(excl, dict):
+                    for well_set in excl.values():
+                        excl_flat.update(well_set)
+                elif excl:
+                    excl_flat = set(excl)
+
+                qc_data = st.session_state.data.copy()
+                if excl_flat:
+                    qc_data = qc_data[~qc_data["Well"].isin(excl_flat)]
+
+                replicate_stats_df = QualityControl.get_replicate_stats(qc_data)
+                qc_summary = QualityControl.get_qc_summary_stats(st.session_state.data, excl_flat or None)
+                qc_stats = qc_summary if qc_summary else None
+
+            return qc_stats, replicate_stats_df, excl
+
         # ---- Unified ZIP Export ----
         if st.session_state.get("graphs"):
             if st.button("📦 Export All (ZIP)", key="export_all_zip", type="primary", use_container_width=True):
@@ -6175,11 +6201,15 @@ with tab5:
                         # 1. Excel report
                         progress.progress(10, text="Generating Excel...")
                         try:
+                            _qc, _rep, _excl = _build_export_extras()
                             excel_bytes = export_to_excel(
                                 st.session_state.data,
                                 st.session_state.processed_data,
                                 analysis_params,
                                 st.session_state.sample_mapping,
+                                qc_stats=_qc,
+                                replicate_stats=_rep,
+                                excluded_wells=_excl,
                             )
                             zf.writestr("qPCR_Report.xlsx", excel_bytes)
                         except Exception as e:
@@ -6256,11 +6286,15 @@ with tab5:
             st.markdown("**Excel Report**")
             st.caption("Parameters, mapping, raw data, calculations, QC, FC matrix")
             try:
+                _qc, _rep, _excl = _build_export_extras()
                 excel_data = export_to_excel(
                     st.session_state.data,
                     st.session_state.processed_data,
                     analysis_params,
                     st.session_state.sample_mapping,
+                    qc_stats=_qc,
+                    replicate_stats=_rep,
+                    excluded_wells=_excl,
                 )
             except Exception as e:
                 st.error(f"Excel export failed: {e}")
@@ -6532,6 +6566,7 @@ with tab5:
                                 1 / total_steps, text="Generating Excel report..."
                             )
                             current_step += 1
+                            _qc, _rep, _excl = _build_export_extras()
                             zf.writestr(
                                 "analysis_report.xlsx",
                                 export_to_excel(
@@ -6539,6 +6574,9 @@ with tab5:
                                     st.session_state.processed_data,
                                     analysis_params,
                                     st.session_state.sample_mapping,
+                                    qc_stats=_qc,
+                                    replicate_stats=_rep,
+                                    excluded_wells=_excl,
                                 ),
                             )
                             progress_bar.progress(
