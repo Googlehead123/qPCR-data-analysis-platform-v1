@@ -170,6 +170,34 @@ class TestGraphGeneratorWrapText:
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
         GraphGenerator = spec.GraphGenerator
-        
+
         result = GraphGenerator._wrap_text("This is a very long condition name", width=15)
         assert "<br>" in result
+
+
+class TestColorPresets:
+    def test_all_presets_cover_all_group_keys(self):
+        from qpcr.constants import GRAPH_PRESETS, DEFAULT_GROUP_COLORS
+        required_groups = set(DEFAULT_GROUP_COLORS.keys())
+        for preset_name, colors in GRAPH_PRESETS.items():
+            assert required_groups.issubset(set(colors.keys())), \
+                f"Preset '{preset_name}' missing groups: {required_groups - set(colors.keys())}"
+
+    def test_classic_preset_matches_defaults(self):
+        from qpcr.constants import GRAPH_PRESETS, DEFAULT_GROUP_COLORS
+        for group, color in DEFAULT_GROUP_COLORS.items():
+            assert GRAPH_PRESETS["Classic"][group] == color, \
+                f"Classic preset mismatch for '{group}': {GRAPH_PRESETS['Classic'][group]} != {color}"
+
+    def test_all_preset_colors_are_valid_hex(self):
+        import re
+        from qpcr.constants import GRAPH_PRESETS
+        hex_re = re.compile(r'^#[0-9A-Fa-f]{6}$')
+        for preset_name, colors in GRAPH_PRESETS.items():
+            for group, color in colors.items():
+                assert hex_re.match(color), f"Invalid hex in {preset_name}/{group}: {color}"
+
+    def test_figure_size_presets_have_width_and_height(self):
+        from qpcr.constants import FIGURE_SIZE_PRESETS
+        for name, dims in FIGURE_SIZE_PRESETS.items():
+            assert "width" in dims and "height" in dims, f"Preset '{name}' missing width/height"

@@ -16,6 +16,41 @@ DEFAULT_GROUP_COLORS = {
     "Treatment": "#D3D3D3",
 }
 
+GRAPH_PRESETS = {
+    "Steel": {
+        "Baseline": "#C8D6E0", "Non-treated": "#C8D6E0", "Control": "#C8D6E0",
+        "Negative Control": "#C8D6E0", "Treatment": "#4A7A9F",
+        "Inducer": "#2C5F7F", "Positive Control": "#2C5F7F",
+    },
+    "Warm Neutral": {
+        "Baseline": "#FFFFFF", "Non-treated": "#FFFFFF", "Control": "#FFFFFF",
+        "Negative Control": "#FFFFFF", "Treatment": "#D4B896",
+        "Inducer": "#B89A70", "Positive Control": "#B89A70",
+    },
+    "Classic": {
+        "Baseline": "#FFFFFF", "Non-treated": "#FFFFFF", "Control": "#FFFFFF",
+        "Negative Control": "#FFFFFF", "Treatment": "#D3D3D3",
+        "Inducer": "#909090", "Positive Control": "#909090",
+    },
+    "Sage": {
+        "Baseline": "#E8E8E8", "Non-treated": "#E8E8E8", "Control": "#E8E8E8",
+        "Negative Control": "#E8E8E8", "Treatment": "#8BAF9A",
+        "Inducer": "#5C8A6E", "Positive Control": "#5C8A6E",
+    },
+    "Slate": {
+        "Baseline": "#EDEDED", "Non-treated": "#EDEDED", "Control": "#EDEDED",
+        "Negative Control": "#EDEDED", "Treatment": "#8E8EA0",
+        "Inducer": "#5B5B78", "Positive Control": "#5B5B78",
+    },
+}
+
+FIGURE_SIZE_PRESETS = {
+    "PPT Full": {"width": 28, "height": 16},
+    "PPT Half": {"width": 14, "height": 10},
+    "Square": {"width": 16, "height": 16},
+    "Wide": {"width": 32, "height": 14},
+}
+
 # COSMAX brand colors for PPT redesign
 COSMAX_RED = "#EA1D22"
 COSMAX_BLACK = "#000000"
