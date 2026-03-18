@@ -6053,6 +6053,92 @@ with tab5:
             "ttest_type": st.session_state.get("ttest_type", "welch"),
         }
 
+        # ---- Unified ZIP Export ----
+        if st.session_state.get("graphs"):
+            if st.button("📦 Export All (ZIP)", key="export_all_zip", type="primary", use_container_width=True):
+                zip_buffer = io.BytesIO()
+                errors = []
+                efficacy = st.session_state.selected_efficacy
+
+                with st.spinner("Generating complete export..."):
+                    progress = st.progress(0, text="Starting...")
+
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        # 1. Excel report
+                        progress.progress(10, text="Generating Excel...")
+                        try:
+                            excel_bytes = export_to_excel(
+                                st.session_state.data,
+                                st.session_state.processed_data,
+                                analysis_params,
+                                st.session_state.sample_mapping,
+                            )
+                            zf.writestr("qPCR_Report.xlsx", excel_bytes)
+                        except Exception as e:
+                            errors.append(f"Excel: {e}")
+
+                        # 2. PNG figures
+                        for i, (gene, fig) in enumerate(st.session_state.graphs.items()):
+                            progress.progress(
+                                10 + int(60 * (i + 1) / len(st.session_state.graphs)),
+                                text=f"Exporting {gene}...",
+                            )
+                            try:
+                                img_bytes = fig.to_image(format="png", scale=2, width=1200, height=800)
+                                zf.writestr(f"figures/{gene}.png", img_bytes)
+                            except Exception as e:
+                                errors.append(f"PNG {gene}: {e}")
+
+                        # 3. PPT report
+                        progress.progress(80, text="Generating PowerPoint...")
+                        try:
+                            ppt_bytes = PPTGenerator.generate_presentation(
+                                st.session_state.graphs,
+                                st.session_state.processed_data,
+                                analysis_params,
+                                graph_settings=st.session_state.get("graph_settings"),
+                            )
+                            if ppt_bytes:
+                                zf.writestr("qPCR_Report.pptx", ppt_bytes.getvalue() if hasattr(ppt_bytes, "getvalue") else ppt_bytes)
+                        except Exception as e:
+                            errors.append(f"PPT: {e}")
+
+                        # 4. Interactive HTML
+                        progress.progress(90, text="Generating HTML...")
+                        try:
+                            html_parts = [
+                                "<html><head><title>qPCR Graphs</title></head><body>",
+                                f"<h1>{efficacy} Analysis</h1>",
+                                f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
+                            ]
+                            for gene, fig in st.session_state.graphs.items():
+                                html_parts.append(f"<h2>{gene}</h2>")
+                                html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+                                html_parts.append("<hr>")
+                            html_parts.append("</body></html>")
+                            zf.writestr("figures_html/all_graphs.html", "\n".join(html_parts))
+                        except Exception as e:
+                            errors.append(f"HTML: {e}")
+
+                        # 5. Error manifest
+                        if errors:
+                            zf.writestr("_errors.txt", "\n".join(errors))
+
+                    progress.progress(100, text="Done!")
+
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.download_button(
+                    label=f"⬇️ Download ZIP ({len(st.session_state.graphs)} genes)",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"qPCR_Export_{efficacy}_{timestamp}.zip",
+                    mime="application/zip",
+                    key="dl_all_zip",
+                )
+                if errors:
+                    st.warning(f"Some exports failed: {', '.join(errors)}")
+
+            st.markdown("---")
+
         # ---- Group 1: Reports ----
         st.subheader("Reports")
 
