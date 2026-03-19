@@ -2232,6 +2232,7 @@ class GraphGenerator:
         ref_line_label: str = None,
         show_data_points: bool = False,
         replicate_data: pd.DataFrame = None,
+        color_preset: str = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -2302,23 +2303,30 @@ class GraphGenerator:
         condition_names = gene_data_indexed["Condition"].tolist()
         n_bars = len(gene_data_indexed)
 
-        # Get colors - White/Medium Grey for controls, Grey base for treatments
-        bar_colors = []
+        # Get colors — preset takes priority, then per-sample custom, then group defaults
+        _preset_map = None
+        if color_preset and color_preset != "Custom" and color_preset in GRAPH_PRESETS:
+            _preset_map = GRAPH_PRESETS[color_preset]
 
+        bar_colors = []
         for idx, row in gene_data_indexed.iterrows():
             condition = row["Condition"]
             group = row.get("Group", "Treatment")
 
-            custom_key = f"{gene}_{condition}"
-            if custom_key in settings.get("bar_colors_per_sample", {}):
-                bar_colors.append(settings["bar_colors_per_sample"][custom_key])
-            elif condition_colors and condition in condition_colors:
-                bar_colors.append(condition_colors[condition])
-            elif group in DEFAULT_GROUP_COLORS:
-                bar_colors.append(DEFAULT_GROUP_COLORS[group])
+            if _preset_map:
+                # Preset active — use preset colors directly
+                bar_colors.append(_preset_map.get(group, _preset_map.get("Treatment", "#D3D3D3")))
             else:
-                default_color = settings.get("bar_colors", {}).get(gene, "#D3D3D3")
-                bar_colors.append(default_color)
+                # Custom mode — use per-sample overrides or group defaults
+                custom_key = f"{gene}_{condition}"
+                if custom_key in settings.get("bar_colors_per_sample", {}):
+                    bar_colors.append(settings["bar_colors_per_sample"][custom_key])
+                elif condition_colors and condition in condition_colors:
+                    bar_colors.append(condition_colors[condition])
+                elif group in DEFAULT_GROUP_COLORS:
+                    bar_colors.append(DEFAULT_GROUP_COLORS[group])
+                else:
+                    bar_colors.append("#D3D3D3")
 
         # Create figure
         fig = go.Figure()
@@ -6275,32 +6283,23 @@ with tab4:
                         f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
                         unsafe_allow_html=True,
                     )
-                    _active_preset_name = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
-                    if _active_preset_name != "Custom" and _active_preset_name in GRAPH_PRESETS:
-                        # Preset is active — use preset color, show picker as read-only indicator
-                        _preset_color = GRAPH_PRESETS[_active_preset_name].get(group, GRAPH_PRESETS[_active_preset_name].get("Treatment", "#D3D3D3"))
-                        new_color = rc[1].color_picker(
-                            "c", _preset_color,
-                            key=f"cp_{current_gene}_{condition}",
-                            label_visibility="collapsed",
-                        )
-                        # If user manually changes color away from preset → switch to Custom
-                        if new_color != _preset_color:
-                            st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
-                            bs["color"] = new_color
-                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
-                        else:
-                            bs["color"] = _preset_color
-                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = _preset_color
+                    # Color picker — show preset color when preset active, custom color otherwise
+                    _active_pn = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
+                    if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
+                        _display_color = GRAPH_PRESETS[_active_pn].get(group, GRAPH_PRESETS[_active_pn].get("Treatment", "#D3D3D3"))
                     else:
-                        # Custom mode — color picker is source of truth
-                        new_color = rc[1].color_picker(
-                            "c", bs["color"],
-                            key=f"cp_{current_gene}_{condition}",
-                            label_visibility="collapsed",
-                        )
-                        bs["color"] = new_color
-                        st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
+                        _display_color = bs["color"]
+
+                    new_color = rc[1].color_picker(
+                        "c", _display_color,
+                        key=f"cp_{current_gene}_{condition}",
+                        label_visibility="collapsed",
+                    )
+                    # If user changes color away from display → switch to Custom
+                    if new_color != _display_color:
+                        st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
+                    bs["color"] = new_color
+                    st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
 
                     with rc[2]:
                         opt_cols = st.columns(4)
@@ -6379,6 +6378,7 @@ with tab4:
             ref_line_label=ref_line_lbl,
             show_data_points=show_dp,
             replicate_data=replicate_df,
+            color_preset=st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic"),
         )
 
         st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
@@ -6458,6 +6458,7 @@ with tab4:
                     ref_line_label=qv_ref_lbl,
                     show_data_points=qv_show_dp,
                     replicate_data=qv_replicate_df,
+                    color_preset=gs.get(f"{gene}_color_preset", "Classic"),
                 )
 
                 with all_gene_cols[idx % len(all_gene_cols)]:

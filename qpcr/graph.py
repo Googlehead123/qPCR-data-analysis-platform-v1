@@ -94,6 +94,7 @@ class GraphGenerator:
         ref_line_label: str = None,
         show_data_points: bool = False,
         replicate_data: pd.DataFrame = None,
+        color_preset: str = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -154,22 +155,30 @@ class GraphGenerator:
         condition_names = gene_data_indexed["Condition"].tolist()
         n_bars = len(gene_data_indexed)
 
-        bar_colors = []
+        # Import GRAPH_PRESETS only when needed (avoid circular import at module level)
+        from qpcr.constants import GRAPH_PRESETS
 
+        _preset_map = None
+        if color_preset and color_preset != "Custom" and color_preset in GRAPH_PRESETS:
+            _preset_map = GRAPH_PRESETS[color_preset]
+
+        bar_colors = []
         for idx, row in gene_data_indexed.iterrows():
             condition = row["Condition"]
             group = row.get("Group", "Treatment")
 
-            custom_key = f"{gene}_{condition}"
-            if custom_key in settings.get("bar_colors_per_sample", {}):
-                bar_colors.append(settings["bar_colors_per_sample"][custom_key])
-            elif condition_colors and condition in condition_colors:
-                bar_colors.append(condition_colors[condition])
-            elif group in DEFAULT_GROUP_COLORS:
-                bar_colors.append(DEFAULT_GROUP_COLORS[group])
+            if _preset_map:
+                bar_colors.append(_preset_map.get(group, _preset_map.get("Treatment", "#D3D3D3")))
             else:
-                default_color = settings.get("bar_colors", {}).get(gene, "#D3D3D3")
-                bar_colors.append(default_color)
+                custom_key = f"{gene}_{condition}"
+                if custom_key in settings.get("bar_colors_per_sample", {}):
+                    bar_colors.append(settings["bar_colors_per_sample"][custom_key])
+                elif condition_colors and condition in condition_colors:
+                    bar_colors.append(condition_colors[condition])
+                elif group in DEFAULT_GROUP_COLORS:
+                    bar_colors.append(DEFAULT_GROUP_COLORS[group])
+                else:
+                    bar_colors.append("#D3D3D3")
 
         fig = go.Figure()
 
