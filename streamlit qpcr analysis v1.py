@@ -4372,7 +4372,7 @@ with tab1:
                     "xlabel": "Condition",
                     "ylabel": "Relative mRNA Expression Level",
                     "bar_colors": {},
-                    "bar_gap": 0.15,
+                    "bar_gap": 0.45,
                     "orientation": "v",
                     "bar_opacity": 0.85,
                     "marker_line_width": 1,
@@ -4728,31 +4728,11 @@ with tab_qc:
 
             st.markdown("---")
 
-            # ---- Flagged Wells Alert Banner ----
+            # ---- QC note (informational only — auto-exclude via SD threshold above) ----
             qc_results = QualityControl.detect_outliers(data, hk_gene)
             flagged = qc_results[qc_results["Flagged"]].copy()
-
             if len(flagged) > 0:
-                # Count how many flagged wells are not yet excluded
-                _already_excluded = sum(
-                    1 for _, r in flagged.iterrows()
-                    if is_well_excluded(r["Well"], r["Target"], r["Sample"])
-                )
-                _new_exclusions = len(flagged) - _already_excluded
-
-                flag_col1, flag_col2 = st.columns([3, 1])
-                with flag_col1:
-                    st.warning(f"**{len(flagged)} wells** auto-flagged by QC algorithms (CT thresholds, CV%, Grubbs test)")
-                    st.caption("Grubbs test requires n>=3 replicates. Groups with fewer replicates are not tested for outliers.")
-                with flag_col2:
-                    _btn_label = f"Exclude {_new_exclusions} New" if _new_exclusions > 0 else "All Already Excluded"
-                    if st.button(_btn_label, use_container_width=True, key="qc_auto_exclude_flagged", disabled=(_new_exclusions == 0)):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
-                        for _, row in flagged.iterrows():
-                            exclude_well(row["Well"], row["Target"], row["Sample"])
-                        st.rerun()
+                st.caption(f"ℹ️ {len(flagged)} wells have QC flags (CT thresholds, CV%, Grubbs). Use the SD threshold tool above to selectively exclude high-SD outliers.")
 
             # ---- Filter Controls ----
             filter_col1, filter_col2 = st.columns([1, 1])
@@ -5867,7 +5847,7 @@ with tab4:
                 "bar_colors": {},
                 "orientation": "v",
                 "bar_opacity": 0.85,
-                "bar_gap": 0.15,
+                "bar_gap": 0.45,
                 "marker_line_width": 1,
                 "show_legend": False,
                 "y_log_scale": False,
@@ -5958,7 +5938,7 @@ with tab4:
         if show_err_key not in st.session_state.graph_settings:
             st.session_state.graph_settings[show_err_key] = True
         if bar_gap_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[bar_gap_key] = 0.25
+            st.session_state.graph_settings[bar_gap_key] = 0.45
 
         conditions_list = gene_data["Condition"].tolist()
         ref_options = ["None"] + conditions_list
@@ -5991,7 +5971,8 @@ with tab4:
                 index=preset_names.index(current_preset),
                 key=f"preset_{current_gene}",
             )
-            # Apply preset colors whenever a non-Custom preset is active
+            # Apply preset colors on change — force rerun so color pickers reinitialize
+            prev_preset = st.session_state.graph_settings.get(color_preset_key, "Classic")
             if selected_preset != "Custom":
                 preset_colors = GRAPH_PRESETS[selected_preset]
                 for _, row in gene_data.iterrows():
@@ -6003,6 +5984,8 @@ with tab4:
                         st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"] = color
                     st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
             st.session_state.graph_settings[color_preset_key] = selected_preset
+            if selected_preset != prev_preset:
+                st.rerun()
         with tb_row1[1]:
             sig_on = st.toggle(
                 "Sig. */#/\u2020",
@@ -6027,7 +6010,7 @@ with tab4:
         with tb_row1[4]:
             gap_val = st.select_slider(
                 "Bar Gap",
-                options=[0.1, 0.15, 0.2, 0.25, 0.3, 0.4],
+                options=[round(x * 0.05, 2) for x in range(2, 21)],  # 0.1 to 1.0 step 0.05
                 value=st.session_state.graph_settings[bar_gap_key],
                 key=f"gap_sl_{current_gene}",
             )
@@ -6038,7 +6021,7 @@ with tab4:
                     del st.session_state[f"{current_gene}_bar_settings"]
                 st.session_state.graph_settings[show_sig_key] = True
                 st.session_state.graph_settings[show_err_key] = True
-                st.session_state.graph_settings[bar_gap_key] = 0.25
+                st.session_state.graph_settings[bar_gap_key] = 0.45
                 st.session_state.graph_settings[show_dp_key] = False
                 st.session_state.graph_settings.pop(color_preset_key, None)
                 st.session_state.graph_settings.pop(f"{current_gene}_sig_style", None)
@@ -6166,11 +6149,14 @@ with tab4:
                         index=size_preset_names.index(current_size_preset),
                         key=f"size_preset_{current_gene}",
                     )
+                    prev_size_preset = st.session_state.graph_settings.get(size_preset_key, "PPT Full")
                     if selected_size != "Custom" and selected_size in FIGURE_SIZE_PRESETS:
                         preset = FIGURE_SIZE_PRESETS[selected_size]
                         st.session_state.graph_settings[f"{current_gene}_figure_width"] = preset["width"]
                         st.session_state.graph_settings[f"{current_gene}_figure_height"] = preset["height"]
                     st.session_state.graph_settings[size_preset_key] = selected_size
+                    if selected_size != prev_size_preset:
+                        st.rerun()
                     fig_width_cm = st.slider(
                         "Width (cm)", 10.0, 40.0,
                         value=float(st.session_state.graph_settings.get(f"{current_gene}_figure_width",
@@ -6340,7 +6326,7 @@ with tab4:
             show_err_key, True
         )
         current_settings["bar_gap"] = st.session_state.graph_settings.get(
-            bar_gap_key, 0.25
+            bar_gap_key, 0.45
         )
         # Override global defaults with per-gene values
         gs = st.session_state.graph_settings
@@ -6425,7 +6411,7 @@ with tab4:
                 gs = st.session_state.graph_settings.copy()
                 gs["show_significance"] = gs.get(f"{gene}_show_sig", True)
                 gs["show_error"] = gs.get(f"{gene}_show_err", True)
-                gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.25)
+                gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.45)
                 gs["figure_height"] = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
                 gs["figure_width"] = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
                 gs["font_size"] = gs.get(f"{gene}_font_size", gs.get("font_size", 14))
