@@ -45,9 +45,14 @@ def render_step_indicator(current_step: str):
     has_graphs = bool(st.session_state.get("graphs"))
     mapping_done = st.session_state.get("mapping_finalized", False)
 
+    qc_done = has_data and (
+        sum(len(v) for v in st.session_state.get("excluded_wells", {}).values()) > 0
+        or st.session_state.get("qc_reviewed", False)
+    )
+
     step_status = {
         "upload": "done" if has_data else "pending",
-        "qc": "done" if has_data else "pending",
+        "qc": "done" if qc_done else "pending",
         "mapping": "done" if mapping_done else "pending",
         "analysis": "done" if has_analysis else "pending",
         "graphs": "done" if has_graphs else "pending",
@@ -73,7 +78,7 @@ def render_step_indicator(current_step: str):
 st.set_page_config(
     page_title="qPCR Analysis Suite",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ==================== GLOBAL THEME ====================
@@ -1981,13 +1986,13 @@ class AnalysisEngine:
             hk_gene = st.session_state.get("hk_gene")
 
             if data is None:
-                st.error("No raw data loaded.")
+                st.error("No raw data loaded. Upload CSV files in the **Upload** tab first.")
                 return False
             if not mapping:
-                st.error("Sample mapping not found.")
+                st.error("Sample mapping not found. Go to the **Mapping** tab to assign conditions.")
                 return False
             if not hk_gene:
-                st.error("Housekeeping gene not selected.")
+                st.error("Housekeeping gene not selected. Select one in the **Upload** tab.")
                 return False
 
             ct_values = data["CT"]
@@ -4251,43 +4256,6 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
 st.title("qPCR Analysis Suite")
 st.caption("Gene-by-gene analysis with efficacy-specific workflows")
 
-# Sidebar
-with st.sidebar:
-    st.header("Quick Guide")
-    st.markdown("""
-    1. **Upload** — CSV files
-    2. **QC Check** — Review outliers & exclude bad wells
-    3. **Mapping** — Assign conditions & groups
-    4. **Analysis** — Run DDCt calculations
-    5. **Graphs** — Customize visualizations
-    6. **Export** — Download publication-ready files
-    """)
-
-    st.markdown("")
-    st.markdown("### Quick Actions")
-
-    if st.session_state.get("data") is not None:
-        st.success(f"{len(st.session_state.data)} wells loaded")
-
-        excluded_dict = st.session_state.get("excluded_wells", {})
-        excluded = sum(len(ws) for ws in excluded_dict.values()) if isinstance(excluded_dict, dict) else len(excluded_dict)
-        if excluded > 0:
-            st.warning(f"{excluded} well-exclusions active")
-
-        if st.session_state.get("processed_data"):
-            st.success(f"{len(st.session_state.processed_data)} genes analyzed")
-    else:
-        st.info("Upload data to begin")
-
-    st.markdown("")
-    with st.expander("Tips"):
-        st.markdown("""
-        **Quick Tips**
-        - Double-click graph to reset zoom
-        - Hover bars for exact values
-        - Use the gene pill buttons to switch between genes
-        """)
-
 # Main tabs
 tab1, tab_qc, tab2, tab3, tab4, tab5 = st.tabs(
     [
@@ -4337,6 +4305,7 @@ with tab1:
                 st.session_state.data = pd.concat(all_data, ignore_index=True)
 
                 # FIX-02: Complete state reset on new upload to prevent stale data
+                had_previous_analysis = bool(st.session_state.get("processed_data"))
                 st.session_state.processed_data = {}
                 st.session_state.graphs = {}
                 st.session_state.sample_mapping = {}
@@ -4348,6 +4317,7 @@ with tab1:
                 st.session_state.condition_colors = {}
                 st.session_state.gene_display_names = {}
                 st.session_state.experiment_desc = {}
+                st.session_state.qc_reviewed = False
                 for key in [
                     "selected_gene_idx",
                     "analysis_cmp_condition",
@@ -4391,6 +4361,8 @@ with tab1:
                 }
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
+                if had_previous_analysis:
+                    st.info("Previous analysis results cleared due to new data upload.")
 
                 # FIX-05: Detect overlapping data across multiple files
                 if len(all_data) > 1:
@@ -4521,6 +4493,8 @@ with tab1:
 with tab_qc:
     render_step_indicator("qc")
     st.header("Quality Control Check")
+
+    st.session_state.qc_reviewed = True
 
     if st.session_state.data is not None and not st.session_state.data.empty:
         data = st.session_state.data
@@ -6417,9 +6391,6 @@ with tab4:
                 gs["y_min"] = gs.get(f"{gene}_y_min")
                 gs["y_max"] = gs.get(f"{gene}_y_max")
                 gs["label_mode"] = gs.get(f"{gene}_label_mode", "Auto-wrap")
-                gs["tick_size"] = gs.get(f"{gene}_tick_size", gs.get("tick_size", 12))
-                gs["ylabel_size"] = gs.get(f"{gene}_ylabel_size", gs.get("ylabel_size", 14))
-                gs["bg_color"] = gs.get(f"{gene}_bg_color", gs.get("bg_color", "#FFFFFF"))
                 gs["sig_style"] = gs.get(f"{gene}_sig_style", "direct")
 
                 qv_ref_condition = st.session_state.graph_settings.get(f"{gene}_ref_line", "None")
