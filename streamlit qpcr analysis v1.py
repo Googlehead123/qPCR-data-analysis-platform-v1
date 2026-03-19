@@ -6487,520 +6487,179 @@ with tab5:
 
             return qc_stats, replicate_stats_df, excl
 
-        # ---- Unified ZIP Export ----
-        if st.session_state.get("graphs"):
-            if st.button("📦 Export All (ZIP)", key="export_all_zip", type="primary", use_container_width=True):
-                zip_buffer = io.BytesIO()
-                errors = []
-                efficacy = st.session_state.selected_efficacy
+        # ---- Smart Export Panel ----
+        st.subheader("Export Package")
+        st.caption("Select what to include in your export ZIP")
 
-                with st.spinner("Generating complete export..."):
-                    progress = st.progress(0, text="Starting...")
+        efficacy = st.session_state.selected_efficacy
 
-                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                        # 1. Excel report
-                        progress.progress(10, text="Generating Excel...")
+        # PPT experiment description (collapsed)
+        with st.expander("Experiment Description (for PPT)", expanded=False):
+            conc_val = st.text_input(
+                "Sample concentration",
+                value=st.session_state.experiment_desc.get("concentration", "1 ppm"),
+                key="exp_concentration",
+            )
+            st.session_state.experiment_desc["concentration"] = conc_val
+            time_val = st.text_input(
+                "Treatment time",
+                value=st.session_state.experiment_desc.get("treatment_time", "24 h"),
+                key="exp_treatment_time",
+            )
+            st.session_state.experiment_desc["treatment_time"] = time_val
+
+        # Checkboxes for export contents
+        chk_col1, chk_col2 = st.columns(2)
+        with chk_col1:
+            inc_excel = st.checkbox("Excel Report", value=True, key="exp_inc_excel")
+            inc_ppt = st.checkbox("PowerPoint", value=True, key="exp_inc_ppt")
+            inc_png = st.checkbox("PNG Figures (300 DPI)", value=True, key="exp_inc_png")
+        with chk_col2:
+            inc_svg = st.checkbox("SVG Figures (Vector)", value=False, key="exp_inc_svg")
+            inc_html = st.checkbox("Interactive HTML", value=False, key="exp_inc_html")
+            inc_config = st.checkbox("Analysis Config (JSON)", value=False, key="exp_inc_config")
+
+        # Export button
+        if st.button("Export ZIP", key="export_zip", type="primary", use_container_width=True):
+            zip_buffer = io.BytesIO()
+            errors = []
+            included = []
+
+            with st.spinner("Generating export..."):
+                progress = st.progress(0, text="Starting...")
+                step = 0
+                total_steps = sum([inc_excel, inc_ppt, inc_html, inc_config]) + (len(st.session_state.graphs) if (inc_png or inc_svg) else 0)
+                total_steps = max(total_steps, 1)
+
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    if inc_excel:
+                        step += 1
+                        progress.progress(step / total_steps, text="Generating Excel...")
                         try:
                             _qc, _rep, _excl = _build_export_extras()
                             excel_bytes = export_to_excel(
-                                st.session_state.data,
-                                st.session_state.processed_data,
-                                analysis_params,
-                                st.session_state.sample_mapping,
-                                qc_stats=_qc,
-                                replicate_stats=_rep,
-                                excluded_wells=_excl,
+                                st.session_state.data, st.session_state.processed_data,
+                                analysis_params, st.session_state.sample_mapping,
+                                qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
                             )
                             zf.writestr("qPCR_Report.xlsx", excel_bytes)
+                            included.append("Excel")
                         except Exception as e:
                             errors.append(f"Excel: {e}")
 
-                        # 2. PNG figures
-                        for i, (gene, fig) in enumerate(st.session_state.graphs.items()):
-                            progress.progress(
-                                10 + int(60 * (i + 1) / len(st.session_state.graphs)),
-                                text=f"Exporting {gene}...",
-                            )
-                            try:
-                                img_bytes = fig.to_image(format="png", scale=2, width=1200, height=800)
-                                zf.writestr(f"figures/{gene}.png", img_bytes)
-                            except Exception as e:
-                                errors.append(f"PNG {gene}: {e}")
-
-                        # 3. PPT report
-                        progress.progress(80, text="Generating PowerPoint...")
+                    if inc_ppt:
+                        step += 1
+                        progress.progress(step / total_steps, text="Generating PowerPoint...")
                         try:
                             ppt_bytes = PPTGenerator.generate_presentation(
-                                st.session_state.graphs,
-                                st.session_state.processed_data,
-                                analysis_params,
-                                graph_settings=st.session_state.get("graph_settings"),
+                                st.session_state.graphs, st.session_state.processed_data,
+                                analysis_params, graph_settings=st.session_state.get("graph_settings"),
                             )
                             if ppt_bytes:
                                 zf.writestr("qPCR_Report.pptx", ppt_bytes.getvalue() if hasattr(ppt_bytes, "getvalue") else ppt_bytes)
+                                included.append("PPT")
                         except Exception as e:
                             errors.append(f"PPT: {e}")
 
-                        # 4. Interactive HTML
-                        progress.progress(90, text="Generating HTML...")
+                    for i, (gene, fig) in enumerate(st.session_state.graphs.items()):
+                        if not inc_png and not inc_svg:
+                            break
+                        step += 1
+                        progress.progress(step / total_steps, text=f"Exporting {gene}...")
+                        fig_copy = go.Figure(fig)
+                        _m = fig.layout.margin
+                        _b = max(180, _m.b if _m and _m.b else 180)
+                        _h = 800 + max(0, _b - 180)
+                        fig_copy.update_layout(width=1200, height=_h, margin=dict(b=_b), font=dict(family=PLOTLY_FONT_FAMILY))
                         try:
-                            html_parts = [
-                                "<html><head><title>qPCR Graphs</title></head><body>",
+                            if inc_png:
+                                zf.writestr(f"figures/{gene}_300dpi.png", fig_copy.to_image(format="png", scale=3, width=1200, height=_h))
+                            if inc_svg:
+                                zf.writestr(f"figures/{gene}.svg", fig_copy.to_image(format="svg", width=1200, height=800))
+                        except Exception as e:
+                            errors.append(f"Figure {gene}: {e}")
+                    if inc_png or inc_svg:
+                        included.append("Figures")
+
+                    if inc_html:
+                        step += 1
+                        progress.progress(step / total_steps, text="Generating HTML...")
+                        try:
+                            html_parts = ["<html><head><title>qPCR Graphs</title></head><body>",
                                 f"<h1>{efficacy} Analysis</h1>",
-                                f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
-                            ]
+                                f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"]
                             for gene, fig in st.session_state.graphs.items():
                                 html_parts.append(f"<h2>{gene}</h2>")
                                 html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-                                html_parts.append("<hr>")
                             html_parts.append("</body></html>")
-                            zf.writestr("figures_html/all_graphs.html", "\n".join(html_parts))
+                            zf.writestr("all_graphs.html", "\n".join(html_parts))
+                            included.append("HTML")
                         except Exception as e:
                             errors.append(f"HTML: {e}")
 
-                        # 5. Error manifest
-                        if errors:
-                            zf.writestr("_errors.txt", "\n".join(errors))
+                    if inc_config:
+                        step += 1
+                        progress.progress(step / total_steps, text="Saving config...")
+                        try:
+                            config_data = {
+                                "analysis_params": analysis_params,
+                                "sample_mapping": st.session_state.sample_mapping,
+                                "graph_settings": st.session_state.graph_settings,
+                                "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
+                            }
+                            zf.writestr("analysis_config.json", json.dumps(config_data, indent=2))
+                            included.append("Config")
+                        except Exception as e:
+                            errors.append(f"Config: {e}")
 
-                    progress.progress(100, text="Done!")
+                    if errors:
+                        zf.writestr("_errors.txt", "\n".join(errors))
 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.download_button(
-                    label=f"⬇️ Download ZIP ({len(st.session_state.graphs)} genes)",
-                    data=zip_buffer.getvalue(),
-                    file_name=f"qPCR_Export_{efficacy}_{timestamp}.zip",
-                    mime="application/zip",
-                    key="dl_all_zip",
-                )
-                if errors:
-                    st.warning(f"Some exports failed: {', '.join(errors)}")
+                progress.progress(100, text="Done!")
 
-            st.markdown("---")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label=f"Download ZIP ({', '.join(included)})",
+                data=zip_buffer.getvalue(),
+                file_name=f"qPCR_Export_{efficacy}_{timestamp}.zip",
+                mime="application/zip",
+                key="dl_export_zip",
+            )
+            if errors:
+                st.warning(f"Some exports failed: {', '.join(errors)}")
 
-        # ---- Group 1: Reports ----
-        st.subheader("Reports")
-
-        rpt_col1, rpt_col2, rpt_col3 = st.columns(3)
-
-        with rpt_col1:
-            st.markdown("**Excel Report**")
-            st.caption("Parameters, mapping, raw data, calculations, QC, FC matrix")
-            try:
-                _qc, _rep, _excl = _build_export_extras()
-                excel_data = export_to_excel(
-                    st.session_state.data,
-                    st.session_state.processed_data,
-                    analysis_params,
-                    st.session_state.sample_mapping,
-                    qc_stats=_qc,
-                    replicate_stats=_rep,
-                    excluded_wells=_excl,
-                )
-            except Exception as e:
-                st.error(f"Excel export failed: {e}")
-                excel_data = None
-            if excel_data:
-                st.download_button(
-                    label="Download Excel",
-                    data=excel_data,
-                    file_name=f"qPCR_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True,
-                )
-
-        with rpt_col2:
-            st.markdown("**All Graphs (HTML)**")
-            st.caption("Interactive graphs for all genes in one file")
-            if st.session_state.graphs:
-                html_parts = [
-                    "<html><head><title>qPCR Analysis Graphs</title></head><body>"
-                ]
-                html_parts.append(
-                    f"<h1>{st.session_state.selected_efficacy} Analysis</h1>"
-                )
-                html_parts.append(
-                    f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"
-                )
-                for gene, fig in st.session_state.graphs.items():
-                    html_parts.append(f"<h2>{gene}</h2>")
-                    html_parts.append(
-                        fig.to_html(include_plotlyjs="cdn", div_id=f"graph_{gene}")
-                    )
-                    html_parts.append("<hr>")
-                html_parts.append("</body></html>")
-                combined_html = "\n".join(html_parts)
-                st.download_button(
-                    label="Download All Graphs",
-                    data=combined_html,
-                    file_name=f"qPCR_graphs_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-                    mime="text/html",
-                    type="primary",
-                    use_container_width=True,
-                )
-
-        with rpt_col3:
-            st.markdown("**PowerPoint**")
-            st.caption("Slide deck with title, gene slides, and summary")
-            with st.expander("Experiment Description", expanded=False):
-                conc_val = st.text_input(
-                    "Sample concentration",
-                    value=st.session_state.experiment_desc.get("concentration", "1 ppm"),
-                    key="exp_concentration",
-                )
-                st.session_state.experiment_desc["concentration"] = conc_val
-                time_val = st.text_input(
-                    "Treatment time",
-                    value=st.session_state.experiment_desc.get("treatment_time", "24 h"),
-                    key="exp_treatment_time",
-                )
-                st.session_state.experiment_desc["treatment_time"] = time_val
-
-            if st.button(
-                "Generate PPT",
-                type="primary",
-                use_container_width=True,
-                key="gen_ppt_tab5",
-            ):
-                with st.spinner("Generating PowerPoint..."):
-                    try:
-                        ppt_bytes = PPTGenerator.generate_presentation(
-                            st.session_state.graphs,
-                            st.session_state.processed_data,
-                            analysis_params,
-                            graph_settings=st.session_state.get("graph_settings"),
-                        )
-                        if ppt_bytes:
-                            st.session_state["ppt_export"] = ppt_bytes
-                            st.success("Generated!")
-                        else:
-                            st.error("Failed to generate PPT — no data returned")
-                    except Exception as e:
-                        st.error(f"PPT generation failed: {e}")
-
-            if "ppt_export" in st.session_state:
-                st.download_button(
-                    label="Download PowerPoint",
-                    data=st.session_state["ppt_export"],
-                    file_name=f"qPCR_Report_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    type="primary",
-                    use_container_width=True,
-                    key="dl_ppt_tab5",
-                )
-
-        # ---- Group 2: Publication Images ----
-        st.subheader("Publication Images")
-        st.caption("High-resolution images suitable for journals and reports")
+        # ---- Per-Gene Image Downloads ----
+        st.markdown("---")
+        st.subheader("Individual Gene Images")
 
         img_col1, img_col2, img_col3 = st.columns(3)
         with img_col1:
-            img_format = st.selectbox(
-                "Image Format",
-                ["PNG (300 DPI)", "SVG (Vector)", "PDF (Vector)"],
-                key="pub_img_format",
-            )
+            img_format = st.selectbox("Format", ["PNG (300 DPI)", "SVG (Vector)", "PDF (Vector)"], key="pub_img_format")
         with img_col2:
-            img_width = st.number_input(
-                "Width (px)", min_value=400, max_value=3000, value=1200, step=100
-            )
+            img_width = st.number_input("Width (px)", min_value=400, max_value=3000, value=1200, step=100)
         with img_col3:
-            img_height = st.number_input(
-                "Height (px)", min_value=300, max_value=2000, value=800, step=100
-            )
+            img_height = st.number_input("Height (px)", min_value=300, max_value=2000, value=800, step=100)
 
         if st.session_state.graphs:
-            # Individual images + batch in one row
             img_cols = st.columns(min(len(st.session_state.graphs), 4))
             for idx, (gene, fig) in enumerate(st.session_state.graphs.items()):
-                col_idx = idx % len(img_cols)
-                with img_cols[col_idx]:
+                with img_cols[idx % len(img_cols)]:
                     try:
                         fig_copy = go.Figure(fig)
                         _orig_m = fig.layout.margin
                         _pub_b = max(180, _orig_m.b if _orig_m and _orig_m.b else 180)
-                        fig_copy.update_layout(
-                            width=img_width,
-                            height=img_height + max(0, _pub_b - 180),
-                            font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
-                            title=dict(font=dict(size=18, family=PLOTLY_FONT_FAMILY, color="black")),
-                            margin=dict(b=_pub_b),
-                        )
-                        _adj_height = img_height + max(0, _pub_b - 180)
-                        if "PNG" in img_format:
-                            img_bytes = fig_copy.to_image(
-                                format="png", scale=3, width=img_width, height=_adj_height,
-                            )
-                            st.download_button(
-                                label=f"{gene}.png",
-                                data=img_bytes,
-                                file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}_300dpi.png",
-                                mime="image/png",
-                                key=f"png_{gene}",
-                                use_container_width=True,
-                            )
-                        elif "SVG" in img_format:
-                            svg_bytes = fig_copy.to_image(
-                                format="svg", width=img_width, height=_adj_height
-                            )
-                            st.download_button(
-                                label=f"{gene}.svg",
-                                data=svg_bytes,
-                                file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.svg",
-                                mime="image/svg+xml",
-                                key=f"svg_{gene}",
-                                use_container_width=True,
-                            )
-                        else:
-                            pdf_bytes = fig_copy.to_image(
-                                format="pdf", width=img_width, height=_adj_height
-                            )
-                            st.download_button(
-                                label=f"{gene}.pdf",
-                                data=pdf_bytes,
-                                file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                                mime="application/pdf",
-                                key=f"pdf_{gene}",
-                                use_container_width=True,
-                            )
+                        _adj_h = img_height + max(0, _pub_b - 180)
+                        fig_copy.update_layout(width=img_width, height=_adj_h, margin=dict(b=_pub_b),
+                            font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
+                        fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
+                        mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
+                        scale = 3 if fmt == "png" else 1
+                        img_bytes = fig_copy.to_image(format=fmt, scale=scale, width=img_width, height=_adj_h)
+                        st.download_button(label=f"{gene}.{fmt}", data=img_bytes,
+                            file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.{fmt}",
+                            mime=mime, key=f"img_{gene}", use_container_width=True)
                     except Exception as e:
-                        # FIX-13: Per-image error handling — continue with remaining genes
-                        st.warning(
-                            f"Failed to export {gene}: {e}. "
-                            f"(Ensure kaleido is installed: pip install kaleido)"
-                        )
-                        continue
-
-            # Batch ZIP buttons
-            batch_col1, batch_col2 = st.columns(2)
-            with batch_col1:
-                if st.button(
-                    "Download All Figures (ZIP)", type="primary", use_container_width=True
-                ):
-                    try:
-                        zip_buffer = io.BytesIO()
-                        total_graphs = len(st.session_state.graphs)
-                        progress_bar = st.progress(0, text="Preparing figures...")
-
-                        with zipfile.ZipFile(
-                            zip_buffer, "w", zipfile.ZIP_DEFLATED
-                        ) as zf:
-                            _export_failures = []
-                            for i, (gene, fig) in enumerate(
-                                st.session_state.graphs.items()
-                            ):
-                                progress_bar.progress(
-                                    (i + 1) / total_graphs,
-                                    text=f"Exporting {gene}... ({i + 1}/{total_graphs})",
-                                )
-                                try:
-                                    fig_copy = go.Figure(fig)
-                                    _zm = fig.layout.margin
-                                    _zb = max(180, _zm.b if _zm and _zm.b else 180)
-                                    _zh = img_height + max(0, _zb - 180)
-                                    fig_copy.update_layout(
-                                        width=img_width, height=_zh, margin=dict(b=_zb),
-                                        font=dict(family=PLOTLY_FONT_FAMILY),
-                                    )
-                                    png_bytes = fig_copy.to_image(
-                                        format="png", scale=3, width=img_width, height=_zh,
-                                    )
-                                    zf.writestr(f"{gene}_300dpi.png", png_bytes)
-                                    svg_bytes = fig_copy.to_image(
-                                        format="svg", width=img_width, height=img_height
-                                    )
-                                    zf.writestr(f"{gene}.svg", svg_bytes)
-                                    html_str = fig_copy.to_html(include_plotlyjs="cdn")
-                                    zf.writestr(f"{gene}.html", html_str)
-                                except Exception as e:
-                                    # FIX-13: Per-gene error handling in batch export
-                                    _export_failures.append(f"{gene}: {e}")
-                                finally:
-                                    # FIX-14: Memory cleanup after each gene in ZIP export
-                                    del fig_copy
-                                    if 'png_bytes' in dir():
-                                        del png_bytes
-                                    if 'svg_bytes' in dir():
-                                        del svg_bytes
-                                    if 'html_str' in dir():
-                                        del html_str
-                                    gc.collect()
-
-                        progress_bar.empty()
-                        st.download_button(
-                            label="Download ZIP Now",
-                            data=zip_buffer.getvalue(),
-                            file_name=f"qPCR_figures_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.zip",
-                            mime="application/zip",
-                            key="batch_zip",
-                            use_container_width=True,
-                        )
-                        n_success = len(st.session_state.graphs) - len(_export_failures)
-                        st.success(
-                            f"Created ZIP with {n_success} figures (PNG + SVG + HTML)"
-                        )
-                        if _export_failures:
-                            st.warning(
-                                f"{len(_export_failures)} gene(s) failed to export:\n"
-                                + "\n".join(f"  - {f}" for f in _export_failures)
-                            )
-                    except Exception as e:
-                        st.error(f"Batch export failed: {e}. Ensure kaleido is installed: pip install kaleido")
-
-            with batch_col2:
-                if st.button("Download Complete Report (ZIP)", use_container_width=True):
-                    try:
-                        zip_buffer = io.BytesIO()
-                        total_steps = (
-                            2
-                            + len(st.session_state.graphs)
-                            + len(st.session_state.processed_data)
-                        )
-                        current_step = 0
-                        progress_bar = st.progress(0, text="Creating report...")
-
-                        with zipfile.ZipFile(
-                            zip_buffer, "w", zipfile.ZIP_DEFLATED
-                        ) as zf:
-                            progress_bar.progress(
-                                1 / total_steps, text="Generating Excel report..."
-                            )
-                            current_step += 1
-                            _qc, _rep, _excl = _build_export_extras()
-                            zf.writestr(
-                                "analysis_report.xlsx",
-                                export_to_excel(
-                                    st.session_state.data,
-                                    st.session_state.processed_data,
-                                    analysis_params,
-                                    st.session_state.sample_mapping,
-                                    qc_stats=_qc,
-                                    replicate_stats=_rep,
-                                    excluded_wells=_excl,
-                                ),
-                            )
-                            progress_bar.progress(
-                                2 / total_steps, text="Saving config..."
-                            )
-                            current_step += 1
-                            zf.writestr(
-                                "analysis_config.json",
-                                json.dumps(
-                                    {
-                                        "analysis_params": analysis_params,
-                                        "sample_mapping": st.session_state.sample_mapping,
-                                        "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
-                                        "excluded_samples": list(
-                                            st.session_state.excluded_samples
-                                        ),
-                                    },
-                                    indent=2,
-                                ),
-                            )
-                            for i, (gene, fig) in enumerate(
-                                st.session_state.graphs.items()
-                            ):
-                                current_step += 1
-                                progress_bar.progress(
-                                    current_step / total_steps,
-                                    text=f"Exporting figure: {gene}...",
-                                )
-                                fig_copy = go.Figure(fig)
-                                _rm = fig.layout.margin
-                                _rb = max(180, _rm.b if _rm and _rm.b else 180)
-                                _rh = img_height + max(0, _rb - 180)
-                                fig_copy.update_layout(
-                                    width=img_width, height=_rh, margin=dict(b=_rb),
-                                    font=dict(family=PLOTLY_FONT_FAMILY),
-                                )
-                                png_bytes = fig_copy.to_image(
-                                    format="png", scale=3, width=img_width, height=_rh,
-                                )
-                                zf.writestr(f"figures/{gene}_300dpi.png", png_bytes)
-                                svg_bytes = fig_copy.to_image(
-                                    format="svg", width=img_width, height=img_height
-                                )
-                                zf.writestr(f"figures/{gene}.svg", svg_bytes)
-                            for (
-                                gene,
-                                gene_df,
-                            ) in st.session_state.processed_data.items():
-                                current_step += 1
-                                progress_bar.progress(
-                                    current_step / total_steps,
-                                    text=f"Exporting data: {gene}...",
-                                )
-                                csv_str = gene_df.to_csv(index=False)
-                                zf.writestr(f"data/{gene}_results.csv", csv_str)
-
-                        progress_bar.empty()
-                        st.download_button(
-                            label="Download Complete Report ZIP",
-                            data=zip_buffer.getvalue(),
-                            file_name=f"qPCR_complete_{st.session_state.selected_efficacy}_{datetime.now().strftime('%Y%m%d')}.zip",
-                            mime="application/zip",
-                            key="complete_zip",
-                            use_container_width=True,
-                        )
-                        st.success("Complete report package created!")
-                    except Exception as e:
-                        st.error(f"Report generation failed: {e}")
-
-        # ---- Group 3: Individual Data & Config ----
-        with st.expander("Individual Downloads & Config"):
-            dl_col1, dl_col2, dl_col3 = st.columns(3)
-
-            with dl_col1:
-                st.markdown("**Gene-by-Gene CSV**")
-                for gene, gene_df in st.session_state.processed_data.items():
-                    csv_buffer = io.StringIO()
-                    gene_df.to_csv(csv_buffer, index=False)
-                    st.download_button(
-                        label=f"{gene}.csv",
-                        data=csv_buffer.getvalue(),
-                        file_name=f"{gene}_calculations_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv",
-                        key=f"csv_{gene}",
-                        use_container_width=True,
-                    )
-
-            with dl_col2:
-                st.markdown("**Individual Graph HTML**")
-                for gene, fig in st.session_state.graphs.items():
-                    html_buffer = io.StringIO()
-                    fig.write_html(html_buffer)
-                    st.download_button(
-                        label=f"{gene}.html",
-                        data=html_buffer.getvalue(),
-                        file_name=f"{gene}_graph_{datetime.now().strftime('%Y%m%d')}.html",
-                        mime="text/html",
-                        key=f"html_{gene}",
-                        use_container_width=True,
-                    )
-
-            with dl_col3:
-                st.markdown("**Reproducibility Files**")
-                config_data = {
-                    "analysis_params": analysis_params,
-                    "sample_mapping": st.session_state.sample_mapping,
-                    "graph_settings": st.session_state.graph_settings,
-                    "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
-                    "excluded_samples": list(st.session_state.excluded_samples),
-                }
-                st.download_button(
-                    label="Analysis Config",
-                    data=json.dumps(config_data, indent=2),
-                    file_name=f"config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                    mime="application/json",
-                    use_container_width=True,
-                )
-                st.download_button(
-                    label="Graph Preset",
-                    data=json.dumps(st.session_state.graph_settings, indent=2),
-                    file_name=f"graph_preset_{datetime.now().strftime('%Y%m%d')}.json",
-                    mime="application/json",
-                    use_container_width=True,
-                )
+                        st.warning(f"Failed: {gene} — {e}")
     else:
         st.warning("Complete analysis first.")
 
