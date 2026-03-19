@@ -3505,8 +3505,9 @@ class PPTGenerator:
                         rel.target_part, rel.reltype
                     )
                 rid_map[rid] = new_rid
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.warning(f"PPT slide copy: skipped relationship {rid}: {e}")
 
         source_spTree = source._element.spTree
         target_spTree = new_slide._element.spTree
@@ -3841,8 +3842,9 @@ def export_to_excel(
                     )
                     if not replicate_fc.empty:
                         replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)
-                except Exception:
-                    pass  # Best-effort
+                except Exception as e:
+                    import logging
+                    logging.warning(f"Replicate_FC sheet skipped: {e}")
 
         # QC Report sheet
         _write_qc_report_sheet(writer, qc_stats, replicate_stats)
@@ -5886,7 +5888,7 @@ with tab4:
 
         # Gene pill selector with container
         st.markdown('<div class="gene-pill-container"><div class="label">Select Gene</div></div>', unsafe_allow_html=True)
-        gene_cols = st.columns(min(len(gene_list), 6))
+        gene_cols = st.columns(min(len(gene_list), 6)) if gene_list else [st.container()]
         for idx, gene in enumerate(gene_list):
             with gene_cols[idx % len(gene_cols)]:
                 if st.button(
@@ -5905,6 +5907,7 @@ with tab4:
             "_tick_size", "_ylabel_size", "_bar_opacity", "_marker_line_width",
             "_bg_color", "_bar_gap", "_sig_style", "_show_data_points",
             "_label_mode", "_ref_line", "_show_sig", "_show_err",
+            "_y_min", "_y_max", "_size_preset",
         ]
 
         current_gene = gene_list[st.session_state.selected_gene_idx]
@@ -5941,7 +5944,7 @@ with tab4:
                                         }
                                     else:
                                         st.session_state[f"{target_gene}_bar_settings"][bar_key]["color"] = color
-                                    st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = color
+                                    st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
                     st.success(f"Settings applied to all {len(gene_list)} genes.")
                     st.rerun()
         gene_data = st.session_state.processed_data[current_gene]
@@ -6214,7 +6217,7 @@ with tab4:
                     bar_opacity = st.slider(
                         "Bar opacity", 0.3, 1.0,
                         value=float(st.session_state.graph_settings.get(f"{current_gene}_bar_opacity",
-                            st.session_state.graph_settings.get("bar_opacity", 0.95))),
+                            st.session_state.graph_settings.get("bar_opacity", 0.85))),
                         step=0.05, key=f"bo_{current_gene}",
                     )
                     st.session_state.graph_settings[f"{current_gene}_bar_opacity"] = bar_opacity
@@ -6242,7 +6245,7 @@ with tab4:
                         help="Leave empty for auto range",
                     )
                     if (y_min_input is not None and y_max_input is not None
-                            and y_min_input >= y_max_input):
+                            and y_max_input > 0 and y_min_input >= y_max_input):
                         st.warning("Y-axis min must be less than max. Using auto range.")
                         y_min_input = None
                         y_max_input = None
@@ -6302,7 +6305,7 @@ with tab4:
                     )
                     new_color = rc[1].color_picker(
                         "c", bs["color"],
-                        key=f"cp_{current_gene}_{idx}",
+                        key=f"cp_{current_gene}_{condition}",
                         label_visibility="collapsed",
                     )
                     bs["color"] = new_color
@@ -6321,7 +6324,7 @@ with tab4:
                         for oi, (ol, ok) in enumerate(zip(option_labels, option_keys)):
                             bs[ok] = opt_cols[oi].checkbox(
                                 ol, bs.get(ok, True),
-                                key=f"{ok}_{current_gene}_{idx}",
+                                key=f"{ok}_{current_gene}_{condition}",
                                 label_visibility="collapsed",
                             )
                     # Keep legacy show_sig in sync (all-or-nothing fallback)
@@ -6344,7 +6347,7 @@ with tab4:
         current_settings["figure_width"] = gs.get(f"{current_gene}_figure_width", gs.get("figure_width", 28))
         current_settings["figure_height"] = gs.get(f"{current_gene}_figure_height", gs.get("figure_height", 16))
         current_settings["font_size"] = gs.get(f"{current_gene}_font_size", gs.get("font_size", 14))
-        current_settings["bar_opacity"] = gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.95))
+        current_settings["bar_opacity"] = gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.85))
         current_settings["marker_line_width"] = gs.get(f"{current_gene}_marker_line_width", gs.get("marker_line_width", 1))
         current_settings["y_min"] = gs.get(f"{current_gene}_y_min")
         current_settings["y_max"] = gs.get(f"{current_gene}_y_max")
@@ -6399,19 +6402,19 @@ with tab4:
         st.session_state.graphs[current_gene] = fig
 
         with st.expander("📊 All Gene Graphs (Quick View)", expanded=False):
-            all_gene_cols = st.columns(min(len(gene_list), 2))
-            for idx, gene in enumerate(gene_list):
-                if gene == current_gene:
-                    continue
-
+            _qv_genes = [g for g in gene_list if g != current_gene]
+            all_gene_cols = st.columns(min(len(_qv_genes), 2)) if _qv_genes else [st.container()]
+            for idx, gene in enumerate(_qv_genes):
                 gd = st.session_state.processed_data[gene]
 
                 if f"{gene}_bar_settings" not in st.session_state:
                     st.session_state[f"{gene}_bar_settings"] = {}
+                    _qv_preset_name = gs.get(f"{gene}_color_preset", "Classic")
+                    _qv_preset_colors = GRAPH_PRESETS.get(_qv_preset_name, DEFAULT_GROUP_COLORS)
                     for _, row in gd.iterrows():
                         condition = row["Condition"]
                         group = row.get("Group", "Treatment")
-                        default_color = DEFAULT_GROUP_COLORS.get(group, "#D3D3D3")
+                        default_color = _qv_preset_colors.get(group, DEFAULT_GROUP_COLORS.get(group, "#D3D3D3"))
                         bar_key = f"{gene}_{condition}"
                         st.session_state[f"{gene}_bar_settings"][bar_key] = {
                             "color": default_color,
@@ -6426,7 +6429,7 @@ with tab4:
                 gs["figure_height"] = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
                 gs["figure_width"] = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
                 gs["font_size"] = gs.get(f"{gene}_font_size", gs.get("font_size", 14))
-                gs["bar_opacity"] = gs.get(f"{gene}_bar_opacity", gs.get("bar_opacity", 0.95))
+                gs["bar_opacity"] = gs.get(f"{gene}_bar_opacity", gs.get("bar_opacity", 0.85))
                 gs["marker_line_width"] = gs.get(f"{gene}_marker_line_width", gs.get("marker_line_width", 1))
                 gs["y_min"] = gs.get(f"{gene}_y_min")
                 gs["y_max"] = gs.get(f"{gene}_y_max")
