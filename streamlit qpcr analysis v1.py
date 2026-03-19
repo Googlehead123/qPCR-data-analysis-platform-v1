@@ -5971,21 +5971,7 @@ with tab4:
                 index=preset_names.index(current_preset),
                 key=f"preset_{current_gene}",
             )
-            # Apply preset colors on change — force rerun so color pickers reinitialize
-            prev_preset = st.session_state.graph_settings.get(color_preset_key, "Classic")
-            if selected_preset != "Custom":
-                preset_colors = GRAPH_PRESETS[selected_preset]
-                for _, row in gene_data.iterrows():
-                    condition = row["Condition"]
-                    group = row.get("Group", "Treatment")
-                    bar_key = f"{current_gene}_{condition}"
-                    color = preset_colors.get(group, preset_colors.get("Treatment", "#D3D3D3"))
-                    if bar_key in st.session_state.get(f"{current_gene}_bar_settings", {}):
-                        st.session_state[f"{current_gene}_bar_settings"][bar_key]["color"] = color
-                    st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
             st.session_state.graph_settings[color_preset_key] = selected_preset
-            if selected_preset != prev_preset:
-                st.rerun()
         with tb_row1[1]:
             sig_on = st.toggle(
                 "Sig. */#/\u2020",
@@ -6289,21 +6275,32 @@ with tab4:
                         f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
                         unsafe_allow_html=True,
                     )
-                    new_color = rc[1].color_picker(
-                        "c", bs["color"],
-                        key=f"cp_{current_gene}_{condition}",
-                        label_visibility="collapsed",
-                    )
-                    bs["color"] = new_color
-                    st.session_state.graph_settings["bar_colors_per_sample"][bar_key] = new_color
-
-                    # Detect manual color change → switch color preset to Custom
-                    color_preset_key = f"{current_gene}_color_preset"
-                    current_preset_name = st.session_state.graph_settings.get(color_preset_key, "Classic")
-                    if current_preset_name != "Custom":
-                        expected_color = GRAPH_PRESETS.get(current_preset_name, {}).get(group, "#D3D3D3")
-                        if new_color != expected_color:
-                            st.session_state.graph_settings[color_preset_key] = "Custom"
+                    _active_preset_name = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
+                    if _active_preset_name != "Custom" and _active_preset_name in GRAPH_PRESETS:
+                        # Preset is active — use preset color, show picker as read-only indicator
+                        _preset_color = GRAPH_PRESETS[_active_preset_name].get(group, GRAPH_PRESETS[_active_preset_name].get("Treatment", "#D3D3D3"))
+                        new_color = rc[1].color_picker(
+                            "c", _preset_color,
+                            key=f"cp_{current_gene}_{condition}",
+                            label_visibility="collapsed",
+                        )
+                        # If user manually changes color away from preset → switch to Custom
+                        if new_color != _preset_color:
+                            st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
+                            bs["color"] = new_color
+                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
+                        else:
+                            bs["color"] = _preset_color
+                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = _preset_color
+                    else:
+                        # Custom mode — color picker is source of truth
+                        new_color = rc[1].color_picker(
+                            "c", bs["color"],
+                            key=f"cp_{current_gene}_{condition}",
+                            label_visibility="collapsed",
+                        )
+                        bs["color"] = new_color
+                        st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
 
                     with rc[2]:
                         opt_cols = st.columns(4)
