@@ -276,16 +276,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==================== CONSTANTS ====================
-DEFAULT_GROUP_COLORS = {
-    "Baseline": "#FFFFFF",
-    "Non-treated": "#FFFFFF",
-    "Control": "#FFFFFF",
-    "Negative Control": "#FFFFFF",
-    "Inducer": "#909090",
-    "Positive Control": "#909090",
-    "Treatment": "#D3D3D3",
-}
-
 # COSMAX brand colors for PPT redesign
 COSMAX_RED = "#EA1D22"  # Primary accent, emphasis
 COSMAX_BLACK = "#000000"  # Main text
@@ -386,13 +376,12 @@ for key in [
     "excluded_samples",
     "selected_efficacy",
     "hk_gene",
-    "condition_colors",
 ]:
     if key not in st.session_state:
         st.session_state[key] = (
             {}
             if key
-            in ["sample_mapping", "analysis_templates", "graphs", "condition_colors"]
+            in ["sample_mapping", "analysis_templates", "graphs"]
             else (
                 dict()
                 if key == "excluded_wells"
@@ -2177,53 +2166,6 @@ class GraphGenerator:
         return min(chars_per_bar, 30)
 
     @staticmethod
-    def _add_bracket_annotation(
-        fig: go.Figure,
-        x1: float,
-        x2: float,
-        y_base: float,
-        symbol: str,
-        offset_level: int,
-        font_size: int = 12,
-        spacing: float = 0.05,
-    ) -> None:
-        """Add a significance bracket between two x positions.
-
-        Draws a horizontal bar with vertical tick marks at each end, plus the
-        significance symbol centred above the bracket.
-        """
-        y = y_base + (offset_level * spacing * y_base)
-        tick_h = spacing * y_base * 0.3
-
-        # Horizontal line
-        fig.add_shape(
-            type="line", x0=x1, x1=x2, y0=y, y1=y,
-            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
-        )
-        # Left tick
-        fig.add_shape(
-            type="line", x0=x1, x1=x1, y0=y - tick_h, y1=y,
-            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
-        )
-        # Right tick
-        fig.add_shape(
-            type="line", x0=x2, x1=x2, y0=y - tick_h, y1=y,
-            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
-        )
-        # Symbol centred above the bracket
-        fig.add_annotation(
-            x=(x1 + x2) / 2,
-            y=y + (tick_h * 0.5),
-            text=symbol,
-            showarrow=False,
-            font=dict(size=font_size, color="#2C3E50", family=PLOTLY_FONT_FAMILY),
-            xref="x",
-            yref="y",
-            xanchor="center",
-            yanchor="bottom",
-        )
-
-    @staticmethod
     def create_gene_graph(
         data: pd.DataFrame,
         gene: str,
@@ -2231,7 +2173,6 @@ class GraphGenerator:
         efficacy_config: dict = None,
         sample_order: list = None,
         per_sample_overrides: dict = None,
-        condition_colors: dict = None,
         display_gene_name: str = None,
         ref_line_value: float = None,
         ref_line_label: str = None,
@@ -2308,30 +2249,26 @@ class GraphGenerator:
         condition_names = gene_data_indexed["Condition"].tolist()
         n_bars = len(gene_data_indexed)
 
-        # Get colors — preset takes priority, then per-sample custom, then group defaults
-        _preset_map = None
+        # ---- BAR COLORS ----
+        # Reference condition = first bar (always FC=1.0, idx 0 after sorting)
+        _is_ref = [False] * n_bars
+        if "Fold_Change" in gene_data_indexed.columns:
+            for i, (_, r) in enumerate(gene_data_indexed.iterrows()):
+                if abs(r.get("Fold_Change", 0) - 1.0) < 0.001:
+                    _is_ref[i] = True
+
+        bar_colors = ["#FFFFFF"] * n_bars  # default all white
         if color_preset and color_preset != "Custom" and color_preset in GRAPH_PRESETS:
-            _preset_map = GRAPH_PRESETS[color_preset]
-
-        bar_colors = []
-        for idx, row in gene_data_indexed.iterrows():
-            condition = row["Condition"]
-            group = row.get("Group", "Treatment")
-
-            if _preset_map:
-                # Preset active — use preset colors directly
-                bar_colors.append(_preset_map.get(group, _preset_map.get("Treatment", "#D3D3D3")))
-            else:
-                # Custom mode — use per-sample overrides or group defaults
+            _tone = GRAPH_PRESETS[color_preset]["color"]
+            _ref_c = GRAPH_PRESETS[color_preset]["ref"]
+            bar_colors = [_ref_c if _is_ref[i] else _tone for i in range(n_bars)]
+        else:
+            # Custom: check per-sample overrides
+            for i, (_, row) in enumerate(gene_data_indexed.iterrows()):
+                condition = row["Condition"]
                 custom_key = f"{gene}_{condition}"
                 if custom_key in settings.get("bar_colors_per_sample", {}):
-                    bar_colors.append(settings["bar_colors_per_sample"][custom_key])
-                elif condition_colors and condition in condition_colors:
-                    bar_colors.append(condition_colors[condition])
-                elif group in DEFAULT_GROUP_COLORS:
-                    bar_colors.append(DEFAULT_GROUP_COLORS[group])
-                else:
-                    bar_colors.append("#D3D3D3")
+                    bar_colors[i] = settings["bar_colors_per_sample"][custom_key]
 
         # Create figure
         fig = go.Figure()
@@ -2374,18 +2311,17 @@ class GraphGenerator:
             )
 
             # ERROR BARS: Both global AND individual must be True
+            # Only show top half of error bars (arrayminus = 0)
             if show_error_global and bar_config.get("show_err", True):
                 error_visible_upper.append(error_upper_array[idx])
-                error_visible_lower.append(error_lower_array[idx])
             else:
                 error_visible_upper.append(0)
-                error_visible_lower.append(0)
+            error_visible_lower.append(0)  # always 0 — top-only error bars
 
-        # Add bar trace with asymmetric error bars
-        # CRITICAL: Use numeric x-values (indices) for proper positioning
+        # Add bar trace
         fig.add_trace(
             go.Bar(
-                x=list(range(n_bars)),  # Use numeric indices 0, 1, 2, ... n_bars-1
+                x=list(range(n_bars)),
                 y=gene_data_indexed["Relative_Expression"],
                 error_y=dict(
                     type="data",
@@ -2394,7 +2330,7 @@ class GraphGenerator:
                     visible=True,
                     thickness=2,
                     width=6,
-                    color="rgba(0,0,0,0.5)",
+                    color="rgba(0,0,0,0.6)",
                     symmetric=False,
                 ),
                 marker=dict(
@@ -2454,99 +2390,8 @@ class GraphGenerator:
         # This ensures consistent spacing across all bars regardless of height
         fixed_symbol_spacing = y_max_auto * 0.05  # 5% of y-axis as fixed spacing unit
 
-        sig_style = settings.get("sig_style", "direct")
-
-        # Count significant comparisons for bracket-mode fallback guard
-        sig_count_1 = sum(
-            1 for idx in range(n_bars)
-            if gene_data_indexed.iloc[idx].get("significance", "") in ["*", "**", "***"]
-        )
-        sig_count_2 = sum(
-            1 for idx in range(n_bars)
-            if gene_data_indexed.iloc[idx].get("significance_2", "") in ["#", "##", "###"]
-        )
-        total_sig_count = sig_count_1 + sig_count_2
-
-        # Fall back to direct when there are too many brackets to render cleanly
-        if sig_style == "bracketed" and total_sig_count > 6:
-            sig_style = "direct"
-
-        if sig_style == "bracketed" and show_sig_global:
-            # Bracket mode: draw horizontal bracket lines from reference bar to each
-            # significant bar.  Falls back to direct when no reference condition is set.
-            ref_condition_1 = st.session_state.get("analysis_cmp_condition", "")
-            ref_condition_2 = st.session_state.get("analysis_cmp_condition_2", "")
-
-            condition_list = gene_data_indexed["Condition"].tolist()
-
-            # Build a lookup: condition name → integer x index
-            condition_to_idx: dict[str, int] = {
-                cond: i for i, cond in enumerate(condition_list)
-            }
-
-            ref_idx_1 = condition_to_idx.get(ref_condition_1)
-            ref_idx_2 = condition_to_idx.get(ref_condition_2)
-
-            # y_base is top of the tallest bar + error bar
-            y_base = max(
-                gene_data_indexed["Relative_Expression"].iloc[i] + error_visible_upper[i]
-                for i in range(n_bars)
-            )
-            y_base = max(y_base, max_y_value * 0.1)  # Guard against zero
-
-            bracket_level = 0  # Stack brackets vertically
-
-            for idx in range(n_bars):
-                row = gene_data_indexed.iloc[idx]
-                condition = row["Condition"]
-                bar_key = f"{gene}_{condition}"
-                bar_config = gene_bar_settings.get(
-                    bar_key, {"show_sig": True, "show_err": True}
-                )
-
-                if not bar_config.get("show_sig", True):
-                    continue
-
-                sig_1 = row.get("significance", "")
-                if sig_1 in ["*", "**", "***"] and ref_idx_1 is not None and idx != ref_idx_1:
-                    x_left = min(ref_idx_1, idx) - 0.0
-                    x_right = max(ref_idx_1, idx) + 0.0
-                    GraphGenerator._add_bracket_annotation(
-                        fig, x_left, x_right, y_base, sig_1, bracket_level,
-                        font_size=14, spacing=0.12,
-                    )
-                    bracket_level += 1
-
-            bracket_level_2 = bracket_level  # Continue stacking for 2nd comparison
-            for idx in range(n_bars):
-                row = gene_data_indexed.iloc[idx]
-                condition = row["Condition"]
-                bar_key = f"{gene}_{condition}"
-                bar_config = gene_bar_settings.get(
-                    bar_key, {"show_sig": True, "show_err": True}
-                )
-
-                if not bar_config.get("show_sig", True):
-                    continue
-
-                sig_2 = row.get("significance_2", "")
-                if sig_2 in ["#", "##", "###"] and ref_idx_2 is not None and idx != ref_idx_2:
-                    x_left = min(ref_idx_2, idx) - 0.0
-                    x_right = max(ref_idx_2, idx) + 0.0
-                    GraphGenerator._add_bracket_annotation(
-                        fig, x_left, x_right, y_base, sig_2, bracket_level_2,
-                        font_size=11, spacing=0.12,
-                    )
-                    bracket_level_2 += 1
-
-            # Expand y_max_auto to accommodate stacked brackets
-            total_bracket_levels = max(bracket_level, bracket_level_2)
-            if total_bracket_levels > 0:
-                bracket_overhead = total_bracket_levels * 0.12 * y_base + y_base * 0.15
-                y_max_auto = max(y_max_auto, y_base + bracket_overhead)
-
-        else:
-            # Direct mode: add significance symbols above each bar (original behaviour)
+        if show_sig_global:
+            # Direct mode: add significance symbols above each bar
             for idx in range(n_bars):
                 row = gene_data_indexed.iloc[idx]
                 condition = row["Condition"]
@@ -4314,7 +4159,6 @@ with tab1:
                 st.session_state.excluded_samples = set()
                 st.session_state.hk_gene = None
                 st.session_state.selected_efficacy = None
-                st.session_state.condition_colors = {}
                 st.session_state.gene_display_names = {}
                 st.session_state.experiment_desc = {}
                 st.session_state.qc_reviewed = False
@@ -4710,11 +4554,42 @@ with tab_qc:
 
             st.markdown("---")
 
-            # ---- QC note (informational only — auto-exclude via SD threshold above) ----
-            qc_results = QualityControl.detect_outliers(data, hk_gene)
-            flagged = qc_results[qc_results["Flagged"]].copy()
-            if len(flagged) > 0:
-                st.caption(f"ℹ️ {len(flagged)} wells have QC flags (CT thresholds, CV%, Grubbs). Use the SD threshold tool above to selectively exclude high-SD outliers.")
+            # ---- SD-based flagging for color-coded well labels ----
+            # Flag wells whose triplicate SD exceeds the threshold
+            # IMPORTANT: filter out already-excluded wells before computing SD
+            _flagged_well_lookup = {}
+            _flagged_genes = {}
+            _excl_wells_flat = set()
+            if isinstance(st.session_state.excluded_wells, dict):
+                for ws in st.session_state.excluded_wells.values():
+                    _excl_wells_flat.update(ws)
+            _active_data = data[~data["Well"].isin(_excl_wells_flat)] if _excl_wells_flat else data
+
+            for (gene_t, sample_t), grp in _active_data.groupby(["Target", "Sample"]):
+                if len(grp) < 2:
+                    continue
+                grp_sd = grp["CT"].std(ddof=1)
+                if pd.isna(grp_sd) or grp_sd <= sd_thresh:
+                    continue
+                # Find worst well (highest deviation from group mean)
+                grp_mean = grp["CT"].mean()
+                deviations = (grp["CT"] - grp_mean).abs()
+                worst_idx = deviations.idxmax()
+                worst_well = grp.loc[worst_idx, "Well"]
+                _flagged_well_lookup[worst_well] = (
+                    "error" if grp_sd > sd_thresh * 1.5 else "warning",
+                    f"SD {grp_sd:.3f} > {sd_thresh}",
+                )
+                _flagged_genes[gene_t] = _flagged_genes.get(gene_t, 0) + 1
+
+            if _flagged_well_lookup:
+                _gene_parts = ", ".join(
+                    f"{g} ({c})" for g, c in sorted(_flagged_genes.items())
+                )
+                st.warning(
+                    f"⚠️ **{len(_flagged_well_lookup)} high-SD outliers** (SD > {sd_thresh}): {_gene_parts} — "
+                    f"Click **Find All Outliers** above to review and exclude."
+                )
 
             # ---- Filter Controls ----
             filter_col1, filter_col2 = st.columns([1, 1])
@@ -4795,9 +4670,18 @@ with tab_qc:
                         if is_well_excluded(r["Well"], gene, r["Sample"])
                     )
 
-                    gene_label = f"{gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)" if gene_excluded > 0 else f"{gene}  ({len(gene_wells)} wells)"
+                    _gene_flag_count = _flagged_genes.get(gene, 0)
+                    if gene_excluded > 0 and _gene_flag_count > 0:
+                        gene_label = f"{gene}  ({len(gene_wells)} wells, {gene_excluded} excluded, ⚠️ {_gene_flag_count} high-SD)"
+                    elif gene_excluded > 0:
+                        gene_label = f"{gene}  ({len(gene_wells)} wells, {gene_excluded} excluded)"
+                    elif _gene_flag_count > 0:
+                        gene_label = f"{gene}  ({len(gene_wells)} wells, ⚠️ {_gene_flag_count} high-SD)"
+                    else:
+                        gene_label = f"{gene}  ({len(gene_wells)} wells)"
 
-                    with st.expander(gene_label, expanded=(selected_gene_filter != "All Genes")):
+                    _auto_expand = (selected_gene_filter != "All Genes") or (_gene_flag_count > 0)
+                    with st.expander(gene_label, expanded=_auto_expand):
                         # Build editable dataframe for this gene
                         gene_editor_df = gene_wells.copy()
                         gene_editor_df["Include"] = gene_editor_df.apply(
@@ -4831,9 +4715,15 @@ with tab_qc:
                                     stats_str = f"Mean {included_cts.mean():.2f} · SD N/A"
                                 else:
                                     stats_str = "No wells included"
+                                # Check if any well in this sample has high SD
+                                _sample_has_flag = any(
+                                    r["Well"] in _flagged_well_lookup
+                                    for _, r in sample_rows.iterrows()
+                                )
+                                _sample_flag_indicator = " ⚠️ high SD" if _sample_has_flag else ""
                                 st.markdown(
                                     f'<div style="padding:8px 0 4px 0;font-weight:600;font-size:0.9rem;color:#1d1d1f;">'
-                                    f'{sample_name}'
+                                    f'{sample_name}{_sample_flag_indicator}'
                                     f'<span style="font-weight:400;color:#86868b;font-size:0.8rem;margin-left:8px;">'
                                     f'{n_included}/{n_total} included · {stats_str}</span></div>',
                                     unsafe_allow_html=True,
@@ -4842,7 +4732,19 @@ with tab_qc:
                                     well = row["Well"]
                                     ct_val = row["CT"]
                                     dev_val = row["Deviation"]
-                                    label = f"{well}  ·  CT {ct_val:.2f}  ·  Dev {dev_val:+.3f}"
+                                    # Color-coded prefix based on QC flag severity
+                                    _well_flag = _flagged_well_lookup.get(well)
+                                    if _well_flag is not None:
+                                        _sev, _issues = _well_flag
+                                        if _sev == "error":
+                                            _prefix = "🔴 "
+                                        elif _sev == "warning":
+                                            _prefix = "🟡 "
+                                        else:
+                                            _prefix = ""
+                                        label = f"{_prefix}{well}  ·  CT {ct_val:.2f}  ·  Dev {dev_val:+.3f}  ·  {_issues}"
+                                    else:
+                                        label = f"{well}  ·  CT {ct_val:.2f}  ·  Dev {dev_val:+.3f}"
                                     checkbox_states[idx] = st.checkbox(
                                         label,
                                         value=row["Include"],
@@ -4946,16 +4848,42 @@ with tab_qc:
                     styled_stats = rep_stats.style.apply(highlight_status, axis=1)
                     st.dataframe(styled_stats, height=400, use_container_width=True)
 
-            # ---- Section 2: Flagged Wells (read-only) ----
+            # ---- Section 2: Flagged Wells (SD-based, matches Triplicate Browser) ----
             st.markdown("### Flagged Wells")
 
-            qc_results_overview = QualityControl.detect_outliers(data, hk_gene)
-            flagged_overview = qc_results_overview[qc_results_overview["Flagged"]].copy()
+            # Use same SD-based flagging logic as the Triplicate Browser
+            _ov_excl_flat = set()
+            if isinstance(st.session_state.excluded_wells, dict):
+                for _ws in st.session_state.excluded_wells.values():
+                    _ov_excl_flat.update(_ws)
+            _ov_active = data[~data["Well"].isin(_ov_excl_flat)] if _ov_excl_flat else data
 
-            if len(flagged_overview) > 0:
+            _ov_flagged_rows = []
+            for (gene_t, sample_t), grp in _ov_active.groupby(["Target", "Sample"]):
+                if len(grp) < 2:
+                    continue
+                grp_sd = grp["CT"].std(ddof=1)
+                if pd.isna(grp_sd) or grp_sd <= sd_thresh:
+                    continue
+                grp_mean = grp["CT"].mean()
+                deviations = (grp["CT"] - grp_mean).abs()
+                worst_idx = deviations.idxmax()
+                worst_row = grp.loc[worst_idx]
+                severity = "error" if grp_sd > sd_thresh * 1.5 else "warning"
+                _ov_flagged_rows.append({
+                    "Well": worst_row["Well"],
+                    "Sample": sample_t,
+                    "Target": gene_t,
+                    "CT": worst_row["CT"],
+                    "Issues": f"SD {grp_sd:.3f} > {sd_thresh}",
+                    "Severity": severity,
+                })
+
+            if _ov_flagged_rows:
+                flagged_overview = pd.DataFrame(_ov_flagged_rows)
                 flag_ov_col1, flag_ov_col2 = st.columns([3, 1])
                 with flag_ov_col1:
-                    st.warning(f"Found {len(flagged_overview)} wells with potential issues")
+                    st.warning(f"Found {len(flagged_overview)} wells with high triplicate SD")
                 with flag_ov_col2:
                     if st.button(
                         "Exclude All Flagged",
@@ -4969,11 +4897,8 @@ with tab_qc:
                             exclude_well(row["Well"], row["Target"], row["Sample"])
                         st.rerun()
 
-                flagged_display = flagged_overview[
-                    ["Well", "Sample", "Target", "CT", "Issues", "Severity"]
-                ].copy()
                 st.dataframe(
-                    flagged_display,
+                    flagged_overview,
                     hide_index=True,
                     use_container_width=True,
                     column_config={
@@ -4981,7 +4906,7 @@ with tab_qc:
                     },
                 )
             else:
-                st.success("No quality issues detected. All wells pass QC thresholds.")
+                st.success("No quality issues detected. All wells pass SD threshold.")
 
             # ---- Section 3: Pre-Analysis Summary ----
             st.markdown("### Pre-Analysis Summary")
@@ -5291,11 +5216,11 @@ with tab2:
 
                 st.markdown("")
 
-        if st.button("Finalize & Run Analysis", type="primary", use_container_width=True, key="finalize_mapping"):
+        if st.button("Finalize Mapping", type="primary", use_container_width=True, key="finalize_mapping"):
             st.session_state.mapping_finalized = True
             st.session_state.analysis_stale = False
             st.rerun()
-        st.caption("Lock in condition names and groups, then proceed to Analysis tab.")
+        st.caption("Lock in condition names and groups, then run analysis below.")
 
         if st.session_state.get("mapping_finalized", False):
             edit_col1, edit_col2 = st.columns([3, 1])
@@ -5867,7 +5792,7 @@ with tab4:
         PER_GENE_SUFFIXES = [
             "_color_preset", "_figure_width", "_figure_height", "_font_size",
             "_tick_size", "_ylabel_size", "_bar_opacity", "_marker_line_width",
-            "_bg_color", "_bar_gap", "_sig_style", "_show_data_points",
+            "_bg_color", "_bar_gap", "_show_data_points",
             "_label_mode", "_ref_line", "_show_sig", "_show_err",
             "_y_min", "_y_max", "_size_preset",
         ]
@@ -5889,24 +5814,18 @@ with tab4:
                             if src_key in st.session_state.graph_settings:
                                 st.session_state.graph_settings[tgt_key] = st.session_state.graph_settings[src_key]
                         if source_preset != "Custom":
-                            preset_colors = GRAPH_PRESETS.get(source_preset, {})
                             target_data = st.session_state.processed_data.get(target_gene)
                             if target_data is not None:
                                 if f"{target_gene}_bar_settings" not in st.session_state:
                                     st.session_state[f"{target_gene}_bar_settings"] = {}
                                 for _, row in target_data.iterrows():
                                     condition = row["Condition"]
-                                    group = row.get("Group", "Treatment")
                                     bar_key = f"{target_gene}_{condition}"
-                                    color = preset_colors.get(group, preset_colors.get("Treatment", "#D3D3D3"))
                                     if bar_key not in st.session_state[f"{target_gene}_bar_settings"]:
                                         st.session_state[f"{target_gene}_bar_settings"][bar_key] = {
-                                            "color": color, "show_sig": True, "show_err": True,
+                                            "color": "#FFFFFF", "show_sig": True, "show_err": True,
                                             "show_sig_1": True, "show_sig_2": True, "show_sig_3": True,
                                         }
-                                    else:
-                                        st.session_state[f"{target_gene}_bar_settings"][bar_key]["color"] = color
-                                    st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
                     st.success(f"Settings applied to all {len(gene_list)} genes.")
                     st.rerun()
         gene_data = st.session_state.processed_data[current_gene]
@@ -5992,7 +5911,6 @@ with tab4:
                 st.session_state.graph_settings[bar_gap_key] = 0.45
                 st.session_state.graph_settings[show_dp_key] = False
                 st.session_state.graph_settings.pop(color_preset_key, None)
-                st.session_state.graph_settings.pop(f"{current_gene}_sig_style", None)
                 for per_gene_key in [
                     f"{current_gene}_figure_width", f"{current_gene}_figure_height",
                     f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
@@ -6003,22 +5921,6 @@ with tab4:
                 ]:
                     st.session_state.graph_settings.pop(per_gene_key, None)
                 st.rerun()
-
-        # Significance style radio (only when sig is enabled)
-        if st.session_state.graph_settings.get(show_sig_key, True):
-            sig_style_key = f"{current_gene}_sig_style"
-            if sig_style_key not in st.session_state.graph_settings:
-                st.session_state.graph_settings[sig_style_key] = "direct"
-            sig_style_col1, sig_style_col2 = st.columns([2, 4])
-            with sig_style_col1:
-                sig_style = st.radio(
-                    "Significance Style",
-                    ["Direct \u2731", "Bracketed \u252c"],
-                    index=0 if st.session_state.graph_settings.get(sig_style_key, "direct") == "direct" else 1,
-                    key=f"sig_style_{current_gene}",
-                    horizontal=True,
-                )
-                st.session_state.graph_settings[sig_style_key] = "direct" if "Direct" in sig_style else "bracketed"
 
         # Toolbar row 2: ref line + label mode
         label_mode_key = f"{current_gene}_label_mode"
@@ -6053,18 +5955,12 @@ with tab4:
         if "bar_colors_per_sample" not in st.session_state.graph_settings:
             st.session_state.graph_settings["bar_colors_per_sample"] = {}
 
-        # Use active preset colors for initialization (not hardcoded Classic)
-        _active_preset = st.session_state.graph_settings.get(color_preset_key, "Classic")
-        _preset_colors = GRAPH_PRESETS.get(_active_preset, DEFAULT_GROUP_COLORS)
-
         for idx, (_, row) in enumerate(gene_data.iterrows()):
             condition = row["Condition"]
-            group = row.get("Group", "Treatment")
-            default_color = _preset_colors.get(group, DEFAULT_GROUP_COLORS.get(group, "#D3D3D3"))
             bar_key = f"{current_gene}_{condition}"
             if bar_key not in st.session_state[f"{current_gene}_bar_settings"]:
                 st.session_state[f"{current_gene}_bar_settings"][bar_key] = {
-                    "color": default_color,
+                    "color": "#FFFFFF",
                     "show_sig": True,
                     "show_sig_1": True,
                     "show_sig_2": True,
@@ -6257,21 +6153,34 @@ with tab4:
                         f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
                         unsafe_allow_html=True,
                     )
-                    # Color picker — show preset color when preset active, custom color otherwise
+                    # Color picker — show preset tone or custom
                     _active_pn = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
                     if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
-                        _display_color = GRAPH_PRESETS[_active_pn].get(group, GRAPH_PRESETS[_active_pn].get("Treatment", "#D3D3D3"))
+                        _preset = GRAPH_PRESETS[_active_pn]
+                        # Check if this condition is the reference (FC == 1.0)
+                        _is_ref = False
+                        if current_gene in st.session_state.processed_data:
+                            _pd = st.session_state.processed_data[current_gene]
+                            if "Fold_Change" in _pd.columns:
+                                _ref_rows = _pd[_pd["Fold_Change"].round(6) == 1.0]
+                                if not _ref_rows.empty and "Condition" in _ref_rows.columns:
+                                    _is_ref = (condition == _ref_rows.iloc[0]["Condition"])
+                        _display_color = _preset["ref"] if _is_ref else _preset["color"]
                     else:
                         _display_color = bs["color"]
 
+                    _cp_key = f"cp_{current_gene}_{condition}"
                     new_color = rc[1].color_picker(
                         "c", _display_color,
-                        key=f"cp_{current_gene}_{condition}",
+                        key=_cp_key,
                         label_visibility="collapsed",
                     )
-                    # If user changes color away from display → switch to Custom
-                    if new_color != _display_color:
+                    # Only switch to Custom if user manually changed the color picker
+                    # (not just because the display color changed due to preset switch)
+                    _prev_cp = st.session_state.get(f"_prev_{_cp_key}")
+                    if _prev_cp is not None and new_color != _prev_cp and new_color != _display_color:
                         st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
+                    st.session_state[f"_prev_{_cp_key}"] = new_color
                     bs["color"] = new_color
                     st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
 
@@ -6335,10 +6244,6 @@ with tab4:
                 all_replicates = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
                 replicate_df = all_replicates[all_replicates["Target"] == current_gene]
 
-        current_settings["sig_style"] = st.session_state.graph_settings.get(
-            f"{current_gene}_sig_style", "direct"
-        )
-
         fig = GraphGenerator.create_gene_graph(
             gene_data,
             current_gene,
@@ -6346,7 +6251,6 @@ with tab4:
             efficacy_config,
             sample_order=st.session_state.get("sample_order"),
             per_sample_overrides=None,
-            condition_colors=st.session_state.get("condition_colors", {}),
             display_gene_name=display_gene_name,
             ref_line_value=ref_line_val,
             ref_line_label=ref_line_lbl,
@@ -6366,15 +6270,11 @@ with tab4:
 
                 if f"{gene}_bar_settings" not in st.session_state:
                     st.session_state[f"{gene}_bar_settings"] = {}
-                    _qv_preset_name = gs.get(f"{gene}_color_preset", "Classic")
-                    _qv_preset_colors = GRAPH_PRESETS.get(_qv_preset_name, DEFAULT_GROUP_COLORS)
                     for _, row in gd.iterrows():
                         condition = row["Condition"]
-                        group = row.get("Group", "Treatment")
-                        default_color = _qv_preset_colors.get(group, DEFAULT_GROUP_COLORS.get(group, "#D3D3D3"))
                         bar_key = f"{gene}_{condition}"
                         st.session_state[f"{gene}_bar_settings"][bar_key] = {
-                            "color": default_color,
+                            "color": "#FFFFFF",
                             "show_sig": True,
                             "show_err": True,
                         }
@@ -6391,7 +6291,7 @@ with tab4:
                 gs["y_min"] = gs.get(f"{gene}_y_min")
                 gs["y_max"] = gs.get(f"{gene}_y_max")
                 gs["label_mode"] = gs.get(f"{gene}_label_mode", "Auto-wrap")
-                gs["sig_style"] = gs.get(f"{gene}_sig_style", "direct")
+                # sig_style removed — direct mode only
 
                 qv_ref_condition = st.session_state.graph_settings.get(f"{gene}_ref_line", "None")
                 qv_ref_val = None
@@ -6423,7 +6323,6 @@ with tab4:
                     gs,
                     efficacy_config,
                     sample_order=st.session_state.get("sample_order"),
-                    condition_colors=st.session_state.get("condition_colors", {}),
                     display_gene_name=st.session_state.gene_display_names.get(gene, gene),
                     ref_line_value=qv_ref_val,
                     ref_line_label=qv_ref_lbl,
@@ -6487,11 +6386,8 @@ with tab5:
 
             return qc_stats, replicate_stats_df, excl
 
-        # ---- Smart Export Panel ----
-        st.subheader("Export Package")
-        st.caption("Select what to include in your export ZIP")
-
         efficacy = st.session_state.selected_efficacy
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
         # PPT experiment description (collapsed)
         with st.expander("Experiment Description (for PPT)", expanded=False):
@@ -6508,129 +6404,91 @@ with tab5:
             )
             st.session_state.experiment_desc["treatment_time"] = time_val
 
-        # Checkboxes for export contents
-        chk_col1, chk_col2 = st.columns(2)
-        with chk_col1:
-            inc_excel = st.checkbox("Excel Report", value=True, key="exp_inc_excel")
-            inc_ppt = st.checkbox("PowerPoint", value=True, key="exp_inc_ppt")
-            inc_png = st.checkbox("PNG Figures (300 DPI)", value=True, key="exp_inc_png")
-        with chk_col2:
-            inc_svg = st.checkbox("SVG Figures (Vector)", value=False, key="exp_inc_svg")
-            inc_html = st.checkbox("Interactive HTML", value=False, key="exp_inc_html")
-            inc_config = st.checkbox("Analysis Config (JSON)", value=False, key="exp_inc_config")
+        # ---- Reports ----
+        st.subheader("Reports")
 
-        # Export button
-        if st.button("Export ZIP", key="export_zip", type="primary", use_container_width=True):
-            zip_buffer = io.BytesIO()
-            errors = []
-            included = []
+        rpt_cols = st.columns(2)
+        with rpt_cols[0]:
+            try:
+                _qc, _rep, _excl = _build_export_extras()
+                excel_data = export_to_excel(
+                    st.session_state.data, st.session_state.processed_data,
+                    analysis_params, st.session_state.sample_mapping,
+                    qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
+                )
+                st.download_button(
+                    "Download Excel Report", data=excel_data,
+                    file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Excel generation failed: {e}")
 
-            with st.spinner("Generating export..."):
-                progress = st.progress(0, text="Starting...")
-                step = 0
-                total_steps = sum([inc_excel, inc_ppt, inc_html, inc_config]) + (len(st.session_state.graphs) if (inc_png or inc_svg) else 0)
-                total_steps = max(total_steps, 1)
+        with rpt_cols[1]:
+            if st.button("Generate PowerPoint", key="gen_ppt", use_container_width=True):
+                with st.spinner("Generating PPT..."):
+                    try:
+                        ppt_bytes = PPTGenerator.generate_presentation(
+                            st.session_state.graphs, st.session_state.processed_data,
+                            analysis_params, graph_settings=st.session_state.get("graph_settings"),
+                        )
+                        if ppt_bytes:
+                            st.session_state["_ppt_export"] = ppt_bytes
+                    except Exception as e:
+                        st.error(f"PPT generation failed: {e}")
+            if "_ppt_export" in st.session_state:
+                ppt_data = st.session_state["_ppt_export"]
+                st.download_button(
+                    "Download PowerPoint",
+                    data=ppt_data.getvalue() if hasattr(ppt_data, "getvalue") else ppt_data,
+                    file_name=f"qPCR_Report_{efficacy}_{timestamp}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True,
+                )
 
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    if inc_excel:
-                        step += 1
-                        progress.progress(step / total_steps, text="Generating Excel...")
-                        try:
-                            _qc, _rep, _excl = _build_export_extras()
-                            excel_bytes = export_to_excel(
-                                st.session_state.data, st.session_state.processed_data,
-                                analysis_params, st.session_state.sample_mapping,
-                                qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
-                            )
-                            zf.writestr("qPCR_Report.xlsx", excel_bytes)
-                            included.append("Excel")
-                        except Exception as e:
-                            errors.append(f"Excel: {e}")
+        rpt_cols2 = st.columns(2)
+        with rpt_cols2[0]:
+            if st.session_state.graphs:
+                try:
+                    html_parts = [
+                        "<html><head><title>qPCR Graphs</title></head><body>",
+                        f"<h1>{efficacy} Analysis</h1>",
+                        f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
+                    ]
+                    for gene, fig in st.session_state.graphs.items():
+                        html_parts.append(f"<h2>{gene}</h2>")
+                        html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+                    html_parts.append("</body></html>")
+                    combined_html = "\n".join(html_parts)
+                    st.download_button(
+                        "Download Interactive HTML", data=combined_html,
+                        file_name=f"qPCR_graphs_{efficacy}_{timestamp}.html",
+                        mime="text/html", use_container_width=True,
+                    )
+                except Exception as e:
+                    st.error(f"HTML generation failed: {e}")
 
-                    if inc_ppt:
-                        step += 1
-                        progress.progress(step / total_steps, text="Generating PowerPoint...")
-                        try:
-                            ppt_bytes = PPTGenerator.generate_presentation(
-                                st.session_state.graphs, st.session_state.processed_data,
-                                analysis_params, graph_settings=st.session_state.get("graph_settings"),
-                            )
-                            if ppt_bytes:
-                                zf.writestr("qPCR_Report.pptx", ppt_bytes.getvalue() if hasattr(ppt_bytes, "getvalue") else ppt_bytes)
-                                included.append("PPT")
-                        except Exception as e:
-                            errors.append(f"PPT: {e}")
+        with rpt_cols2[1]:
+            try:
+                config_data = {
+                    "analysis_params": analysis_params,
+                    "sample_mapping": st.session_state.sample_mapping,
+                    "graph_settings": st.session_state.graph_settings,
+                    "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
+                }
+                st.download_button(
+                    "Download Analysis Config",
+                    data=json.dumps(config_data, indent=2),
+                    file_name=f"config_{timestamp}.json",
+                    mime="application/json", use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"Config generation failed: {e}")
 
-                    for i, (gene, fig) in enumerate(st.session_state.graphs.items()):
-                        if not inc_png and not inc_svg:
-                            break
-                        step += 1
-                        progress.progress(step / total_steps, text=f"Exporting {gene}...")
-                        fig_copy = go.Figure(fig)
-                        _m = fig.layout.margin
-                        _b = max(180, _m.b if _m and _m.b else 180)
-                        _h = 800 + max(0, _b - 180)
-                        fig_copy.update_layout(width=1200, height=_h, margin=dict(b=_b), font=dict(family=PLOTLY_FONT_FAMILY))
-                        try:
-                            if inc_png:
-                                zf.writestr(f"figures/{gene}_300dpi.png", fig_copy.to_image(format="png", scale=3, width=1200, height=_h))
-                            if inc_svg:
-                                zf.writestr(f"figures/{gene}.svg", fig_copy.to_image(format="svg", width=1200, height=800))
-                        except Exception as e:
-                            errors.append(f"Figure {gene}: {e}")
-                    if inc_png or inc_svg:
-                        included.append("Figures")
-
-                    if inc_html:
-                        step += 1
-                        progress.progress(step / total_steps, text="Generating HTML...")
-                        try:
-                            html_parts = ["<html><head><title>qPCR Graphs</title></head><body>",
-                                f"<h1>{efficacy} Analysis</h1>",
-                                f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"]
-                            for gene, fig in st.session_state.graphs.items():
-                                html_parts.append(f"<h2>{gene}</h2>")
-                                html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-                            html_parts.append("</body></html>")
-                            zf.writestr("all_graphs.html", "\n".join(html_parts))
-                            included.append("HTML")
-                        except Exception as e:
-                            errors.append(f"HTML: {e}")
-
-                    if inc_config:
-                        step += 1
-                        progress.progress(step / total_steps, text="Saving config...")
-                        try:
-                            config_data = {
-                                "analysis_params": analysis_params,
-                                "sample_mapping": st.session_state.sample_mapping,
-                                "graph_settings": st.session_state.graph_settings,
-                                "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
-                            }
-                            zf.writestr("analysis_config.json", json.dumps(config_data, indent=2))
-                            included.append("Config")
-                        except Exception as e:
-                            errors.append(f"Config: {e}")
-
-                    if errors:
-                        zf.writestr("_errors.txt", "\n".join(errors))
-
-                progress.progress(100, text="Done!")
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            st.download_button(
-                label=f"Download ZIP ({', '.join(included)})",
-                data=zip_buffer.getvalue(),
-                file_name=f"qPCR_Export_{efficacy}_{timestamp}.zip",
-                mime="application/zip",
-                key="dl_export_zip",
-            )
-            if errors:
-                st.warning(f"Some exports failed: {', '.join(errors)}")
-
-        # ---- Per-Gene Image Downloads ----
+        # ---- Gene Images ----
         st.markdown("---")
-        st.subheader("Individual Gene Images")
+        st.subheader("Gene Images")
 
         img_col1, img_col2, img_col3 = st.columns(3)
         with img_col1:

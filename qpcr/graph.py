@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from qpcr.constants import DEFAULT_GROUP_COLORS, PLOTLY_FONT_FAMILY, CM_TO_PX
+from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX
 
 
 def _darken_hex(hex_color: str, factor: float = 0.3) -> str:
@@ -34,51 +34,15 @@ class GraphGenerator:
         return wrapped.replace("\n", "<br>")
 
     @staticmethod
-    def _add_bracket_annotation(
-        fig: go.Figure,
-        x1: float,
-        x2: float,
-        y_base: float,
-        symbol: str,
-        offset_level: int,
-        font_size: int = 12,
-        spacing: float = 0.05,
-    ) -> None:
-        """Add a significance bracket between two x positions.
+    def _auto_wrap_width(n_bars: int, fig_width_cm: float = 28) -> int:
+        """Calculate optimal wrap width based on number of bars and figure width.
 
-        Draws a horizontal bar with vertical tick marks at each end, plus the
-        significance symbol centred above the bracket.
+        Adapts like Excel cell wrapping: more bars -> narrower wrap.
+        Minimum 10 chars to keep labels readable even with 20+ bars.
         """
-        y = y_base + (offset_level * spacing * y_base)
-        tick_h = spacing * y_base * 0.3
-
-        # Horizontal line
-        fig.add_shape(
-            type="line", x0=x1, x1=x2, y0=y, y1=y,
-            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
-        )
-        # Left tick
-        fig.add_shape(
-            type="line", x0=x1, x1=x1, y0=y - tick_h, y1=y,
-            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
-        )
-        # Right tick
-        fig.add_shape(
-            type="line", x0=x2, x1=x2, y0=y - tick_h, y1=y,
-            line=dict(color="#2C3E50", width=1), xref="x", yref="y",
-        )
-        # Symbol centred above the bracket
-        fig.add_annotation(
-            x=(x1 + x2) / 2,
-            y=y + (tick_h * 0.5),
-            text=symbol,
-            showarrow=False,
-            font=dict(size=font_size, color="#2C3E50", family=PLOTLY_FONT_FAMILY),
-            xref="x",
-            yref="y",
-            xanchor="center",
-            yanchor="bottom",
-        )
+        px_per_bar = (fig_width_cm * 37.8) / max(n_bars, 1)
+        chars_per_bar = max(int(px_per_bar / 7), 10)
+        return min(chars_per_bar, 30)
 
     @staticmethod
     def create_gene_graph(
@@ -88,7 +52,6 @@ class GraphGenerator:
         efficacy_config: dict = None,
         sample_order: list = None,
         per_sample_overrides: dict = None,
-        condition_colors: dict = None,
         display_gene_name: str = None,
         ref_line_value: float = None,
         ref_line_label: str = None,
@@ -158,27 +121,24 @@ class GraphGenerator:
         # Import GRAPH_PRESETS only when needed (avoid circular import at module level)
         from qpcr.constants import GRAPH_PRESETS
 
-        _preset_map = None
+        # ---- BAR COLORS ----
+        _is_ref = [False] * n_bars
+        if "Fold_Change" in gene_data_indexed.columns:
+            for i, (_, r) in enumerate(gene_data_indexed.iterrows()):
+                if abs(r.get("Fold_Change", 0) - 1.0) < 0.001:
+                    _is_ref[i] = True
+
+        bar_colors = ["#FFFFFF"] * n_bars
         if color_preset and color_preset != "Custom" and color_preset in GRAPH_PRESETS:
-            _preset_map = GRAPH_PRESETS[color_preset]
-
-        bar_colors = []
-        for idx, row in gene_data_indexed.iterrows():
-            condition = row["Condition"]
-            group = row.get("Group", "Treatment")
-
-            if _preset_map:
-                bar_colors.append(_preset_map.get(group, _preset_map.get("Treatment", "#D3D3D3")))
-            else:
+            _tone = GRAPH_PRESETS[color_preset]["color"]
+            _ref_c = GRAPH_PRESETS[color_preset]["ref"]
+            bar_colors = [_ref_c if _is_ref[i] else _tone for i in range(n_bars)]
+        else:
+            for i, (_, row) in enumerate(gene_data_indexed.iterrows()):
+                condition = row["Condition"]
                 custom_key = f"{gene}_{condition}"
                 if custom_key in settings.get("bar_colors_per_sample", {}):
-                    bar_colors.append(settings["bar_colors_per_sample"][custom_key])
-                elif condition_colors and condition in condition_colors:
-                    bar_colors.append(condition_colors[condition])
-                elif group in DEFAULT_GROUP_COLORS:
-                    bar_colors.append(DEFAULT_GROUP_COLORS[group])
-                else:
-                    bar_colors.append("#D3D3D3")
+                    bar_colors[i] = settings["bar_colors_per_sample"][custom_key]
 
         fig = go.Figure()
 
@@ -217,10 +177,9 @@ class GraphGenerator:
 
             if show_error_global and bar_config.get("show_err", True):
                 error_visible_upper.append(error_upper_array[idx])
-                error_visible_lower.append(error_lower_array[idx])
             else:
                 error_visible_upper.append(0)
-                error_visible_lower.append(0)
+            error_visible_lower.append(0)  # top-only error bars
 
         fig.add_trace(
             go.Bar(
@@ -233,7 +192,7 @@ class GraphGenerator:
                     visible=True,
                     thickness=2,
                     width=6,
-                    color="rgba(0,0,0,0.5)",
+                    color="rgba(0,0,0,0.6)",
                     symmetric=False,
                 ),
                 marker=dict(
@@ -290,48 +249,8 @@ class GraphGenerator:
 
         fixed_symbol_spacing = y_max_auto * 0.05
 
-        sig_style = settings.get("sig_style", "direct")
-
-        # Count significant comparisons for bracket-mode fallback guard
-        sig_count_1 = sum(
-            1 for idx in range(n_bars)
-            if gene_data_indexed.iloc[idx].get("significance", "") in ["*", "**", "***"]
-        )
-        sig_count_2 = sum(
-            1 for idx in range(n_bars)
-            if gene_data_indexed.iloc[idx].get("significance_2", "") in ["#", "##", "###"]
-        )
-        total_sig_count = sig_count_1 + sig_count_2
-
-        # Fall back to direct when there are too many brackets to render cleanly
-        if sig_style == "bracketed" and total_sig_count > 6:
-            sig_style = "direct"
-
-        if sig_style == "bracketed" and show_sig_global:
-            # Bracket mode: draw horizontal bracket lines from reference bar to each
-            # significant bar.  Falls back to direct when no reference condition is set.
-            ref_condition_1 = st.session_state.get("analysis_cmp_condition", "")
-            ref_condition_2 = st.session_state.get("analysis_cmp_condition_2", "")
-
-            condition_list = gene_data_indexed["Condition"].tolist()
-
-            # Build a lookup: condition name → integer x index
-            condition_to_idx: dict[str, int] = {
-                cond: i for i, cond in enumerate(condition_list)
-            }
-
-            ref_idx_1 = condition_to_idx.get(ref_condition_1)
-            ref_idx_2 = condition_to_idx.get(ref_condition_2)
-
-            # y_base is top of the tallest bar + error bar
-            y_base = max(
-                gene_data_indexed["Relative_Expression"].iloc[i] + error_visible_upper[i]
-                for i in range(n_bars)
-            )
-            y_base = max(y_base, max_y_value * 0.1)  # Guard against zero
-
-            bracket_level = 0  # Stack brackets vertically
-
+        if show_sig_global:
+            # Direct mode: add significance symbols above each bar
             for idx in range(n_bars):
                 row = gene_data_indexed.iloc[idx]
                 condition = row["Condition"]
@@ -340,59 +259,10 @@ class GraphGenerator:
                     bar_key, {"show_sig": True, "show_err": True}
                 )
 
-                if not bar_config.get("show_sig", True):
-                    continue
-
-                sig_1 = row.get("significance", "")
-                if sig_1 in ["*", "**", "***"] and ref_idx_1 is not None and idx != ref_idx_1:
-                    x_left = min(ref_idx_1, idx) - 0.0
-                    x_right = max(ref_idx_1, idx) + 0.0
-                    GraphGenerator._add_bracket_annotation(
-                        fig, x_left, x_right, y_base, sig_1, bracket_level,
-                        font_size=14, spacing=0.12,
-                    )
-                    bracket_level += 1
-
-            bracket_level_2 = bracket_level  # Continue stacking for 2nd comparison
-            for idx in range(n_bars):
-                row = gene_data_indexed.iloc[idx]
-                condition = row["Condition"]
-                bar_key = f"{gene}_{condition}"
-                bar_config = gene_bar_settings.get(
-                    bar_key, {"show_sig": True, "show_err": True}
-                )
-
-                if not bar_config.get("show_sig", True):
-                    continue
-
-                sig_2 = row.get("significance_2", "")
-                if sig_2 in ["#", "##", "###"] and ref_idx_2 is not None and idx != ref_idx_2:
-                    x_left = min(ref_idx_2, idx) - 0.0
-                    x_right = max(ref_idx_2, idx) + 0.0
-                    GraphGenerator._add_bracket_annotation(
-                        fig, x_left, x_right, y_base, sig_2, bracket_level_2,
-                        font_size=11, spacing=0.12,
-                    )
-                    bracket_level_2 += 1
-
-            # Expand y_max_auto to accommodate stacked brackets
-            total_bracket_levels = max(bracket_level, bracket_level_2)
-            if total_bracket_levels > 0:
-                bracket_overhead = total_bracket_levels * 0.12 * y_base + y_base * 0.15
-                y_max_auto = max(y_max_auto, y_base + bracket_overhead)
-
-        else:
-            # Direct mode: add significance symbols above each bar (original behaviour)
-            for idx in range(n_bars):
-                row = gene_data_indexed.iloc[idx]
-                condition = row["Condition"]
-                bar_key = f"{gene}_{condition}"
-                bar_config = gene_bar_settings.get(
-                    bar_key, {"show_sig": True, "show_err": True}
-                )
-
+                # Get all significance values (3 comparisons)
                 sig_1 = row.get("significance", "")
                 sig_2 = row.get("significance_2", "")
+                sig_3 = row.get("significance_3", "")
 
                 bar_height = row["Relative_Expression"]
                 error_bar_height = error_visible_upper[idx]
@@ -400,53 +270,33 @@ class GraphGenerator:
 
                 asterisk_font_size = 16
                 hashtag_font_size = 10
+                dagger_font_size = 10
 
-                if show_sig_global and bar_config.get("show_sig", True):
+                if show_sig_global:
                     symbols_to_show = []
                     font_sizes = []
 
-                    if sig_1 in ["*", "**", "***"]:
+                    if sig_1 in ["*", "**", "***"] and bar_config.get("show_sig_1", bar_config.get("show_sig", True)):
                         symbols_to_show.append(sig_1)
                         font_sizes.append(asterisk_font_size)
 
-                    if sig_2 in ["#", "##", "###"]:
+                    if sig_2 in ["#", "##", "###"] and bar_config.get("show_sig_2", bar_config.get("show_sig", True)):
                         symbols_to_show.append(sig_2)
                         font_sizes.append(hashtag_font_size)
 
-                    if len(symbols_to_show) == 2:
-                        fig.add_annotation(
-                            x=idx,
-                            y=base_y_position + (fixed_symbol_spacing * 0.2),
-                            text=symbols_to_show[0],
-                            showarrow=False,
-                            font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
-                            xref="x",
-                            yref="y",
-                            xanchor="center",
-                            yanchor="bottom",
-                        )
+                    if sig_3 in ["\u2020", "\u2020\u2020", "\u2020\u2020\u2020"] and bar_config.get("show_sig_3", bar_config.get("show_sig", True)):
+                        symbols_to_show.append(sig_3)
+                        font_sizes.append(dagger_font_size)
 
+                    # Stack symbols with fixed absolute spacing
+                    for si, (sym, fs) in enumerate(zip(symbols_to_show, font_sizes)):
+                        y_pos = base_y_position + (fixed_symbol_spacing * 0.2) + (si * fixed_symbol_spacing)
                         fig.add_annotation(
                             x=idx,
-                            y=base_y_position
-                            + (fixed_symbol_spacing * 0.2)
-                            + fixed_symbol_spacing,
-                            text=symbols_to_show[1],
+                            y=y_pos,
+                            text=sym,
                             showarrow=False,
-                            font=dict(size=font_sizes[1], color="black", family=PLOTLY_FONT_FAMILY),
-                            xref="x",
-                            yref="y",
-                            xanchor="center",
-                            yanchor="bottom",
-                        )
-
-                    elif len(symbols_to_show) == 1:
-                        fig.add_annotation(
-                            x=idx,
-                            y=base_y_position + (fixed_symbol_spacing * 0.2),
-                            text=symbols_to_show[0],
-                            showarrow=False,
-                            font=dict(size=font_sizes[0], color="black", family=PLOTLY_FONT_FAMILY),
+                            font=dict(size=fs, color="black", family=PLOTLY_FONT_FAMILY),
                             xref="x",
                             yref="y",
                             xanchor="center",
@@ -493,21 +343,57 @@ class GraphGenerator:
         )
         gene_tick_size = settings.get(f"{gene}_tick_size", 12)
 
-        wrapped_labels = [
-            GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names
-        ]
+        # Auto-scale figure width for many bars (minimum 1.4cm per bar)
+        configured_width = settings.get("figure_width", 28)
+        min_width_for_bars = n_bars * 1.4
+        effective_fig_width = max(configured_width, min_width_for_bars)
 
-        # FIX-19: Dynamic bottom margin based on max label line count
-        max_label_lines = max(
-            (label.count("<br>") + 1 for label in wrapped_labels), default=1
-        )
-        dynamic_b_margin = 180 + max(0, max_label_lines - 1) * 22
+        # Auto-reduce tick font for dense graphs (>12 bars)
+        if n_bars > 12 and gene_tick_size > 9:
+            gene_tick_size = max(9, gene_tick_size - (n_bars - 12) // 3)
+
+        # X-axis label mode: Auto-wrap / Angled 45 / Angled 90 / Horizontal
+        label_mode = settings.get("label_mode", "Auto-wrap")
+        x_tick_angle = 0
+
+        if label_mode == "Auto-wrap":
+            wrap_w = GraphGenerator._auto_wrap_width(n_bars, effective_fig_width)
+            wrapped_labels = [
+                GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
+            ]
+        elif label_mode == "Angled 45\u00b0":
+            wrapped_labels = [str(c) for c in condition_names]
+            x_tick_angle = -45
+        elif label_mode == "Angled 90\u00b0":
+            wrapped_labels = [str(c) for c in condition_names]
+            x_tick_angle = -90
+        else:  # Horizontal
+            wrapped_labels = [str(c) for c in condition_names]
+
+        # Dynamic bottom margin based on label mode and content
+        if label_mode == "Auto-wrap":
+            max_label_lines = max(
+                (label.count("<br>") + 1 for label in wrapped_labels), default=1
+            )
+            dynamic_b_margin = 180 + max(0, max_label_lines - 1) * 22
+        elif label_mode == "Angled 45\u00b0":
+            max_label_len = max((len(str(c)) for c in condition_names), default=5)
+            dynamic_b_margin = 140 + max_label_len * 4
+            max_label_lines = max(1, dynamic_b_margin // 22)
+        elif label_mode == "Angled 90\u00b0":
+            max_label_len = max((len(str(c)) for c in condition_names), default=5)
+            dynamic_b_margin = 120 + max_label_len * 6
+            max_label_lines = max(1, dynamic_b_margin // 22)
+        else:
+            dynamic_b_margin = 140
+            max_label_lines = 1
+
         default_margins = gene_margins.copy()
         if default_margins.get("b", 200) < dynamic_b_margin:
             default_margins["b"] = dynamic_b_margin
         gene_margins = default_margins
 
-        # P-VALUE LEGEND
+        # P-VALUE LEGEND - Support dual/triple comparison with reference names
         cmp_ref_name = st.session_state.get("analysis_cmp_condition", "")
         legend_ref_label = f" (vs {cmp_ref_name})" if cmp_ref_name else ""
         legend_text = f"<b>Significance{legend_ref_label}:</b>  * p<0.05  ** p<0.01  *** p<0.001"
@@ -522,14 +408,24 @@ class GraphGenerator:
                 f"<br><b>2nd Comparison{legend_ref_label_2}:</b>  # p<0.05  ## p<0.01  ### p<0.001"
             )
 
+        if (
+            "significance_3" in gene_data_indexed.columns
+            and gene_data_indexed["significance_3"].notna().any()
+        ):
+            cmp_ref_name_3 = st.session_state.get("analysis_cmp_condition_3", "")
+            legend_ref_label_3 = f" (vs {cmp_ref_name_3})" if cmp_ref_name_3 else ""
+            legend_text += (
+                f"<br><b>3rd Comparison{legend_ref_label_3}:</b>  \u2020 p<0.05  \u2020\u2020 p<0.01  \u2020\u2020\u2020 p<0.001"
+            )
+
+        # Reserve extra bottom margin for the significance legend below labels
+        legend_line_count = legend_text.count("<br>") + 1
+        legend_extra_px = legend_line_count * 18 + 20
+
         fig_h_px = int(settings.get("figure_height", 16) * CM_TO_PX)
         b_margin_px = gene_margins.get("b", 200)
         t_margin_px = gene_margins.get("t", 60)
-        plot_h_px = max(fig_h_px - b_margin_px - t_margin_px, 100)
-
-        # Dynamic legend y: place below x-axis labels with gap
-        label_px_est = max_label_lines * 18 + 10
-        legend_y = -((label_px_est / plot_h_px) + 0.06)
+        plot_h_px = max(fig_h_px - b_margin_px - legend_extra_px - t_margin_px, 100)
 
         fig.update_layout(
             title="",
@@ -540,8 +436,8 @@ class GraphGenerator:
                 tickmode="array",
                 tickvals=list(range(n_bars)),
                 ticktext=wrapped_labels,
-                tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY),
-                tickangle=0,
+                tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY, color="black"),
+                tickangle=x_tick_angle,
                 ticks="outside",
                 ticklen=8,
                 tickcolor="rgba(0,0,0,0)",
@@ -552,9 +448,9 @@ class GraphGenerator:
             ),
             yaxis=y_axis_config,
             template=settings.get("color_scheme", "plotly_white"),
-            font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY),
+            font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY, color="black"),
             height=fig_h_px,
-            width=int(settings.get("figure_width", 28) * CM_TO_PX),
+            width=int(effective_fig_width * CM_TO_PX),
             bargap=gene_bar_gap,
             showlegend=settings.get("show_legend", False),
             plot_bgcolor=gene_bg_color,
@@ -562,25 +458,28 @@ class GraphGenerator:
             margin=dict(
                 l=gene_margins.get("l", 80),
                 r=gene_margins.get("r", 40),
-                t=gene_margins.get("t", 60),
-                b=b_margin_px,
+                t=t_margin_px,
+                b=b_margin_px + legend_extra_px,
             ),
         )
 
+        # Place significance legend below the plot, beneath x-axis labels
+        label_px_est = max_label_lines * 18 + 10
+        legend_y_frac = -((label_px_est + 8) / plot_h_px)
         fig.add_annotation(
             text=legend_text,
             xref="paper",
             yref="paper",
             x=1.0,
-            y=legend_y,
+            y=legend_y_frac,
             xanchor="right",
             yanchor="top",
             showarrow=False,
-            font=dict(size=10, color="#888888", family=PLOTLY_FONT_FAMILY),
-            bgcolor="rgba(255,255,255,0.85)",
-            bordercolor="#DDDDDD",
+            font=dict(size=9, color="#666666", family=PLOTLY_FONT_FAMILY),
+            bgcolor="rgba(255,255,255,0.90)",
+            bordercolor="#CCCCCC",
             borderwidth=1,
-            borderpad=3,
+            borderpad=4,
         )
 
         if ref_line_value is not None and pd.notna(ref_line_value):

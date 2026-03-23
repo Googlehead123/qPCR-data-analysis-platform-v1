@@ -11,37 +11,19 @@ DEFAULT_GROUP_COLORS = {
     "Non-treated": "#FFFFFF",
     "Control": "#FFFFFF",
     "Negative Control": "#FFFFFF",
-    "Inducer": "#909090",
-    "Positive Control": "#909090",
-    "Treatment": "#D3D3D3",
+    "Inducer": "#FFFFFF",
+    "Positive Control": "#FFFFFF",
+    "Treatment": "#FFFFFF",
 }
 
 GRAPH_PRESETS = {
-    "Steel": {
-        "Baseline": "#C8D6E0", "Non-treated": "#C8D6E0", "Control": "#C8D6E0",
-        "Negative Control": "#C8D6E0", "Treatment": "#4A7A9F",
-        "Inducer": "#2C5F7F", "Positive Control": "#2C5F7F",
-    },
-    "Warm Neutral": {
-        "Baseline": "#FFFFFF", "Non-treated": "#FFFFFF", "Control": "#FFFFFF",
-        "Negative Control": "#FFFFFF", "Treatment": "#D4B896",
-        "Inducer": "#B89A70", "Positive Control": "#B89A70",
-    },
-    "Classic": {
-        "Baseline": "#FFFFFF", "Non-treated": "#FFFFFF", "Control": "#FFFFFF",
-        "Negative Control": "#FFFFFF", "Treatment": "#D3D3D3",
-        "Inducer": "#909090", "Positive Control": "#909090",
-    },
-    "Sage": {
-        "Baseline": "#E8E8E8", "Non-treated": "#E8E8E8", "Control": "#E8E8E8",
-        "Negative Control": "#E8E8E8", "Treatment": "#8BAF9A",
-        "Inducer": "#5C8A6E", "Positive Control": "#5C8A6E",
-    },
-    "Slate": {
-        "Baseline": "#EDEDED", "Non-treated": "#EDEDED", "Control": "#EDEDED",
-        "Negative Control": "#EDEDED", "Treatment": "#8E8EA0",
-        "Inducer": "#5B5B78", "Positive Control": "#5B5B78",
-    },
+    "Classic": {"color": "#D3D3D3", "ref": "#FFFFFF"},
+    "Steel": {"color": "#4A7A9F", "ref": "#FFFFFF"},
+    "Warm Neutral": {"color": "#D4B896", "ref": "#FFFFFF"},
+    "Sage": {"color": "#8BAF9A", "ref": "#FFFFFF"},
+    "Slate": {"color": "#8E8EA0", "ref": "#FFFFFF"},
+    "Coral": {"color": "#D4826A", "ref": "#FFFFFF"},
+    "Plum": {"color": "#9B7EAF", "ref": "#FFFFFF"},
 }
 
 FIGURE_SIZE_PRESETS = {

@@ -176,26 +176,29 @@ class TestGraphGeneratorWrapText:
 
 
 class TestColorPresets:
-    def test_all_presets_cover_all_group_keys(self):
-        from qpcr.constants import GRAPH_PRESETS, DEFAULT_GROUP_COLORS
-        required_groups = set(DEFAULT_GROUP_COLORS.keys())
-        for preset_name, colors in GRAPH_PRESETS.items():
-            assert required_groups.issubset(set(colors.keys())), \
-                f"Preset '{preset_name}' missing groups: {required_groups - set(colors.keys())}"
-
-    def test_classic_preset_matches_defaults(self):
-        from qpcr.constants import GRAPH_PRESETS, DEFAULT_GROUP_COLORS
-        for group, color in DEFAULT_GROUP_COLORS.items():
-            assert GRAPH_PRESETS["Classic"][group] == color, \
-                f"Classic preset mismatch for '{group}': {GRAPH_PRESETS['Classic'][group]} != {color}"
+    def test_all_presets_have_color_and_ref(self):
+        from qpcr.constants import GRAPH_PRESETS
+        for preset_name, preset_def in GRAPH_PRESETS.items():
+            assert "color" in preset_def, f"Preset '{preset_name}' missing 'color'"
+            assert "ref" in preset_def, f"Preset '{preset_name}' missing 'ref'"
 
     def test_all_preset_colors_are_valid_hex(self):
         import re
         from qpcr.constants import GRAPH_PRESETS
         hex_re = re.compile(r'^#[0-9A-Fa-f]{6}$')
-        for preset_name, colors in GRAPH_PRESETS.items():
-            for group, color in colors.items():
-                assert hex_re.match(color), f"Invalid hex in {preset_name}/{group}: {color}"
+        for preset_name, preset_def in GRAPH_PRESETS.items():
+            assert hex_re.match(preset_def["color"]), f"Invalid hex in {preset_name}/color: {preset_def['color']}"
+            assert hex_re.match(preset_def["ref"]), f"Invalid hex in {preset_name}/ref: {preset_def['ref']}"
+
+    def test_all_preset_refs_are_white(self):
+        from qpcr.constants import GRAPH_PRESETS
+        for preset_name, preset_def in GRAPH_PRESETS.items():
+            assert preset_def["ref"] == "#FFFFFF", f"Preset '{preset_name}' ref should be white"
+
+    def test_default_group_colors_all_white(self):
+        from qpcr.constants import DEFAULT_GROUP_COLORS
+        for group, color in DEFAULT_GROUP_COLORS.items():
+            assert color == "#FFFFFF", f"Group '{group}' should be white, got {color}"
 
     def test_figure_size_presets_have_width_and_height(self):
         from qpcr.constants import FIGURE_SIZE_PRESETS
@@ -285,48 +288,7 @@ class TestSignificanceBrackets:
             "significance_2": ["", ""],
         })
         graph_settings["show_significance"] = True
-        graph_settings["sig_style"] = "direct"
         fig = GraphGenerator.create_gene_graph(data=data, gene="COL1A1", settings=graph_settings)
         sig_annotations = [a for a in fig.layout.annotations if a.text in ["*", "**", "***"]]
         assert len(sig_annotations) >= 1
 
-    def test_bracketed_mode_uses_shapes(self, mock_streamlit, graph_settings):
-        from qpcr.graph import GraphGenerator
-        data = pd.DataFrame({
-            "Target": ["COL1A1", "COL1A1"],
-            "Condition": ["Non-treated", "Treatment1"],
-            "Group": ["Negative Control", "Treatment"],
-            "Relative_Expression": [1.0, 2.5],
-            "SEM": [0.1, 0.2],
-            "FC_Error_Upper": [0.15, 0.3],
-            "FC_Error_Lower": [0.12, 0.25],
-            "significance": ["", "**"],
-            "significance_2": ["", ""],
-        })
-        graph_settings["show_significance"] = True
-        graph_settings["sig_style"] = "bracketed"
-        mock_streamlit.session_state["analysis_cmp_condition"] = "Non-treated"
-        fig = GraphGenerator.create_gene_graph(data=data, gene="COL1A1", settings=graph_settings)
-        bracket_shapes = [s for s in (fig.layout.shapes or []) if s.type == "line"]
-        assert len(bracket_shapes) >= 3  # 1 horizontal + 2 vertical ticks per bracket
-
-    def test_bracket_fallback_when_too_many_comparisons(self, mock_streamlit, graph_settings):
-        from qpcr.graph import GraphGenerator
-        conditions = ["Non-treated"] + [f"T{i}" for i in range(1, 8)]
-        data = pd.DataFrame({
-            "Target": ["COL1A1"] * 8,
-            "Condition": conditions,
-            "Group": ["Negative Control"] + ["Treatment"] * 7,
-            "Relative_Expression": [1.0] + [float(i) for i in range(2, 9)],
-            "SEM": [0.1] * 8,
-            "FC_Error_Upper": [0.15] * 8,
-            "FC_Error_Lower": [0.12] * 8,
-            "significance": [""] + ["**"] * 7,
-            "significance_2": [""] * 8,
-        })
-        graph_settings["show_significance"] = True
-        graph_settings["sig_style"] = "bracketed"
-        mock_streamlit.session_state["analysis_cmp_condition"] = "Non-treated"
-        fig = GraphGenerator.create_gene_graph(data=data, gene="COL1A1", settings=graph_settings)
-        bracket_shapes = [s for s in (fig.layout.shapes or []) if s.type == "line"]
-        assert len(bracket_shapes) == 0  # Fell back to direct mode
