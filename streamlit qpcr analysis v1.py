@@ -1215,7 +1215,13 @@ class QualityControl:
         if data is None or data.empty:
             return go.Figure()
 
-        excluded_wells = excluded_wells or set()
+        if isinstance(excluded_wells, dict):
+            _flat: set = set()
+            for _ws in excluded_wells.values():
+                _flat.update(_ws)
+            excluded_wells = _flat
+        else:
+            excluded_wells = excluded_wells or set()
 
         rows = list("ABCDEFGH")
         cols = list(range(1, 13))
@@ -4576,7 +4582,7 @@ with tab_qc:
                 deviations = (grp["CT"] - grp_mean).abs()
                 worst_idx = deviations.idxmax()
                 worst_well = grp.loc[worst_idx, "Well"]
-                _flagged_well_lookup[worst_well] = (
+                _flagged_well_lookup[(gene_t, sample_t, worst_well)] = (
                     "error" if grp_sd > sd_thresh * 1.5 else "warning",
                     f"SD {grp_sd:.3f} > {sd_thresh}",
                 )
@@ -4717,7 +4723,7 @@ with tab_qc:
                                     stats_str = "No wells included"
                                 # Check if any well in this sample has high SD
                                 _sample_has_flag = any(
-                                    r["Well"] in _flagged_well_lookup
+                                    (gene, sample_name, r["Well"]) in _flagged_well_lookup
                                     for _, r in sample_rows.iterrows()
                                 )
                                 _sample_flag_indicator = " ⚠️ high SD" if _sample_has_flag else ""
@@ -4733,7 +4739,7 @@ with tab_qc:
                                     ct_val = row["CT"]
                                     dev_val = row["Deviation"]
                                     # Color-coded prefix based on QC flag severity
-                                    _well_flag = _flagged_well_lookup.get(well)
+                                    _well_flag = _flagged_well_lookup.get((gene, sample_name, well))
                                     if _well_flag is not None:
                                         _sev, _issues = _well_flag
                                         if _sev == "error":

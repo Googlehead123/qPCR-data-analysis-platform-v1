@@ -516,7 +516,13 @@ class QualityControl:
         if data is None or data.empty:
             return go.Figure()
 
-        excluded_wells = excluded_wells or set()
+        if isinstance(excluded_wells, dict):
+            _flat: set = set()
+            for _ws in excluded_wells.values():
+                _flat.update(_ws)
+            excluded_wells = _flat
+        else:
+            excluded_wells = excluded_wells or set()
 
         rows = list("ABCDEFGH")
         cols = list(range(1, 13))
