@@ -2120,6 +2120,16 @@ class AnalysisEngine:
 
                 st.session_state.processed_data = gene_dict
 
+                # Flush stale bar_colors_per_sample keys that no longer match any condition
+                _valid_keys = set()
+                for _g, _gdf in gene_dict.items():
+                    for _c in _gdf["Condition"].unique():
+                        _valid_keys.add(f"{_g}_{_c}")
+                _bcs = st.session_state.graph_settings.get("bar_colors_per_sample", {})
+                _stale = [k for k in _bcs if k not in _valid_keys]
+                for k in _stale:
+                    del _bcs[k]
+
                 # Store exclusion snapshot for auto-rerun detection
                 st.session_state['_exclusion_snapshot'] = {
                     'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
@@ -2185,6 +2195,7 @@ class GraphGenerator:
         show_data_points: bool = False,
         replicate_data: pd.DataFrame = None,
         color_preset: str = None,
+        ref_condition: str = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -2256,12 +2267,19 @@ class GraphGenerator:
         n_bars = len(gene_data_indexed)
 
         # ---- BAR COLORS ----
-        # Reference condition = first bar (always FC=1.0, idx 0 after sorting)
+        # Reference condition — match by condition name (exact), FC fallback (single match only)
         _is_ref = [False] * n_bars
-        if "Fold_Change" in gene_data_indexed.columns:
+        if ref_condition:
             for i, (_, r) in enumerate(gene_data_indexed.iterrows()):
-                if abs(r.get("Fold_Change", 0) - 1.0) < 0.001:
+                if r.get("Condition") == ref_condition:
                     _is_ref[i] = True
+        elif "Fold_Change" in gene_data_indexed.columns:
+            _fc_matches = [
+                i for i, (_, r) in enumerate(gene_data_indexed.iterrows())
+                if abs(r.get("Fold_Change", 0) - 1.0) < 0.001
+            ]
+            if len(_fc_matches) == 1:
+                _is_ref[_fc_matches[0]] = True
 
         bar_colors = ["#FFFFFF"] * n_bars  # default all white
         if color_preset and color_preset != "Custom" and color_preset in GRAPH_PRESETS:
@@ -5819,19 +5837,27 @@ with tab4:
                             tgt_key = f"{target_gene}{suffix}"
                             if src_key in st.session_state.graph_settings:
                                 st.session_state.graph_settings[tgt_key] = st.session_state.graph_settings[src_key]
-                        if source_preset != "Custom":
-                            target_data = st.session_state.processed_data.get(target_gene)
-                            if target_data is not None:
-                                if f"{target_gene}_bar_settings" not in st.session_state:
-                                    st.session_state[f"{target_gene}_bar_settings"] = {}
-                                for _, row in target_data.iterrows():
-                                    condition = row["Condition"]
-                                    bar_key = f"{target_gene}_{condition}"
-                                    if bar_key not in st.session_state[f"{target_gene}_bar_settings"]:
-                                        st.session_state[f"{target_gene}_bar_settings"][bar_key] = {
-                                            "color": "#FFFFFF", "show_sig": True, "show_err": True,
-                                            "show_sig_1": True, "show_sig_2": True, "show_sig_3": True,
-                                        }
+                        target_data = st.session_state.processed_data.get(target_gene)
+                        if target_data is not None:
+                            if f"{target_gene}_bar_settings" not in st.session_state:
+                                st.session_state[f"{target_gene}_bar_settings"] = {}
+                            # For Custom preset: copy source colors by position to target conditions
+                            source_data = st.session_state.processed_data.get(source_gene)
+                            source_colors = []
+                            if source_preset == "Custom" and source_data is not None:
+                                for _, sr in source_data.iterrows():
+                                    sk = f"{source_gene}_{sr['Condition']}"
+                                    sc = st.session_state.graph_settings.get("bar_colors_per_sample", {}).get(sk, "#FFFFFF")
+                                    source_colors.append(sc)
+                            for i, (_, row) in enumerate(target_data.iterrows()):
+                                condition = row["Condition"]
+                                bar_key = f"{target_gene}_{condition}"
+                                color = source_colors[i] if i < len(source_colors) else "#FFFFFF"
+                                st.session_state[f"{target_gene}_bar_settings"][bar_key] = {
+                                    "color": color, "show_sig": True, "show_err": True,
+                                    "show_sig_1": True, "show_sig_2": True, "show_sig_3": True,
+                                }
+                                st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
                     st.success(f"Settings applied to all {len(gene_list)} genes.")
                     st.rerun()
         gene_data = st.session_state.processed_data[current_gene]
@@ -6163,14 +6189,7 @@ with tab4:
                     _active_pn = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
                     if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
                         _preset = GRAPH_PRESETS[_active_pn]
-                        # Check if this condition is the reference (FC == 1.0)
-                        _is_ref = False
-                        if current_gene in st.session_state.processed_data:
-                            _pd = st.session_state.processed_data[current_gene]
-                            if "Fold_Change" in _pd.columns:
-                                _ref_rows = _pd[_pd["Fold_Change"].round(6) == 1.0]
-                                if not _ref_rows.empty and "Condition" in _ref_rows.columns:
-                                    _is_ref = (condition == _ref_rows.iloc[0]["Condition"])
+                        _is_ref = (condition == st.session_state.get("analysis_ref_condition"))
                         _display_color = _preset["ref"] if _is_ref else _preset["color"]
                     else:
                         _display_color = bs["color"]
@@ -6263,6 +6282,7 @@ with tab4:
             show_data_points=show_dp,
             replicate_data=replicate_df,
             color_preset=st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic"),
+            ref_condition=st.session_state.get("analysis_ref_condition"),
         )
 
         st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
@@ -6335,6 +6355,7 @@ with tab4:
                     show_data_points=qv_show_dp,
                     replicate_data=qv_replicate_df,
                     color_preset=gs.get(f"{gene}_color_preset", "Classic"),
+                    ref_condition=st.session_state.get("analysis_ref_condition"),
                 )
 
                 with all_gene_cols[idx % len(all_gene_cols)]:
