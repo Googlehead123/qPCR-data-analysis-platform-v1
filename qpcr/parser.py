@@ -84,7 +84,7 @@ class QPCRParser:
             )
 
         pre_filter_count = len(parsed.dropna(subset=["CT"]))
-        result = parsed.dropna(subset=["CT"]).query("Sample.notna() & Target.notna()")
+        result = parsed.dropna(subset=["CT", "Sample", "Target"])
         dropped_sample_target = pre_filter_count - len(result)
         if dropped_sample_target > 0:
             st.info(
@@ -141,9 +141,7 @@ class QPCRParser:
             parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 
             pre_filter_count = len(parsed.dropna(subset=["CT"]))
-            result = parsed.dropna(subset=["CT"]).query(
-                "Sample.notna() & Target.notna()"
-            )
+            result = parsed.dropna(subset=["CT", "Sample", "Target"])
             dropped_sample_target = pre_filter_count - len(result)
             if dropped_sample_target > 0:
                 st.info(

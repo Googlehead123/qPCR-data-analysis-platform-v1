@@ -625,7 +625,7 @@ class QPCRParser:
             )
 
         pre_filter_count = len(parsed.dropna(subset=["CT"]))
-        result = parsed.dropna(subset=["CT"]).query("Sample.notna() & Target.notna()")
+        result = parsed.dropna(subset=["CT", "Sample", "Target"])
         dropped_sample_target = pre_filter_count - len(result)
         if dropped_sample_target > 0:
             st.info(
@@ -682,9 +682,7 @@ class QPCRParser:
             parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 
             pre_filter_count = len(parsed.dropna(subset=["CT"]))
-            result = parsed.dropna(subset=["CT"]).query(
-                "Sample.notna() & Target.notna()"
-            )
+            result = parsed.dropna(subset=["CT", "Sample", "Target"])
             dropped_sample_target = pre_filter_count - len(result)
             if dropped_sample_target > 0:
                 st.info(
@@ -4350,7 +4348,7 @@ with tab1:
             if missing_hk:
                 warnings_found = True
                 st.error(
-                    f"❌ **Missing Housekeeping Gene**: {len(missing_hk)} samples have no {hk} data: {', '.join(list(missing_hk)[:5])}{'...' if len(missing_hk) > 5 else ''}"
+                    f"❌ **Missing Housekeeping Gene**: {len(missing_hk)} samples have no {hk} data: {', '.join(str(s) for s in list(missing_hk)[:5])}{'...' if len(missing_hk) > 5 else ''}"
                 )
 
         high_ct_count = len(data[data["CT"] > AnalysisConstants.CT_HIGH_WARNING])
@@ -4991,8 +4989,8 @@ with tab_qc:
                             "Total Wells": total_wells,
                             "Included": n_included,
                             "Excluded": n_excluded,
-                            "Included Wells": ", ".join(included_ids),
-                            "Excluded Wells": ", ".join(excluded_ids) if excluded_ids else "—",
+                            "Included Wells": ", ".join(str(w) for w in included_ids),
+                            "Excluded Wells": ", ".join(str(w) for w in excluded_ids) if excluded_ids else "—",
                             "Mean CT": round(mean_ct, 2) if mean_ct is not None else "—",
                             "CT SD": round(sd_ct, 3) if sd_ct is not None else "—",
                         }
