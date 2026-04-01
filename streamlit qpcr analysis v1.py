@@ -606,12 +606,16 @@ class QPCRParser:
 
         parsed = pd.DataFrame(
             {
-                "Well": df[well_col],
-                "Sample": sample_col,
-                "Target": target_col,
+                "Well": df[well_col].astype(str).str.strip(),
+                "Sample": sample_col.astype(str).str.strip(),
+                "Target": target_col.astype(str).str.strip(),
                 "CT": pd.to_numeric(df[ct_col], errors="coerce"),
             }
         )
+        # Replace stringified NaN/None back to actual NaN for proper filtering
+        parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+        parsed["Target"] = parsed["Target"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+        parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 
         # Count invalid CT values for user feedback
         invalid_ct_count = parsed["CT"].isna().sum()
@@ -667,12 +671,15 @@ class QPCRParser:
 
             parsed = pd.DataFrame(
                 {
-                    "Well": df[well_col],
-                    "Sample": df[sample_col],
-                    "Target": df[target_col],
+                    "Well": df[well_col].astype(str).str.strip(),
+                    "Sample": df[sample_col].astype(str).str.strip(),
+                    "Target": df[target_col].astype(str).str.strip(),
                     "CT": pd.to_numeric(df[ct_col], errors="coerce"),
                 }
             )
+            parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+            parsed["Target"] = parsed["Target"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+            parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 
             pre_filter_count = len(parsed.dropna(subset=["CT"]))
             result = parsed.dropna(subset=["CT"]).query(

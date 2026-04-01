@@ -128,6 +128,27 @@ class TestQPCRParserParse:
         assert 'CT' in result.columns
         assert len(result) == 12
 
+    def test_parse_numeric_sample_names_are_strings(self, mock_streamlit):
+        """Regression: numeric sample names must be strings to avoid TypeError in .join()"""
+        from importlib import import_module
+        spec = import_module('streamlit qpcr analysis v1')
+        QPCRParser = spec.QPCRParser
+
+        csv_content = """Block Type,,,,
+Well Position,Sample Name,Target Name,Task,CT
+A1,1,GAPDH,UNKNOWN,18.5
+A2,2,GAPDH,UNKNOWN,19.0
+A3,3,COL1A1,UNKNOWN,25.0
+"""
+        file = io.StringIO(csv_content)
+        result = QPCRParser.parse(file)
+
+        assert result is not None
+        assert all(isinstance(s, str) for s in result["Sample"].values)
+        assert all(isinstance(t, str) for t in result["Target"].values)
+        # Must not raise: "sequence item N: expected str instance, float found"
+        ", ".join(result["Sample"].unique())
+
     def test_parse_returns_none_on_unknown_format(self, mock_streamlit):
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
