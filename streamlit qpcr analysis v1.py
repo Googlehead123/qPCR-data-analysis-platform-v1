@@ -2698,17 +2698,18 @@ class ReportGenerator:
         """Convert Plotly figure to image bytes with proper error handling for Kaleido/Chrome."""
         import os
 
-        # Try to set Chrome path for Streamlit Cloud (Chromium from packages.txt)
-        chrome_paths = [
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-        ]
-        for chrome_path in chrome_paths:
-            if os.path.exists(chrome_path):
-                os.environ["CHROME_PATH"] = chrome_path
-                break
+        # Set BROWSER_PATH for choreographer (kaleido's browser driver) on Streamlit Cloud.
+        # choreographer reads os.environ["BROWSER_PATH"], not "CHROME_PATH".
+        if not os.environ.get("BROWSER_PATH"):
+            for chrome_path in [
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+            ]:
+                if os.path.exists(chrome_path):
+                    os.environ["BROWSER_PATH"] = chrome_path
+                    break
 
         try:
             return fig.to_image(format=format, scale=scale)
