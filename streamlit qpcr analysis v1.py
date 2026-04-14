@@ -5819,53 +5819,8 @@ with tab4:
                     st.session_state.selected_gene_idx = idx
                     st.rerun()
 
-        PER_GENE_SUFFIXES = [
-            "_color_preset", "_figure_width", "_figure_height", "_font_size",
-            "_tick_size", "_ylabel_size", "_bar_opacity", "_marker_line_width",
-            "_bg_color", "_bar_gap", "_show_data_points",
-            "_label_mode", "_ref_line", "_show_sig", "_show_err",
-            "_y_min", "_y_max", "_size_preset",
-        ]
-
         current_gene = gene_list[st.session_state.selected_gene_idx]
 
-        if len(gene_list) > 1:
-            apply_col1, apply_col2 = st.columns([3, 1])
-            with apply_col2:
-                if st.button(f"Apply to All {len(gene_list)} Genes", key="apply_all_genes", use_container_width=True):
-                    source_gene = current_gene
-                    source_preset = st.session_state.graph_settings.get(f"{source_gene}_color_preset", "Classic")
-                    for target_gene in gene_list:
-                        if target_gene == source_gene:
-                            continue
-                        for suffix in PER_GENE_SUFFIXES:
-                            src_key = f"{source_gene}{suffix}"
-                            tgt_key = f"{target_gene}{suffix}"
-                            if src_key in st.session_state.graph_settings:
-                                st.session_state.graph_settings[tgt_key] = st.session_state.graph_settings[src_key]
-                        target_data = st.session_state.processed_data.get(target_gene)
-                        if target_data is not None:
-                            if f"{target_gene}_bar_settings" not in st.session_state:
-                                st.session_state[f"{target_gene}_bar_settings"] = {}
-                            # For Custom preset: copy source colors by position to target conditions
-                            source_data = st.session_state.processed_data.get(source_gene)
-                            source_colors = []
-                            if source_preset == "Custom" and source_data is not None:
-                                for _, sr in source_data.iterrows():
-                                    sk = f"{source_gene}_{sr['Condition']}"
-                                    sc = st.session_state.graph_settings.get("bar_colors_per_sample", {}).get(sk, "#FFFFFF")
-                                    source_colors.append(sc)
-                            for i, (_, row) in enumerate(target_data.iterrows()):
-                                condition = row["Condition"]
-                                bar_key = f"{target_gene}_{condition}"
-                                color = source_colors[i] if i < len(source_colors) else "#FFFFFF"
-                                st.session_state[f"{target_gene}_bar_settings"][bar_key] = {
-                                    "color": color, "show_sig": True, "show_err": True,
-                                    "show_sig_1": True, "show_sig_2": True, "show_sig_3": True,
-                                }
-                                st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = color
-                    st.success(f"Settings applied to all {len(gene_list)} genes.")
-                    st.rerun()
         gene_data = st.session_state.processed_data[current_gene]
 
         show_sig_key = f"{current_gene}_show_sig"
@@ -6174,7 +6129,15 @@ with tab4:
                 hdr = st.columns([3, 0.8, 2.5])
                 hdr[0].markdown("<small>**Condition**</small>", unsafe_allow_html=True)
                 hdr[1].markdown("<small>**Color**</small>", unsafe_allow_html=True)
-                hdr[2].markdown("<small>**Options**</small>", unsafe_allow_html=True)
+                with hdr[2]:
+                    _opt_hdr = st.columns(4)
+                    for _hi, _hlbl in enumerate([
+                        "<small>**✱**<br><span style='color:#888'>Sig.1</span></small>",
+                        "<small>**#**<br><span style='color:#888'>Sig.2</span></small>",
+                        "<small>**†**<br><span style='color:#888'>Sig.3</span></small>",
+                        "<small>**±**<br><span style='color:#888'>Err</span></small>",
+                    ]):
+                        _opt_hdr[_hi].markdown(_hlbl, unsafe_allow_html=True)
 
                 option_labels = ["✱", "#", "†", "±"]
                 option_keys = ["show_sig_1", "show_sig_2", "show_sig_3", "show_err"]
