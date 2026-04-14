@@ -6193,27 +6193,46 @@ with tab4:
                     )
                     # Color picker — show preset tone or custom
                     _active_pn = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
+                    _cp_key = f"cp_{current_gene}_{condition}"
+                    _desired_key = f"_desired_{_cp_key}"
                     if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
                         _preset = GRAPH_PRESETS[_active_pn]
                         _is_ref = (condition == st.session_state.get("analysis_ref_condition"))
                         _display_color = _preset["ref"] if _is_ref else _preset["color"]
+                        # Sync widget to preset color only when preset (or ref detection) changes.
+                        # This avoids overwriting user interactions while keeping the picker in
+                        # sync when the user switches presets.
+                        if st.session_state.get(_desired_key) != _display_color:
+                            st.session_state[_cp_key] = _display_color
+                            st.session_state[_desired_key] = _display_color
                     else:
-                        _display_color = bs["color"]
+                        _display_color = st.session_state.graph_settings.get(
+                            "bar_colors_per_sample", {}
+                        ).get(bar_key, bs.get("color", "#FFFFFF"))
 
-                    _cp_key = f"cp_{current_gene}_{condition}"
                     new_color = rc[1].color_picker(
                         "c", _display_color,
                         key=_cp_key,
                         label_visibility="collapsed",
                     )
-                    # Only switch to Custom if user manually changed the color picker
-                    # (not just because the display color changed due to preset switch)
-                    _prev_cp = st.session_state.get(f"_prev_{_cp_key}")
-                    if _prev_cp is not None and new_color != _prev_cp and new_color != _display_color:
-                        st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
-                    st.session_state[f"_prev_{_cp_key}"] = new_color
-                    bs["color"] = new_color
-                    st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
+
+                    # Update state based on current mode
+                    if _active_pn != "Custom":
+                        if new_color != _display_color:
+                            # User picked a different color → switch to Custom mode
+                            st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
+                            st.session_state[_desired_key] = new_color
+                            bs["color"] = new_color
+                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
+                        else:
+                            # No change: keep bs and bar_colors in sync with preset
+                            bs["color"] = _display_color
+                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = _display_color
+                    else:
+                        # Custom mode: widget value is authoritative
+                        st.session_state[_desired_key] = new_color
+                        bs["color"] = new_color
+                        st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
 
                     with rc[2]:
                         opt_cols = st.columns(4)
