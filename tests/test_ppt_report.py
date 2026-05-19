@@ -557,3 +557,69 @@ class TestReportGeneratorEdgeCases:
         prs = Presentation(io.BytesIO(result))
         # Should have: 0 title + 1 gene = 1 slide (summary disabled)
         assert len(prs.slides) == 1
+
+
+class TestPPTGeneratorDisplayName:
+    """A rename of a gene in the Graphs tab must reach the PPT slide title."""
+
+    def test_create_gene_slide_uses_display_name_in_title(self, mock_streamlit, processed_gene_data):
+        from importlib import import_module
+        from pptx import Presentation
+        from pptx.util import Emu
+        import plotly.graph_objects as go
+
+        spec = import_module("streamlit qpcr analysis v1")
+        PPTGenerator = spec.PPTGenerator
+
+        fig = go.Figure(data=[go.Bar(x=["A", "B"], y=[1, 2])])
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+
+        with patch.object(go.Figure, "to_image", return_value=MOCK_PNG_BYTES):
+            PPTGenerator.create_gene_slide(
+                prs, "COL1A1", fig, processed_gene_data,
+                {"Housekeeping_Gene": "GAPDH"},
+                display_name="Collagen I",
+            )
+
+        slide = prs.slides[0]
+        title_texts = [
+            shape.text_frame.text for shape in slide.shapes
+            if shape.has_text_frame
+        ]
+        assert any("Collagen I Expression" in t for t in title_texts), (
+            f"Expected 'Collagen I Expression' in slide titles, got: {title_texts}"
+        )
+        # The raw gene name must NOT appear in the title — that's the bug we fix.
+        assert not any("COL1A1 Expression" in t for t in title_texts), (
+            f"Raw gene name leaked into slide title: {title_texts}"
+        )
+
+    def test_create_gene_slide_falls_back_to_raw_name_without_display(self, mock_streamlit, processed_gene_data):
+        """When no display_name is passed, behavior is unchanged from before."""
+        from importlib import import_module
+        from pptx import Presentation
+        from pptx.util import Emu
+        import plotly.graph_objects as go
+
+        spec = import_module("streamlit qpcr analysis v1")
+        PPTGenerator = spec.PPTGenerator
+
+        fig = go.Figure(data=[go.Bar(x=["A", "B"], y=[1, 2])])
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+
+        with patch.object(go.Figure, "to_image", return_value=MOCK_PNG_BYTES):
+            PPTGenerator.create_gene_slide(
+                prs, "COL1A1", fig, processed_gene_data,
+                {"Housekeeping_Gene": "GAPDH"},
+            )
+
+        slide = prs.slides[0]
+        title_texts = [
+            shape.text_frame.text for shape in slide.shapes
+            if shape.has_text_frame
+        ]
+        assert any("COL1A1 Expression" in t for t in title_texts)

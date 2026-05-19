@@ -19,6 +19,7 @@ def export_to_excel(
     qc_stats: dict = None,
     replicate_stats: pd.DataFrame = None,
     excluded_wells=None,
+    gene_display_names: dict = None,
 ) -> bytes:
     """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix.
 
@@ -30,7 +31,13 @@ def export_to_excel(
         qc_stats: Optional QC summary stats dict from QualityControl.get_qc_summary_stats().
         replicate_stats: Optional replicate stats DataFrame from QualityControl.get_replicate_stats().
         excluded_wells: Optional set or dict of excluded wells; triggers Replicate_FC sheet generation.
+        gene_display_names: Maps raw gene -> user-edited display name. When set,
+            per-gene sheet names, the FC matrix index, and the in-sheet Target
+            column all use the display name so Excel matches the on-screen graph.
+            Raw name is preserved in Target_Raw for downstream lookups.
     """
+    gene_display_names = gene_display_names or {}
+    _disp = lambda g: str(gene_display_names.get(g, g))
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -61,8 +68,16 @@ def export_to_excel(
 
         # Gene-by-gene calculations with statistical test method column
         for gene, gene_data in processed_data.items():
-            sheet_name = f"{gene}_Analysis"[:31]
+            display = _disp(gene)
+            sheet_name = f"{display}_Analysis"[:31]
             gene_export = gene_data.copy()
+            if "Target" in gene_export.columns and display != gene:
+                gene_export.insert(
+                    list(gene_export.columns).index("Target") + 1,
+                    "Target_Raw",
+                    gene,
+                )
+                gene_export["Target"] = display
             # Add statistical test method column
             if "p_value" in gene_export.columns:
                 ttest_type = params.get("ttest_type", "welch")
@@ -81,8 +96,19 @@ def export_to_excel(
             gene_export.to_excel(writer, sheet_name=sheet_name, index=False)
 
         # Summary sheet
+        def _renamed_dfs():
+            out = []
+            for g, df in processed_data.items():
+                if df.empty:
+                    continue
+                d = df.copy()
+                if "Target" in d.columns:
+                    d["Target"] = _disp(g)
+                out.append(d)
+            return out
+
         if processed_data:
-            non_empty = [df for df in processed_data.values() if not df.empty]
+            non_empty = _renamed_dfs()
             if non_empty:
                 all_data = pd.concat(non_empty, ignore_index=True)
                 agg_dict = {"Relative_Expression": ["mean", "std", "count"]}
@@ -100,7 +126,7 @@ def export_to_excel(
 
         # --- NEW: Fold Change Matrix (pivot table) ---
         if processed_data:
-            non_empty = [df for df in processed_data.values() if not df.empty]
+            non_empty = _renamed_dfs()
             if non_empty:
                 all_data = pd.concat(non_empty, ignore_index=True)
                 if "Fold_Change" in all_data.columns and "Condition" in all_data.columns:

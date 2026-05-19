@@ -1730,7 +1730,15 @@ class AnalysisEngine:
                 if np.isnan(hk_mean) or hk_mean <= 0:
                     _stats_skipped.append(f"{target}/{cond}: invalid HK mean ({hk_mean})")
                     continue
-                rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
+                ct_vals = grp["CT"].values
+                # Drop NaN CTs and clamp the exponent the same way calculate_ddct
+                # does (±50). Without this, a pathological CT/HK pair can produce
+                # extremely large values that swamp the t-test variance.
+                ct_vals = ct_vals[~np.isnan(ct_vals)]
+                if ct_vals.size == 0:
+                    continue
+                dct = np.clip(ct_vals - hk_mean, -50, 50)
+                rel_expr[cond] = 2 ** (-dct)
 
             # FIRST COMPARISON: compare_condition
             ref_vals = rel_expr.get(compare_condition, np.array([]))
@@ -1937,6 +1945,11 @@ class AnalysisEngine:
             lambda x: sample_mapping.get(x, {}).get("condition", x)
         )
 
+        # Drop rows with NaN CT before computing means so NaNs don't propagate
+        # into the Replicate_FC scatter overlay (silent corruption of the
+        # data-points layer on graphs).
+        data = data[data["CT"].notna()]
+
         hk_data = data[data["Target"].str.upper() == hk_gene.upper()]
         hk_means = hk_data.groupby("Condition")["CT"].mean().to_dict()
 
@@ -1951,14 +1964,20 @@ class AnalysisEngine:
             ref_hk_mean = hk_means.get(ref_sample, np.nan)
             if np.isnan(ref_hk_mean) or ref_rows.empty:
                 continue
-            ref_dct_mean = ref_rows["CT"].mean() - ref_hk_mean
+            ref_ct_mean = ref_rows["CT"].mean()
+            if pd.isna(ref_ct_mean):
+                continue
+            ref_dct_mean = ref_ct_mean - ref_hk_mean
 
             for _, row in target_data.iterrows():
                 condition = row["Condition"]
+                ct_val = row["CT"]
+                if pd.isna(ct_val):
+                    continue
                 cond_hk_mean = hk_means.get(condition, np.nan)
                 if np.isnan(cond_hk_mean):
                     continue
-                dct_i = row["CT"] - cond_hk_mean
+                dct_i = ct_val - cond_hk_mean
                 ddct_i = dct_i - ref_dct_mean
                 ddct_clamped = np.clip(ddct_i, -50, 50)
                 fc_i = 2 ** (-ddct_clamped)
@@ -2134,6 +2153,20 @@ class AnalysisEngine:
                 _stale = [k for k in _bcs if k not in _valid_keys]
                 for k in _stale:
                     del _bcs[k]
+
+                # Prune any per-gene state that no longer maps to a real gene in
+                # the fresh analysis. Without this, an old gene's cached graph
+                # or rename can carry over into PPT/Excel exports of the new run.
+                _new_genes = set(gene_dict.keys())
+                _graphs = st.session_state.get("graphs", {})
+                for _stale_gene in [g for g in _graphs if g not in _new_genes]:
+                    _graphs.pop(_stale_gene, None)
+                _disp_map = st.session_state.get("gene_display_names", {})
+                for _stale_gene in [g for g in _disp_map if g not in _new_genes]:
+                    _disp_map.pop(_stale_gene, None)
+                # Drop the cached PPT bytes so the next download reflects the
+                # new analysis (and the new rename map) instead of the prior run.
+                st.session_state.pop("_ppt_export", None)
 
                 # Store exclusion snapshot for auto-rerun detection
                 st.session_state['_exclusion_snapshot'] = {
@@ -3204,13 +3237,14 @@ class PPTGenerator:
         p.alignment = PP_ALIGN.RIGHT
 
     @staticmethod
-    def create_gene_slide(prs, gene, fig, gene_data, analysis_params, graph_settings=None):
+    def create_gene_slide(prs, gene, fig, gene_data, analysis_params, graph_settings=None, display_name=None):
         from pptx.util import Inches, Pt
         from pptx.enum.text import PP_ALIGN
         from pptx.enum.shapes import MSO_SHAPE
         from pptx.dml.color import RGBColor
 
         slide = prs.slides.add_slide(prs.slide_layouts[6])
+        display_name = display_name or gene
 
         # Background
         background = slide.background
@@ -3224,7 +3258,7 @@ class PPTGenerator:
         )
         tf = title_box.text_frame
         p = tf.paragraphs[0]
-        p.text = f"{gene} Expression"
+        p.text = f"{display_name} Expression"
         p.font.size = Pt(32)
         p.font.bold = True
         p.font.name = "Malgun Gothic"
@@ -3396,6 +3430,15 @@ class PPTGenerator:
             except Exception as e:
                 import logging
                 logging.warning(f"PPT slide copy: skipped relationship {rid}: {e}")
+                # Surface to the user so a broken slide isn't silently shipped.
+                try:
+                    st.warning(
+                        f"⚠️ PPT slide copy skipped a relationship "
+                        f"({rel.reltype}). The exported slide may be missing an "
+                        f"image or link. Details: {e}"
+                    )
+                except Exception:
+                    pass
 
         source_spTree = source._element.spTree
         target_spTree = new_slide._element.spTree
@@ -3427,9 +3470,16 @@ class PPTGenerator:
         slides_list.append(el)
 
     @staticmethod
-    def _populate_gene_slide(prs, slide, gene, fig, gene_data, analysis_params, graph_settings):
-        """Populate a template-duplicated gene slide with gene name and graph image."""
+    def _populate_gene_slide(prs, slide, gene, fig, gene_data, analysis_params, graph_settings, display_name=None):
+        """Populate a template-duplicated gene slide with gene name and graph image.
+
+        `display_name` overrides `gene` for ALL user-visible text on the slide
+        (title, "효능 평가" prefix). When the user renamed the gene in the Graphs
+        tab, the rename is honored here so the slide matches the on-screen graph.
+        """
         from pptx.util import Inches, Pt, Emu
+
+        display_name = display_name or gene
 
         # Update text boxes on the template slide
         for shape in slide.shapes:
@@ -3437,12 +3487,12 @@ class PPTGenerator:
                 continue
             full_text = shape.text_frame.text
 
-            # TextBox 17: "효능 평가" → "{gene} 효능 평가"
+            # TextBox 17: "효능 평가" → "{display_name} 효능 평가"
             if "효능 평가" in full_text and "Results" not in full_text and "有" not in full_text:
                 for para in shape.text_frame.paragraphs:
                     for run in para.runs:
                         if "효능" in run.text:
-                            run.text = run.text.replace("효능 평가", f"{gene} 효능 평가")
+                            run.text = run.text.replace("효능 평가", f"{display_name} 효능 평가")
                             break
                     break
 
@@ -3532,7 +3582,7 @@ class PPTGenerator:
             err_box.text_frame.paragraphs[0].font.size = Pt(14)
 
     @staticmethod
-    def generate_presentation(graphs, processed_data, analysis_params, graph_settings=None):
+    def generate_presentation(graphs, processed_data, analysis_params, graph_settings=None, gene_display_names=None):
         try:
             from pptx import Presentation
             from pptx.util import Inches, Emu
@@ -3549,8 +3599,40 @@ class PPTGenerator:
         use_template = os.path.isfile(template_path)
 
         gs = graph_settings or {}
-        gene_list = list(graphs.keys())
+        gene_display_names = gene_display_names or {}
+        graphs = graphs or {}
+
+        # Source of truth is processed_data (the analysis output). Stale entries
+        # in `graphs` from earlier runs are ignored; missing figures are
+        # rendered lazily below so PPT works even if the user never opened
+        # the Graphs tab.
+        gene_list = [
+            g for g in (processed_data.keys() if processed_data else [])
+            if processed_data.get(g) is not None and not processed_data[g].empty
+        ]
         n_genes = len(gene_list)
+
+        def _get_fig(gene):
+            """Return a Plotly figure for `gene`, rendering on demand if missing."""
+            fig = graphs.get(gene)
+            if fig is not None:
+                return fig
+            try:
+                gene_data_local = processed_data.get(gene)
+                if gene_data_local is None or gene_data_local.empty:
+                    return None
+                disp = gene_display_names.get(gene, gene)
+                return GraphGenerator.create_gene_graph(
+                    gene_data_local,
+                    gene,
+                    gs or {},
+                    EFFICACY_CONFIG.get(analysis_params.get("Efficacy_Type", ""), {}),
+                    sample_order=st.session_state.get("sample_order"),
+                    display_gene_name=disp,
+                    ref_condition=st.session_state.get("analysis_ref_condition"),
+                )
+            except Exception:
+                return None
 
         if use_template and n_genes > 0:
             prs = Presentation(template_path)
@@ -3583,10 +3665,11 @@ class PPTGenerator:
             # Step 5: Populate each gene slide with gene name and graph
             for i, gene in enumerate(gene_list):
                 slide = prs.slides[1 + i]
-                fig = graphs[gene]
+                fig = _get_fig(gene)
                 gene_data = processed_data.get(gene)
                 PPTGenerator._populate_gene_slide(
-                    prs, slide, gene, fig, gene_data, analysis_params, gs
+                    prs, slide, gene, fig, gene_data, analysis_params, gs,
+                    display_name=gene_display_names.get(gene, gene),
                 )
         else:
             # Fallback: no template available
@@ -3596,10 +3679,11 @@ class PPTGenerator:
             PPTGenerator.create_title_slide(prs, analysis_params)
 
             for gene in gene_list:
-                fig = graphs[gene]
+                fig = _get_fig(gene)
                 gene_data = processed_data.get(gene)
                 PPTGenerator.create_gene_slide(
-                    prs, gene, fig, gene_data, analysis_params, graph_settings=gs
+                    prs, gene, fig, gene_data, analysis_params, graph_settings=gs,
+                    display_name=gene_display_names.get(gene, gene),
                 )
 
         output = io.BytesIO()
@@ -3631,8 +3715,17 @@ def export_to_excel(
     qc_stats: dict = None,
     replicate_stats: pd.DataFrame = None,
     excluded_wells=None,
+    gene_display_names: dict = None,
 ) -> bytes:
-    """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix."""
+    """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix.
+
+    `gene_display_names` maps raw gene name -> user-edited display name (from Graphs
+    tab). When provided, per-gene sheet names, the FC matrix index, and the chart
+    Y-axis title all use the display name so Excel matches what the user sees on
+    screen. Raw gene name is preserved as a `Target_Raw` column for traceability.
+    """
+    gene_display_names = gene_display_names or {}
+    _disp = lambda g: str(gene_display_names.get(g, g))
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -3664,8 +3757,18 @@ def export_to_excel(
         # Gene-by-gene calculations with statistical test method column
         _used_sheet_names = {"Analysis_Parameters", "Raw_Data"}
         for gene, gene_data in processed_data.items():
-            sheet_name = _sanitize_sheet_name(f"{gene}_Analysis", _used_sheet_names)
+            display = _disp(gene)
+            sheet_name = _sanitize_sheet_name(f"{display}_Analysis", _used_sheet_names)
             gene_export = gene_data.copy()
+            # Preserve raw gene name so an exported sheet can be cross-referenced
+            # to raw_data["Target"] even when the user has renamed the gene.
+            if "Target" in gene_export.columns and display != gene:
+                gene_export.insert(
+                    list(gene_export.columns).index("Target") + 1,
+                    "Target_Raw",
+                    gene,
+                )
+                gene_export["Target"] = display
             if "p_value" in gene_export.columns:
                 ttest_type = params.get("ttest_type", "welch")
                 gene_export["Stat_Test"] = ""
@@ -3684,7 +3787,14 @@ def export_to_excel(
 
         # Summary sheet
         if processed_data:
-            non_empty = [df for df in processed_data.values() if not df.empty]
+            non_empty = []
+            for g, df in processed_data.items():
+                if df.empty:
+                    continue
+                d = df.copy()
+                if "Target" in d.columns:
+                    d["Target"] = _disp(g)
+                non_empty.append(d)
             if non_empty:
                 all_data = pd.concat(non_empty, ignore_index=True)
                 agg_dict = {"Relative_Expression": ["mean", "std", "count"]}
@@ -3702,7 +3812,14 @@ def export_to_excel(
 
         # Fold Change Matrix (pivot table)
         if processed_data:
-            non_empty = [df for df in processed_data.values() if not df.empty]
+            non_empty = []
+            for g, df in processed_data.items():
+                if df.empty:
+                    continue
+                d = df.copy()
+                if "Target" in d.columns:
+                    d["Target"] = _disp(g)
+                non_empty.append(d)
             if non_empty:
                 all_data = pd.concat(non_empty, ignore_index=True)
                 if "Fold_Change" in all_data.columns and "Condition" in all_data.columns:
@@ -3738,7 +3855,9 @@ def export_to_excel(
         _write_qc_report_sheet(writer, qc_stats, replicate_stats)
 
     # Post-process: add gene chart sheets with openpyxl (supports rich text axis titles)
-    output = _add_gene_chart_sheets(output, processed_data, params)
+    output = _add_gene_chart_sheets(
+        output, processed_data, params, gene_display_names=gene_display_names
+    )
 
     return output.getvalue()
 
@@ -3769,7 +3888,7 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         replicate_stats.to_excel(writer, sheet_name="QC_Report", index=False, startrow=start_row)
 
 
-def _add_gene_chart_sheets(output_buf, processed_data, params):
+def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_names=None):
     """Post-process Excel bytes to add per-gene chart sheets using openpyxl.
 
     Two-phase approach:
@@ -3777,12 +3896,8 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
     Phase 2: zip-level XML post-processing for elements openpyxl can't set
              (axis label fonts, rich text Y-axis title, hidden gridlines)
 
-    Chart matches ADD_THIS reference template exactly:
-    - White bars with black 0.5pt outline
-    - Custom SEM error bars (both directions), gray 0.75pt line, with end caps
-    - No gridlines (hidden via noFill)
-    - Y-axis title: rich text with gene name in RED, HK gene in black
-    - 9pt Arial gray axis labels, black axis lines
+    `gene_display_names` maps raw gene -> display name. The sheet name and the
+    Y-axis title both use the display name so they always agree.
     """
     from openpyxl import load_workbook
     from openpyxl.chart import BarChart, Reference
@@ -3795,6 +3910,9 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
     if not processed_data:
         return output_buf
 
+    gene_display_names = gene_display_names or {}
+    _disp = lambda g: str(gene_display_names.get(g, g))
+
     output_buf.seek(0)
     wb = load_workbook(output_buf)
     hk_gene = params.get("Housekeeping_Gene", params.get("reference_gene", "\u03b2-Actin"))
@@ -3802,12 +3920,17 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
     # Track which chart files correspond to which gene (for phase 2)
     gene_chart_map = {}
     _used_sheet_names = set(wb.sheetnames)
+    # Track display name per chart file so phase 2 can render the right
+    # Y-axis title even when sheet names were truncated/deduplicated.
+    display_for_chart_order = []
 
     for gene, gene_data in processed_data.items():
         if gene_data is None or gene_data.empty:
             continue
 
-        sheet_name = _sanitize_sheet_name(f"{gene}_Chart", _used_sheet_names)
+        display = _disp(gene)
+        display_for_chart_order.append(display)
+        sheet_name = _sanitize_sheet_name(f"{display}_Chart", _used_sheet_names)
         ws = wb.create_sheet(sheet_name)
 
         # Build data columns
@@ -3966,11 +4089,12 @@ def _add_gene_chart_sheets(output_buf, processed_data, params):
         n for n in zf_in.namelist()
         if n.startswith("xl/charts/chart") and n.endswith(".xml")
     )
-    # Gene chart files are the last N chart files (one per gene with data)
-    genes_with_data = [g for g, gd in processed_data.items() if gd is not None and not gd.empty]
-    n_gene_charts = len(genes_with_data)
+    # Gene chart files are the last N chart files (one per gene with data).
+    # Use the display-name order captured during phase 1 so the Y-axis title
+    # matches the sheet name even when gene names were renamed/sanitized.
+    n_gene_charts = len(display_for_chart_order)
     gene_chart_files = all_chart_files[-n_gene_charts:] if n_gene_charts > 0 else []
-    gene_for_chart = dict(zip(gene_chart_files, genes_with_data))
+    gene_for_chart = dict(zip(gene_chart_files, display_for_chart_order))
 
     result = io.BytesIO()
     zf_out = zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED)
@@ -6360,6 +6484,62 @@ with tab5:
     render_step_indicator("export")
     st.header("Export Results")
 
+    # Detect when settings have drifted from the snapshot taken during the last
+    # analysis run. If they have, the significance markers / fold changes in
+    # processed_data no longer reflect what the user currently has selected,
+    # and any Excel/PPT exported now will carry the stale values.
+    if st.session_state.get("processed_data") and "_exclusion_snapshot" in st.session_state:
+        _snap = st.session_state["_exclusion_snapshot"]
+        _cur = {
+            "excluded_wells": {
+                str(k): sorted(v)
+                for k, v in st.session_state.get("excluded_wells", {}).items()
+            },
+            "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
+            "ttest_type": st.session_state.get("ttest_type", "welch"),
+        }
+        if _cur != _snap:
+            st.warning(
+                "⚠️ Settings changed since the last analysis run "
+                "(QC exclusions, excluded samples, or t-test type). The exports "
+                "below still reflect the previous run. Open the **Analysis** tab "
+                "to auto-rerun, or click **Re-run Analysis** there before exporting."
+            )
+        if st.session_state.get("analysis_stale", False):
+            st.warning(
+                "⚠️ Sample mapping or comparison group changed since the last "
+                "analysis. Significance values may be outdated — re-run analysis "
+                "before exporting."
+            )
+
+        # Cross-check that the stored ref/cmp condition names still exist in the
+        # current mapping. If the user renamed a condition after running
+        # analysis, processed_data labels diverge from the mapping and exports
+        # will carry the old name.
+        _mapped_conditions = {
+            (st.session_state.get("sample_mapping", {}) or {}).get(s, {}).get("condition", s)
+            for s in (st.session_state.get("sample_mapping", {}) or {})
+        }
+        _ref = st.session_state.get("analysis_ref_condition")
+        _missing = [
+            (_label, _val)
+            for _label, _val in (
+                ("Reference", _ref),
+                ("Compare (*)", st.session_state.get("analysis_cmp_condition")),
+                ("Compare (#)", st.session_state.get("analysis_cmp_condition_2")),
+                ("Compare (†)", st.session_state.get("analysis_cmp_condition_3")),
+            )
+            if _val and _mapped_conditions and _val not in _mapped_conditions
+        ]
+        if _missing:
+            _items = ", ".join(f"{lbl}={v!r}" for lbl, v in _missing)
+            st.warning(
+                f"⚠️ Some analysis comparison conditions are no longer present "
+                f"in the current sample mapping: {_items}. The exports will "
+                f"label charts with the old condition names. Re-run analysis "
+                f"so labels match the current mapping."
+            )
+
     if st.session_state.processed_data:
         analysis_params = {
             "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -6430,6 +6610,7 @@ with tab5:
                     st.session_state.data, st.session_state.processed_data,
                     analysis_params, st.session_state.sample_mapping,
                     qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
+                    gene_display_names=st.session_state.get("gene_display_names", {}),
                 )
                 st.download_button(
                     "Download Excel Report", data=excel_data,
@@ -6447,6 +6628,7 @@ with tab5:
                         ppt_bytes = PPTGenerator.generate_presentation(
                             st.session_state.graphs, st.session_state.processed_data,
                             analysis_params, graph_settings=st.session_state.get("graph_settings"),
+                            gene_display_names=st.session_state.get("gene_display_names", {}),
                         )
                         if ppt_bytes:
                             st.session_state["_ppt_export"] = ppt_bytes
@@ -6471,8 +6653,9 @@ with tab5:
                         f"<h1>{efficacy} Analysis</h1>",
                         f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
                     ]
+                    _disp_map = st.session_state.get("gene_display_names", {})
                     for gene, fig in st.session_state.graphs.items():
-                        html_parts.append(f"<h2>{gene}</h2>")
+                        html_parts.append(f"<h2>{_disp_map.get(gene, gene)}</h2>")
                         html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
                     html_parts.append("</body></html>")
                     combined_html = "\n".join(html_parts)

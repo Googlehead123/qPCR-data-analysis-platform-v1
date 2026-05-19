@@ -505,3 +505,95 @@ class TestExcelExportFixes:
         assert ws.cell(1, 1).value == "Target"
         assert ws.cell(1, 4).value == "Replicate_FC"
         assert ws.max_row >= 10  # header + 9 data rows
+
+    def test_export_uses_gene_display_name_in_sheet_name_and_summary(
+        self, mock_streamlit, sample_qpcr_raw_data, sample_mapping
+    ):
+        """User rename in Graphs tab must propagate to per-gene sheet name,
+        the in-sheet Target column, the FC_Matrix index, and Summary.
+        Raw name is preserved in Target_Raw for cross-referencing."""
+        from qpcr.export import export_to_excel
+        from qpcr.analysis import AnalysisEngine
+        import openpyxl
+        import io
+
+        processed = {"COL1A1": AnalysisEngine.calculate_ddct(
+            sample_qpcr_raw_data, "GAPDH", "Non-treated", set(), set(), sample_mapping
+        )}
+        params = {"Housekeeping_Gene": "GAPDH", "Reference_Sample": "Non-treated"}
+
+        result = export_to_excel(
+            sample_qpcr_raw_data, processed, params, sample_mapping,
+            gene_display_names={"COL1A1": "Collagen I"},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result))
+
+        # Per-gene sheet uses the display name
+        assert "Collagen I_Analysis" in wb.sheetnames
+        assert "COL1A1_Analysis" not in wb.sheetnames
+
+        # In-sheet Target column shows display name; raw name preserved alongside
+        ws = wb["Collagen I_Analysis"]
+        headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        assert "Target" in headers
+        assert "Target_Raw" in headers
+        target_col = headers.index("Target") + 1
+        raw_col = headers.index("Target_Raw") + 1
+        assert ws.cell(2, target_col).value == "Collagen I"
+        assert ws.cell(2, raw_col).value == "COL1A1"
+
+        # FC_Matrix index uses display name
+        fc_ws = wb["FC_Matrix"]
+        index_values = [fc_ws.cell(r, 1).value for r in range(2, fc_ws.max_row + 1)]
+        assert "Collagen I" in index_values
+        assert "COL1A1" not in index_values
+
+    def test_compute_replicate_fold_changes_drops_nan_ct(
+        self, mock_streamlit, sample_qpcr_raw_data, sample_mapping
+    ):
+        """A NaN CT (failed reaction) must never produce a NaN Replicate_FC row.
+        Previously such rows silently slipped into the data-points overlay."""
+        from qpcr.analysis import AnalysisEngine
+
+        raw = sample_qpcr_raw_data.copy()
+        # Inject a NaN CT in one well to simulate a failed reaction.
+        raw.loc[raw.index[0], "CT"] = np.nan
+
+        result = AnalysisEngine.compute_replicate_fold_changes(
+            raw_data=raw,
+            hk_gene="GAPDH",
+            ref_sample="Non-treated",
+            sample_mapping=sample_mapping,
+        )
+        assert not result.empty
+        assert not result["Replicate_FC"].isna().any(), (
+            "NaN slipped into Replicate_FC despite NaN-CT guard"
+        )
+
+    def test_export_without_rename_keeps_raw_gene_name(
+        self, mock_streamlit, sample_qpcr_raw_data, sample_mapping
+    ):
+        """When the user never renamed a gene, exports should look exactly
+        as they did before this feature — no Target_Raw column, raw name in
+        sheet name."""
+        from qpcr.export import export_to_excel
+        from qpcr.analysis import AnalysisEngine
+        import openpyxl
+        import io
+
+        processed = {"COL1A1": AnalysisEngine.calculate_ddct(
+            sample_qpcr_raw_data, "GAPDH", "Non-treated", set(), set(), sample_mapping
+        )}
+        params = {"Housekeeping_Gene": "GAPDH", "Reference_Sample": "Non-treated"}
+
+        result = export_to_excel(
+            sample_qpcr_raw_data, processed, params, sample_mapping,
+            gene_display_names={},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result))
+        assert "COL1A1_Analysis" in wb.sheetnames
+
+        ws = wb["COL1A1_Analysis"]
+        headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        assert "Target" in headers
+        assert "Target_Raw" not in headers

@@ -287,7 +287,15 @@ class AnalysisEngine:
                 if np.isnan(hk_mean) or hk_mean <= 0:
                     _stats_skipped.append(f"{target}/{cond}: invalid HK mean ({hk_mean})")
                     continue
-                rel_expr[cond] = 2 ** (-(grp["CT"].values - hk_mean))
+                ct_vals = grp["CT"].values
+                ct_vals = ct_vals[~np.isnan(ct_vals)]
+                if ct_vals.size == 0:
+                    continue
+                # Clamp the exponent to match calculate_ddct's ±50 guard; without
+                # this, a pathological CT/HK pair can produce huge values that
+                # swamp the t-test variance.
+                dct = np.clip(ct_vals - hk_mean, -50, 50)
+                rel_expr[cond] = 2 ** (-dct)
 
             # FIRST COMPARISON: compare_condition
             # NOTE: When each condition has a single biological sample with technical
@@ -422,6 +430,9 @@ class AnalysisEngine:
         elif excluded_wells:
             data = data[~data["Well"].isin(excluded_wells)]
 
+        # Drop rows with NaN CT so they can't propagate into Replicate_FC.
+        data = data[data["CT"].notna()]
+
         # Map conditions
         data["Condition"] = data["Sample"].map(
             lambda x: sample_mapping.get(x, {}).get("condition", x)
@@ -443,15 +454,21 @@ class AnalysisEngine:
             ref_hk_mean = hk_means.get(ref_sample, np.nan)
             if np.isnan(ref_hk_mean) or ref_rows.empty:
                 continue
-            ref_dct_mean = ref_rows["CT"].mean() - ref_hk_mean
+            ref_ct_mean = ref_rows["CT"].mean()
+            if pd.isna(ref_ct_mean):
+                continue
+            ref_dct_mean = ref_ct_mean - ref_hk_mean
 
             # Per-replicate fold changes
             for _, row in target_data.iterrows():
                 condition = row["Condition"]
+                ct_val = row["CT"]
+                if pd.isna(ct_val):
+                    continue
                 cond_hk_mean = hk_means.get(condition, np.nan)
                 if np.isnan(cond_hk_mean):
                     continue
-                dct_i = row["CT"] - cond_hk_mean
+                dct_i = ct_val - cond_hk_mean
                 ddct_i = dct_i - ref_dct_mean
                 ddct_clamped = np.clip(ddct_i, -50, 50)
                 fc_i = 2 ** (-ddct_clamped)

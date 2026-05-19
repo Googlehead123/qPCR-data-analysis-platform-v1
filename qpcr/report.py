@@ -501,13 +501,14 @@ class PPTGenerator:
         p.alignment = PP_ALIGN.RIGHT
 
     @staticmethod
-    def create_gene_slide(prs, gene, fig, gene_data, analysis_params):
+    def create_gene_slide(prs, gene, fig, gene_data, analysis_params, display_name=None):
         from pptx.util import Inches, Pt
         from pptx.enum.text import PP_ALIGN
         from pptx.enum.shapes import MSO_SHAPE
         from pptx.dml.color import RGBColor
 
         slide = prs.slides.add_slide(prs.slide_layouts[6])
+        display_name = display_name or gene
 
         background = slide.background
         fill = background.fill
@@ -519,7 +520,7 @@ class PPTGenerator:
         )
         tf = title_box.text_frame
         p = tf.paragraphs[0]
-        p.text = f"{gene} Expression"
+        p.text = f"{display_name} Expression"
         p.font.size = Pt(32)
         p.font.bold = True
         p.font.name = "Malgun Gothic"
@@ -687,21 +688,27 @@ class PPTGenerator:
         slides_list.append(el)
 
     @staticmethod
-    def _populate_gene_slide(prs, slide, gene, fig, gene_data, analysis_params, graph_settings):
-        """Populate a template-duplicated gene slide with gene name and graph image."""
+    def _populate_gene_slide(prs, slide, gene, fig, gene_data, analysis_params, graph_settings, display_name=None):
+        """Populate a template-duplicated gene slide with gene name and graph image.
+
+        `display_name` overrides `gene` for all user-visible text so a rename
+        from the Graphs tab makes it onto the slide.
+        """
         from pptx.util import Inches, Pt, Emu
+
+        display_name = display_name or gene
 
         for shape in slide.shapes:
             if not shape.has_text_frame:
                 continue
             full_text = shape.text_frame.text
 
-            # TextBox 17: "효능 평가" → "{gene} 효능 평가"
+            # TextBox 17: "효능 평가" → "{display_name} 효능 평가"
             if "효능 평가" in full_text and "Results" not in full_text and "有" not in full_text:
                 for para in shape.text_frame.paragraphs:
                     for run in para.runs:
                         if "효능" in run.text:
-                            run.text = run.text.replace("효능 평가", f"{gene} 효능 평가")
+                            run.text = run.text.replace("효능 평가", f"{display_name} 효능 평가")
                             break
                     break
 
@@ -781,7 +788,7 @@ class PPTGenerator:
             err_box.text_frame.paragraphs[0].font.size = Pt(14)
 
     @staticmethod
-    def generate_presentation(graphs, processed_data, analysis_params, graph_settings=None):
+    def generate_presentation(graphs, processed_data, analysis_params, graph_settings=None, gene_display_names=None):
         try:
             from pptx import Presentation
             from pptx.util import Inches, Emu
@@ -798,7 +805,14 @@ class PPTGenerator:
         use_template = os.path.isfile(template_path)
 
         gs = graph_settings or {}
-        gene_list = list(graphs.keys())
+        gene_display_names = gene_display_names or {}
+        graphs = graphs or {}
+        # processed_data is the source of truth: stale entries in `graphs`
+        # from earlier analyses don't create phantom slides.
+        gene_list = [
+            g for g in (processed_data.keys() if processed_data else [])
+            if processed_data.get(g) is not None and not processed_data[g].empty
+        ]
         n_genes = len(gene_list)
 
         if use_template and n_genes > 0:
@@ -832,10 +846,11 @@ class PPTGenerator:
             # Step 5: Populate each gene slide with gene name and graph
             for i, gene in enumerate(gene_list):
                 slide = prs.slides[1 + i]
-                fig = graphs[gene]
+                fig = graphs.get(gene)
                 gene_data = processed_data.get(gene)
                 PPTGenerator._populate_gene_slide(
-                    prs, slide, gene, fig, gene_data, analysis_params, gs
+                    prs, slide, gene, fig, gene_data, analysis_params, gs,
+                    display_name=gene_display_names.get(gene, gene),
                 )
         else:
             # Fallback: no template available
@@ -845,10 +860,11 @@ class PPTGenerator:
             PPTGenerator.create_title_slide(prs, analysis_params)
 
             for gene in gene_list:
-                fig = graphs[gene]
+                fig = graphs.get(gene)
                 gene_data = processed_data.get(gene)
                 PPTGenerator.create_gene_slide(
-                    prs, gene, fig, gene_data, analysis_params
+                    prs, gene, fig, gene_data, analysis_params,
+                    display_name=gene_display_names.get(gene, gene),
                 )
 
         output = io.BytesIO()
