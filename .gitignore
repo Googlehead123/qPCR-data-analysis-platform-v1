@@ -29,3 +29,15 @@ Thumbs.db
 
 # Local test data (optional - uncomment if you don't want to track)
 # test data/
+
+# Tool state (Claude Code / Playwright / Superpowers)
+.claude/
+.playwright-mcp/
+.superpowers/
+
+# QA / audit screenshots (transient debugging artifacts, not source-of-truth)
+audit_*.png
+qa_*.png
+test_*.png
+app-running.png
+upload-state.png
