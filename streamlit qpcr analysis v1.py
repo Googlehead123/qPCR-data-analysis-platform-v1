@@ -79,203 +79,264 @@ def render_step_indicator(current_step: str):
     st.markdown(f'<div class="step-progress">{"".join(parts)}</div>', unsafe_allow_html=True)
 
 
+def render_sidebar_rail():
+    """Persistent Cosmax-branded workflow rail + run context, shown on every tab.
+
+    Progress is derived from real session state (not merely that a tab rendered),
+    so the checkmarks are honest. The active tab is already highlighted by
+    Streamlit's tab bar, so this rail shows completion + context rather than a
+    redundant 'active' cue.
+    """
+    data = st.session_state.get("data")
+    has_data = data is not None
+    status = {
+        "upload": has_data,
+        "qc": st.session_state.get("qc_reviewed", False) or (
+            has_data and sum(len(v) for v in st.session_state.get("excluded_wells", {}).values()) > 0
+        ),
+        "mapping": st.session_state.get("mapping_finalized", False),
+        "analysis": bool(st.session_state.get("processed_data")),
+        "graphs": bool(st.session_state.get("graphs")),
+        "export": bool(st.session_state.get("graphs")),
+    }
+    with st.sidebar:
+        st.markdown(
+            '<div class="cosmax-brand">qPCR <span class="accent">Analysis</span> Suite</div>'
+            '<div class="cosmax-sub">Cosmax · Efficacy Analytics</div>',
+            unsafe_allow_html=True,
+        )
+        rail = "".join(
+            f'<div class="rail-step {"done" if status.get(key) else ""}">'
+            f'<span class="rdot"></span>{label}</div>'
+            for label, key in WORKFLOW_STEPS
+        )
+        st.markdown(rail, unsafe_allow_html=True)
+        if has_data:
+            try:
+                n_genes = int(data["Target"].nunique())
+                n_samples = int(data["Sample"].nunique())
+            except Exception:
+                n_genes = n_samples = 0
+            n_excl = sum(len(v) for v in st.session_state.get("excluded_wells", {}).values())
+            eff = st.session_state.get("selected_efficacy") or "—"
+            hk = st.session_state.get("hk_gene") or "—"
+            st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+            st.markdown(
+                '<div class="rail-ctx">'
+                f'<div class="row"><span class="k">Efficacy</span><span class="v">{eff}</span></div>'
+                f'<div class="row"><span class="k">Ref gene</span><span class="v">{hk}</span></div>'
+                f'<div class="row"><span class="k">Genes</span><span class="v">{n_genes}</span></div>'
+                f'<div class="row"><span class="k">Samples</span><span class="v">{n_samples}</span></div>'
+                f'<div class="row"><span class="k">Excluded wells</span><span class="v">{n_excl}</span></div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="qPCR Analysis Suite",
+    page_icon="🧬",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-# ==================== GLOBAL THEME ====================
+# ==================== GLOBAL THEME (Cosmax-branded) ====================
 st.markdown("""
 <style>
-    /* Apple-inspired monochrome theme */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-    /* Base typography */
+    :root {
+        --cosmax-red: #EA1D22;
+        --cosmax-red-dark: #C41419;
+        --ink: #1d1d1f;
+        --ink-soft: #6e6e73;
+        --ink-faint: #86868b;
+        --line: #e5e5e7;
+        --line-strong: #d2d2d7;
+        --surface: #ffffff;
+        --surface-alt: #f5f5f7;
+        --lab-white: #f3f0ed;
+        --frost: #c1c6c7;
+        --radius: 12px;
+        --radius-sm: 8px;
+    }
+
+    /* Base typography — Inter for latin, Korean fallbacks for efficacy labels */
     html, body, [class*="css"] {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+        font-family: 'Inter', 'Pretendard', 'Noto Sans KR', -apple-system,
+                     BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
     }
 
-    /* Clean headers */
-    h1, h2, h3 { font-weight: 600; letter-spacing: -0.02em; color: #1d1d1f; }
-    h1 { font-size: 2rem; }
-    h2 { font-size: 1.5rem; }
-    h3 { font-size: 1.15rem; }
+    /* Clean headers with a subtle red tick under h1 */
+    h1, h2, h3 { font-weight: 600; letter-spacing: -0.02em; color: var(--ink); }
+    h1 { font-size: 1.9rem; }
+    h2 { font-size: 1.4rem; }
+    h3 { font-size: 1.12rem; }
 
-    /* Subtle metric cards */
+    /* App title accent bar */
+    .block-container h1:first-of-type {
+        border-bottom: 3px solid var(--cosmax-red);
+        padding-bottom: 8px;
+        display: inline-block;
+    }
+
+    /* Metric cards — lab-white surface */
     [data-testid="stMetric"] {
-        background: #fafafa;
-        border: 1px solid #f0f0f0;
-        border-radius: 12px;
-        padding: 16px;
+        background: var(--lab-white);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 16px 18px;
     }
-    [data-testid="stMetricValue"] { font-weight: 600; color: #1d1d1f; }
-    [data-testid="stMetricLabel"] { color: #86868b; font-weight: 500; font-size: 0.85rem; }
+    [data-testid="stMetricValue"] { font-weight: 600; color: var(--ink); }
+    [data-testid="stMetricLabel"] { color: var(--ink-faint); font-weight: 500; font-size: 0.85rem; }
 
-    /* Clean tabs */
+    /* Tabs — active tab gets the Cosmax-red underline */
     .stTabs [data-baseweb="tab-list"] {
         gap: 0;
-        border-bottom: 1px solid #e5e5e7;
+        border-bottom: 1px solid var(--line);
         background: transparent;
     }
     .stTabs [data-baseweb="tab"] {
-        padding: 12px 24px;
+        padding: 12px 22px;
         font-weight: 500;
         font-size: 0.9rem;
-        color: #86868b;
+        color: var(--ink-faint);
         border-bottom: 2px solid transparent;
         background: transparent;
     }
     .stTabs [aria-selected="true"] {
-        color: #1d1d1f;
-        border-bottom: 2px solid #1d1d1f;
+        color: var(--ink);
+        border-bottom: 2px solid var(--cosmax-red);
         background: transparent;
     }
 
-    /* Clean buttons */
+    /* Buttons — secondary (outline) default, primary is Cosmax red */
     .stButton > button {
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         font-weight: 500;
         font-size: 0.85rem;
-        border: 1px solid #e5e5e7;
-        background: #ffffff;
-        color: #1d1d1f;
-        transition: all 0.2s ease;
+        border: 1px solid var(--line-strong);
+        background: var(--surface);
+        color: var(--ink);
+        transition: background .15s ease, border-color .15s ease;
         padding: 8px 16px;
     }
     .stButton > button:hover {
-        background: #f5f5f7;
-        border-color: #d2d2d7;
+        background: var(--surface-alt);
+        border-color: var(--frost);
     }
     .stButton > button[kind="primary"] {
-        background: #1d1d1f;
+        background: var(--cosmax-red);
         color: #ffffff;
-        border-color: #1d1d1f;
+        border-color: var(--cosmax-red);
     }
     .stButton > button[kind="primary"]:hover {
-        background: #424245;
+        background: var(--cosmax-red-dark);
+        border-color: var(--cosmax-red-dark);
     }
-
-    /* Clean expanders */
-    .streamlit-expanderHeader {
+    /* Download buttons read as primary-adjacent actions */
+    .stDownloadButton > button {
+        border-radius: var(--radius-sm);
         font-weight: 500;
-        font-size: 0.95rem;
-        color: #1d1d1f;
-        background: transparent;
-        border: none;
+        border: 1px solid var(--cosmax-red);
+        color: var(--cosmax-red);
+        background: var(--surface);
+        transition: background .15s ease;
+    }
+    .stDownloadButton > button:hover { background: #fdecec; }
+
+    /* Expanders */
+    .streamlit-expanderHeader {
+        font-weight: 500; font-size: 0.95rem; color: var(--ink);
+        background: transparent; border: none;
     }
     .streamlit-expanderContent {
-        border: 1px solid #f0f0f0;
-        border-radius: 0 0 8px 8px;
+        border: 1px solid var(--line);
+        border-radius: 0 0 var(--radius-sm) var(--radius-sm);
         padding: 16px;
     }
 
-    /* Clean dataframes */
-    [data-testid="stDataFrame"] {
-        border: 1px solid #f0f0f0;
-        border-radius: 8px;
-    }
+    /* Dataframes */
+    [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: var(--radius-sm); }
 
-    /* Clean select boxes */
-    [data-testid="stSelectbox"] label { color: #86868b; font-weight: 500; font-size: 0.85rem; }
+    /* Input labels */
+    [data-testid="stSelectbox"] label,
+    [data-testid="stNumberInput"] label,
+    [data-testid="stTextInput"] label { color: var(--ink-faint); font-weight: 500; font-size: 0.85rem; }
 
     /* Plotly chart container */
-    [data-testid="stPlotlyChart"] {
-        border-radius: 12px;
-        overflow: hidden;
-    }
+    [data-testid="stPlotlyChart"] { border-radius: var(--radius); overflow: hidden; }
 
-    /* Sidebar styling */
-    [data-testid="stSidebar"] {
-        background: #fafafa;
-        border-right: 1px solid #f0f0f0;
-    }
-    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-        font-size: 1rem;
-        color: #1d1d1f;
-    }
-
-    /* Clean dividers */
-    hr { border: none; border-top: 1px solid #f0f0f0; margin: 24px 0; }
-
-    /* Form submit button */
+    /* Form submit — Cosmax red */
     .stForm [data-testid="stFormSubmitButton"] > button {
-        background: #1d1d1f;
-        color: #ffffff;
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
+        background: var(--cosmax-red); color: #fff; border: none;
+        border-radius: var(--radius-sm); font-weight: 600;
     }
+    .stForm [data-testid="stFormSubmitButton"] > button:hover { background: var(--cosmax-red-dark); }
 
-    /* Success/warning/error minimal */
-    .stAlert { border-radius: 8px; border: none; }
+    /* Alerts, dividers, captions */
+    .stAlert { border-radius: var(--radius-sm); border: none; }
+    hr { border: none; border-top: 1px solid var(--line); margin: 22px 0; }
+    .stCaption { color: var(--ink-faint); }
 
-    /* Number inputs */
-    [data-testid="stNumberInput"] label { color: #86868b; font-weight: 500; font-size: 0.85rem; }
+    /* ---- Sidebar workflow rail ---- */
+    [data-testid="stSidebar"] {
+        background: var(--lab-white);
+        border-right: 1px solid var(--line);
+    }
+    [data-testid="stSidebar"] .block-container { padding-top: 1.2rem; }
+    .cosmax-brand {
+        font-weight: 700; font-size: 1.05rem; color: var(--ink);
+        letter-spacing: -0.01em; margin-bottom: 2px;
+    }
+    .cosmax-brand .accent { color: var(--cosmax-red); }
+    .cosmax-sub { font-size: 0.72rem; color: var(--ink-faint); margin-bottom: 14px;
+                  text-transform: uppercase; letter-spacing: 0.06em; }
+    .rail-step {
+        display: flex; align-items: center; gap: 10px;
+        padding: 7px 10px; border-radius: var(--radius-sm);
+        font-size: 0.85rem; color: var(--ink-faint); font-weight: 500;
+    }
+    .rail-step .rdot {
+        width: 9px; height: 9px; border-radius: 50%;
+        background: var(--line-strong); flex-shrink: 0;
+    }
+    .rail-step.done { color: var(--ink-soft); }
+    .rail-step.done .rdot { background: var(--cosmax-red); }
+    .rail-ctx {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--radius-sm); padding: 10px 12px; font-size: 0.8rem;
+    }
+    .rail-ctx .row { display: flex; justify-content: space-between; padding: 3px 0; }
+    .rail-ctx .k { color: var(--ink-faint); }
+    .rail-ctx .v { color: var(--ink); font-weight: 600; }
 
-    /* Caption text */
-    .stCaption { color: #86868b; }
-
-    /* Step progress indicator */
-    .step-progress {
-        display: flex;
-        align-items: center;
-        gap: 0;
-        padding: 8px 0 12px 0;
-        margin-bottom: 4px;
-    }
-    .step-progress .step-item {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 0.75rem;
-        color: #d2d2d7;
-        font-weight: 500;
-        white-space: nowrap;
-    }
-    .step-progress .step-item.active {
-        color: #1d1d1f;
-        font-weight: 600;
-    }
-    .step-progress .step-item.done {
-        color: #86868b;
-    }
-    .step-progress .step-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #e5e5e7;
-        flex-shrink: 0;
-    }
-    .step-progress .step-item.active .step-dot {
-        background: #1d1d1f;
-        box-shadow: 0 0 0 3px rgba(29,29,31,0.12);
-    }
-    .step-progress .step-item.done .step-dot {
-        background: #86868b;
-    }
-    .step-progress .step-conn {
-        width: 20px;
-        height: 1px;
-        background: #e5e5e7;
-        margin: 0 4px;
-        flex-shrink: 0;
-    }
+    /* Step progress indicator (top-of-tab breadcrumb) */
+    .step-progress { display: flex; align-items: center; gap: 0; padding: 6px 0 12px 0; margin-bottom: 4px; }
+    .step-progress .step-item { display: flex; align-items: center; gap: 6px; font-size: 0.75rem;
+                                color: var(--line-strong); font-weight: 500; white-space: nowrap; }
+    .step-progress .step-item.active { color: var(--cosmax-red); font-weight: 600; }
+    .step-progress .step-item.done { color: var(--ink-faint); }
+    .step-progress .step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex-shrink: 0; }
+    .step-progress .step-item.active .step-dot { background: var(--cosmax-red);
+                                                 box-shadow: 0 0 0 3px rgba(234,29,34,0.15); }
+    .step-progress .step-item.done .step-dot { background: var(--ink-faint); }
+    .step-progress .step-conn { width: 20px; height: 1px; background: var(--line); margin: 0 4px; flex-shrink: 0; }
 
     /* Gene pill selector container */
-    .gene-pill-container {
-        background: #fafafa;
-        border: 1px solid #f0f0f0;
-        border-radius: 12px;
-        padding: 12px 16px 8px 16px;
-        margin-bottom: 12px;
+    .gene-pill-container { background: var(--lab-white); border: 1px solid var(--line);
+                           border-radius: var(--radius); padding: 12px 16px 8px 16px; margin-bottom: 12px; }
+    .gene-pill-container .label { font-size: 0.78rem; color: var(--ink-faint); font-weight: 500; margin-bottom: 8px; }
+
+    /* Accessibility: branded focus ring + honour reduced-motion */
+    button:focus-visible, [role="tab"]:focus-visible,
+    input:focus-visible, select:focus-visible, textarea:focus-visible {
+        outline: 2px solid var(--cosmax-red);
+        outline-offset: 2px;
     }
-    .gene-pill-container .label {
-        font-size: 0.78rem;
-        color: #86868b;
-        font-weight: 500;
-        margin-bottom: 8px;
+    @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -2381,6 +2442,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
 
 
 # ==================== UI ====================
+render_sidebar_rail()
+
 st.title("qPCR Analysis Suite")
 st.caption("Gene-by-gene analysis with efficacy-specific workflows")
 
@@ -2621,7 +2684,14 @@ with tab_qc:
     render_step_indicator("qc")
     st.header("Quality Control Check")
 
-    st.session_state.qc_reviewed = True
+    # Honest QC-complete signal. Previously set True unconditionally on every
+    # rerun (all tab bodies execute each run), so the workflow rail marked QC
+    # "done" before the user reviewed anything. Now an explicit confirmation.
+    st.session_state.qc_reviewed = st.checkbox(
+        "Mark quality control as reviewed",
+        value=st.session_state.get("qc_reviewed", False),
+        help="Drives the workflow progress rail — check once you've reviewed replicate QC.",
+    )
 
     if st.session_state.data is not None and not st.session_state.data.empty:
         data = st.session_state.data
@@ -4041,7 +4111,7 @@ with tab3:
 
     else:
         st.info(
-            "⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'"
+            "⏳ No analysis results yet. Go to the 'Mapping' tab and click 'Run Full Analysis'."
         )
 
 # ==================== TAB 4: GRAPHS ====================
@@ -4639,7 +4709,7 @@ with tab4:
                     st.session_state.graphs[gene] = f
     else:
         st.info(
-            "⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'"
+            "⏳ No analysis results yet. Go to the 'Mapping' tab and click 'Run Full Analysis'."
         )
 
 # ==================== TAB 5: EXPORT ====================
