@@ -1621,6 +1621,12 @@ class AnalysisEngine:
                         "SEM": sem,
                         "SD": sd,
                         "Fold_Change": rel_expr,
+                        # Fold-change domain error bars (Livak method): the 2^-x
+                        # transform is nonlinear, so upper/lower bounds are
+                        # asymmetric in fold-change space. Graphs prefer these
+                        # over symmetric SD/SEM when present.
+                        "FC_Error_Upper": (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr) if sd > 0 else 0,
+                        "FC_Error_Lower": (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50)))) if sd > 0 else 0,
                     }
                 )
 
