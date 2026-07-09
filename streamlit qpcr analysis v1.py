@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS
+from qpcr.export_utils import export_figure_to_bytes
 
 try:
     from streamlit_sortables import sort_items
@@ -2727,34 +2728,14 @@ class ReportGenerator:
     SLIDE_HEIGHT_INCHES = 7.5
 
     @staticmethod
-    def _fig_to_image(fig: go.Figure, format: str = "png", scale: int = 2) -> bytes:
-        """Convert Plotly figure to image bytes with proper error handling for Kaleido/Chrome."""
-        import os
+    def _fig_to_image(fig: go.Figure, format: str = "png", scale: int = 2,
+                      width: int = None, height: int = None) -> bytes:
+        """Convert a Plotly figure to image bytes.
 
-        # Set BROWSER_PATH for choreographer (kaleido's browser driver) on Streamlit Cloud.
-        # choreographer reads os.environ["BROWSER_PATH"], not "CHROME_PATH".
-        if not os.environ.get("BROWSER_PATH"):
-            for chrome_path in [
-                "/usr/bin/chromium",
-                "/usr/bin/chromium-browser",
-                "/usr/bin/google-chrome",
-                "/usr/bin/google-chrome-stable",
-            ]:
-                if os.path.exists(chrome_path):
-                    os.environ["BROWSER_PATH"] = chrome_path
-                    break
-
-        try:
-            return fig.to_image(format=format, scale=scale)
-        except Exception as e:
-            error_msg = str(e)
-            if "Chrome" in error_msg or "chromium" in error_msg.lower():
-                raise RuntimeError(
-                    "Image export requires Chrome/Chromium. "
-                    "On Streamlit Cloud, add 'chromium' to packages.txt. "
-                    "Locally, install Chrome or run: plotly_get_chrome"
-                ) from e
-            raise
+        Delegates to the shared, environment-hardened renderer in
+        ``qpcr.export_utils`` (browser auto-detection + Chrome-download fallback).
+        """
+        return export_figure_to_bytes(fig, fmt=format, scale=scale, width=width, height=height)
 
     @staticmethod
     def create_presentation(
@@ -3278,7 +3259,7 @@ class PPTGenerator:
         try:
             orig_m = fig.layout.margin
             extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
-            img_bytes = fig.to_image(format="png", scale=2, width=fb_w, height=fb_h + extra_b)
+            img_bytes = ReportGenerator._fig_to_image(fig, format="png", scale=2, width=fb_w, height=fb_h + extra_b)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
@@ -6710,7 +6691,7 @@ with tab5:
                         fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
                         mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
                         scale = 3 if fmt == "png" else 1
-                        img_bytes = fig_copy.to_image(format=fmt, scale=scale, width=img_width, height=_adj_h)
+                        img_bytes = ReportGenerator._fig_to_image(fig_copy, format=fmt, scale=scale, width=img_width, height=_adj_h)
                         st.download_button(label=f"{gene}.{fmt}", data=img_bytes,
                             file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.{fmt}",
                             mime=mime, key=f"img_{gene}", use_container_width=True)
