@@ -57,6 +57,50 @@ def _yaxis_gene_of_chart(chart_xml, gene_names):
     return None
 
 
+def test_chart_error_bars_are_asymmetric_fold_change(mock_streamlit):
+    """Excel native chart error bars must use asymmetric FC bounds (plus != minus
+    columns), matching the Plotly graph — not symmetric SEM in both directions."""
+    spec = import_module("streamlit qpcr analysis v1")
+
+    genes = ["COL1A1", "MMP1"]
+    processed = _make_processed(genes)
+    # Give distinct upper/lower fold-change error bounds.
+    for g in genes:
+        processed[g]["FC_Error_Upper"] = [0.30, 0.55]
+        processed[g]["FC_Error_Lower"] = [0.20, 0.40]
+    raw = _make_raw(genes)
+    params = {"Housekeeping_Gene": "GAPDH", "Efficacy_Type": "Anti-Aging"}
+    mapping = {"Non-treated": {"condition": "Non-treated", "group": "Negative Control"},
+               "Treatment": {"condition": "Treatment", "group": "Treatment"}}
+
+    xlsx = spec.export_to_excel(raw, processed, params, mapping)
+    xlsx_bytes = xlsx.getvalue() if hasattr(xlsx, "getvalue") else xlsx
+
+    C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    from lxml import etree
+    zf = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    chart_files = [n for n in zf.namelist() if re.match(r"xl/charts/chart\d+\.xml$", n)]
+    assert chart_files, "no chart XML found"
+
+    checked = 0
+    for cf in chart_files:
+        root = etree.fromstring(zf.read(cf))
+        errbars = root.find(".//c:errBars", {"c": C})
+        if errbars is None:
+            continue
+        plus_f = errbars.find(".//c:plus//c:f", {"c": C})
+        minus_f = errbars.find(".//c:minus//c:f", {"c": C})
+        assert plus_f is not None and minus_f is not None, "errBars missing plus/minus refs"
+        # Asymmetric: the two directions must reference DIFFERENT columns
+        # (the old bug pointed both at the single SEM column).
+        assert plus_f.text != minus_f.text, (
+            f"error bars are symmetric (plus==minus: {plus_f.text}); "
+            f"expected distinct FC_Err_Upper/Lower columns"
+        )
+        checked += 1
+    assert checked > 0, "no gene chart with error bars was verified"
+
+
 def test_chart_axis_titles_match_genes_beyond_ten(mock_streamlit):
     """With 12 genes, each chart (in numeric file order) must carry the correct
     gene name — i.e. creation order is preserved, not lexicographic order."""

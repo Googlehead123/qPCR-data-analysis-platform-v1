@@ -1479,6 +1479,21 @@ class AnalysisEngine:
             lambda x: sample_mapping.get(x, {}).get("group", "Treatment")
         )
 
+        # Row-wise per-gene-sample well exclusion. A Condition may pool multiple
+        # raw samples, and well IDs can repeat across uploaded files, so match each
+        # row against its OWN sample's exclusion set instead of a single
+        # representative sample (mirrors calculate_statistics). Using .iloc[0] here
+        # silently dropped exclusions on every sample but the first in a pooled
+        # Condition, making the bar disagree with its own p-value/scatter.
+        def _drop_excluded_wells(df, gene_key):
+            if excluded_wells_dict is None or df.empty:
+                return df
+            mask = df.apply(
+                lambda r: r["Well"] in excluded_wells_dict.get((gene_key, r["Sample"]), set()),
+                axis=1,
+            )
+            return df[~mask]
+
         results = []
         # FIX-06: Accumulate warnings for skipped genes/conditions
         _skipped_warnings = []
@@ -1496,27 +1511,20 @@ class AnalysisEngine:
                 if len(cond_data) == 0:
                     continue
 
-                # Per-gene-sample well exclusion: filter target wells
-                if excluded_wells_dict is not None:
-                    sample_name = cond_data["Sample"].iloc[0]
-                    target_excluded = excluded_wells_dict.get((target, sample_name), set())
-                    cond_data = cond_data[~cond_data["Well"].isin(target_excluded)]
-                    if len(cond_data) == 0:
-                        _skipped_warnings.append(
-                            f"Gene '{target}', condition '{condition}': all wells excluded"
-                        )
-                        continue
+                # Per-gene-sample well exclusion: filter target wells row-wise
+                cond_data = _drop_excluded_wells(cond_data, target)
+                if len(cond_data) == 0:
+                    _skipped_warnings.append(
+                        f"Gene '{target}', condition '{condition}': all wells excluded"
+                    )
+                    continue
 
                 hk_data = data[
                     (data["Condition"] == condition) & (data["Target"] == hk_gene)
                 ]
 
-                # Per-gene-sample well exclusion: filter HK wells using HK gene key
-                if excluded_wells_dict is not None:
-                    hk_sample_name = hk_data["Sample"].iloc[0] if len(hk_data) > 0 else None
-                    if hk_sample_name:
-                        hk_excluded = excluded_wells_dict.get((hk_gene, hk_sample_name), set())
-                        hk_data = hk_data[~hk_data["Well"].isin(hk_excluded)]
+                # Per-gene-sample well exclusion: filter HK wells row-wise
+                hk_data = _drop_excluded_wells(hk_data, hk_gene)
 
                 if len(hk_data) == 0:
                     _skipped_warnings.append(
@@ -1547,16 +1555,9 @@ class AnalysisEngine:
                     (data["Condition"] == ref_sample) & (data["Target"] == hk_gene)
                 ]
 
-                # Apply per-gene-sample exclusion to reference wells too
-                if excluded_wells_dict is not None and len(ref_target) > 0:
-                    ref_sample_name = ref_target["Sample"].iloc[0]
-                    ref_target_excluded = excluded_wells_dict.get((target, ref_sample_name), set())
-                    ref_target = ref_target[~ref_target["Well"].isin(ref_target_excluded)]
-
-                if excluded_wells_dict is not None and len(ref_hk) > 0:
-                    ref_hk_sample_name = ref_hk["Sample"].iloc[0]
-                    ref_hk_excluded = excluded_wells_dict.get((hk_gene, ref_hk_sample_name), set())
-                    ref_hk = ref_hk[~ref_hk["Well"].isin(ref_hk_excluded)]
+                # Apply per-gene-sample exclusion to reference wells too (row-wise)
+                ref_target = _drop_excluded_wells(ref_target, target)
+                ref_hk = _drop_excluded_wells(ref_hk, hk_gene)
 
                 if len(ref_target) > 0 and len(ref_hk) > 0:
                     ref_delta_ct = ref_target["CT"].mean() - ref_hk["CT"].mean()
@@ -1726,8 +1727,12 @@ class AnalysisEngine:
             )
             hk_means = hk_rows.groupby("Condition")["CT"].mean().to_dict()
 
-            # Calculate relative expression per condition
-            rel_expr = {}
+            # Per-replicate ΔCt per condition, used for the significance tests.
+            # The t-test runs on ΔCt (≈normally distributed), NOT on 2^-ΔCt
+            # (right-skewed) — testing the exponentiated fold-change violates the
+            # normality assumption and distorts p-values. A two-sided test is
+            # unaffected by the ΔCt→fold-change sign flip.
+            dct_by_cond = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
                 # FIX-09: Removed arbitrary hk_mean > 45 threshold.
@@ -1745,14 +1750,14 @@ class AnalysisEngine:
                 if ct_vals.size == 0:
                     continue
                 dct = np.clip(ct_vals - hk_mean, -50, 50)
-                rel_expr[cond] = 2 ** (-dct)
+                dct_by_cond[cond] = dct
 
             # FIRST COMPARISON: compare_condition
-            ref_vals = rel_expr.get(compare_condition, np.array([]))
+            ref_vals = dct_by_cond.get(compare_condition, np.array([]))
             if ref_vals.size == 0:
                 _stats_skipped.append(f"{target}: no data for comparison condition '{compare_condition}'")
             if ref_vals.size >= 1:
-                for cond, vals in rel_expr.items():
+                for cond, vals in dct_by_cond.items():
                     if cond == compare_condition or vals.size == 0:
                         continue
 
@@ -1798,9 +1803,9 @@ class AnalysisEngine:
 
             # SECOND COMPARISON: compare_condition_2 (if provided)
             if compare_condition_2:
-                ref_vals_2 = rel_expr.get(compare_condition_2, np.array([]))
+                ref_vals_2 = dct_by_cond.get(compare_condition_2, np.array([]))
                 if ref_vals_2.size >= 1:
-                    for cond, vals in rel_expr.items():
+                    for cond, vals in dct_by_cond.items():
                         if cond == compare_condition_2 or vals.size == 0:
                             continue
 
@@ -1836,9 +1841,9 @@ class AnalysisEngine:
 
             # THIRD COMPARISON: compare_condition_3 (if provided)
             if compare_condition_3:
-                ref_vals_3 = rel_expr.get(compare_condition_3, np.array([]))
+                ref_vals_3 = dct_by_cond.get(compare_condition_3, np.array([]))
                 if ref_vals_3.size >= 1:
-                    for cond, vals in rel_expr.items():
+                    for cond, vals in dct_by_cond.items():
                         if cond == compare_condition_3 or vals.size == 0:
                             continue
 
@@ -3902,6 +3907,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     from openpyxl.chart.data_source import NumRef, NumDataSource
     from openpyxl.chart.error_bar import ErrorBars
     from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.utils import get_column_letter
     from lxml import etree
     import zipfile
 
@@ -3942,6 +3948,16 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         p_values_3 = gene_data.get("p_value_3", pd.Series()).tolist() if has_p3 else []
         sig_3 = gene_data.get("significance_3", pd.Series()).tolist() if has_p3 else []
 
+        # Fold-change-domain asymmetric error bounds (Livak). Match the on-screen
+        # Plotly graph instead of plotting Ct-domain SEM symmetrically on the
+        # linear fold-change axis. Fall back to symmetric SEM when unavailable.
+        if "FC_Error_Upper" in gene_data.columns and "FC_Error_Lower" in gene_data.columns:
+            fc_err_upper = gene_data["FC_Error_Upper"].fillna(0).tolist()
+            fc_err_lower = gene_data["FC_Error_Lower"].fillna(0).tolist()
+        else:
+            fc_err_upper = [s if pd.notna(s) else 0 for s in sems]
+            fc_err_lower = list(fc_err_upper)
+
         n_rows = len(conditions)
         if n_rows == 0:
             continue
@@ -3954,6 +3970,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
             headers.extend(["p_value_3", "significance_3"])
         for ci, h in enumerate(headers):
             ws.cell(row=hdr_row, column=3 + ci, value=h)
+        # Asymmetric fold-change error columns, appended after the visible data.
+        err_plus_col = 3 + len(headers)
+        err_minus_col = err_plus_col + 1
+        ws.cell(row=hdr_row, column=err_plus_col, value="FC_Err_Upper")
+        ws.cell(row=hdr_row, column=err_minus_col, value="FC_Err_Lower")
         max_cond_len = max((len(str(c)) for c in conditions), default=10)
         ws.column_dimensions["C"].width = max(18, min(max_cond_len + 2, 45))
         for col_letter in ("D", "E", "F", "G"):
@@ -3981,6 +4002,10 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
                 ws.cell(row=r, column=p3_col_offset, value=pv3 if pd.notna(pv3) else None)
                 s3_val = sig_3[i] if i < len(sig_3) else ""
                 ws.cell(row=r, column=p3_col_offset + 1, value=s3_val if pd.notna(s3_val) else "")
+            eu = fc_err_upper[i] if i < len(fc_err_upper) else 0
+            el = fc_err_lower[i] if i < len(fc_err_lower) else 0
+            ws.cell(row=r, column=err_plus_col, value=float(eu) if pd.notna(eu) else 0)
+            ws.cell(row=r, column=err_minus_col, value=float(el) if pd.notna(el) else 0)
 
         last_data_row = data_start + n_rows - 1
 
@@ -4013,8 +4038,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         )
         series.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(bar_sp_xml))
 
-        # Error bars: custom SEM both directions, gray line, end caps
-        sem_formula = f"'{sheet_name}'!$E${data_start}:$E${last_data_row}"
+        # Error bars: custom asymmetric fold-change bounds (upper/lower), gray line
+        plus_col_letter = get_column_letter(err_plus_col)
+        minus_col_letter = get_column_letter(err_minus_col)
+        plus_formula = f"'{sheet_name}'!${plus_col_letter}${data_start}:${plus_col_letter}${last_data_row}"
+        minus_formula = f"'{sheet_name}'!${minus_col_letter}${data_start}:${minus_col_letter}${last_data_row}"
         eb_sp_xml = (
             '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
             ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
@@ -4028,8 +4056,8 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         eb_sp = GraphicalProperties.from_tree(etree.fromstring(eb_sp_xml))
         series.errBars = ErrorBars(
             errValType="cust", errBarType="both", noEndCap=False,
-            minus=NumDataSource(numRef=NumRef(f=sem_formula)),
-            plus=NumDataSource(numRef=NumRef(f=sem_formula)),
+            minus=NumDataSource(numRef=NumRef(f=minus_formula)),
+            plus=NumDataSource(numRef=NumRef(f=plus_formula)),
             spPr=eb_sp,
         )
 
