@@ -24,6 +24,8 @@ GRAPH_PRESETS = {
     "Slate": {"color": "#8E8EA0", "ref": "#FFFFFF"},
     "Coral": {"color": "#D4826A", "ref": "#FFFFFF"},
     "Plum": {"color": "#9B7EAF", "ref": "#FFFFFF"},
+    # Okabe-Ito blue — colorblind-safe (deuteranopia/protanopia/tritanopia)
+    "Colorblind-Safe": {"color": "#0072B2", "ref": "#FFFFFF"},
 }
 
 FIGURE_SIZE_PRESETS = {
