@@ -151,21 +151,31 @@ class GraphGenerator:
 
         fig = go.Figure()
 
-        # Error bars - use fold-change domain asymmetric bars (Livak method)
-        # Falls back to Ct-domain SD/SEM if FC columns are missing
-        has_fc_errors = "FC_Error_Upper" in gene_data_indexed.columns and "FC_Error_Lower" in gene_data_indexed.columns
-        error_bar_type = st.session_state.get("error_bar_type", "sem")
-
-        if has_fc_errors:
-            error_upper_array = gene_data_indexed["FC_Error_Upper"].fillna(0).values
-            error_lower_array = gene_data_indexed["FC_Error_Lower"].fillna(0).values
+        # Error bars — selectable mode; default is Livak fold-change-domain +/-SD.
+        # Modes: 'livak_sd' (FC_Error), 'ci95' (FC_CI), 'sem', 'sd' (Ct domain).
+        # error_caption documents which is shown (reviewers require this to be stated).
+        cols = set(gene_data_indexed.columns)
+        error_bar_mode = (settings.get("error_bar_mode")
+                          or st.session_state.get("error_bar_mode")
+                          or "livak_sd")
+        if error_bar_mode == "ci95" and {"FC_CI_Upper", "FC_CI_Lower"} <= cols:
+            _eu, _el = "FC_CI_Upper", "FC_CI_Lower"
+            error_caption = "Error bars: 95% CI (fold-change domain, target replicates)"
+        elif error_bar_mode == "sem" and "SEM" in cols:
+            _eu = _el = "SEM"
+            error_caption = "Error bars: ±SEM (Ct domain)"
+        elif error_bar_mode == "sd" and "SD" in cols:
+            _eu = _el = "SD"
+            error_caption = "Error bars: ±SD (Ct domain)"
+        elif {"FC_Error_Upper", "FC_Error_Lower"} <= cols:
+            _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
+            error_caption = "Error bars: ±SD (Livak fold-change domain)"
         else:
-            # Legacy fallback: Ct-domain SD/SEM (symmetric, less accurate)
-            error_col = "SD" if error_bar_type == "sd" else "SEM"
-            if error_col not in gene_data_indexed.columns:
-                error_col = "SEM"
-            error_upper_array = gene_data_indexed[error_col].fillna(0).values
-            error_lower_array = gene_data_indexed[error_col].fillna(0).values
+            _col = "SD" if error_bar_mode == "sd" else "SEM"
+            _eu = _el = _col if _col in cols else "SEM"
+            error_caption = f"Error bars: ±{_eu} (Ct domain)"
+        error_upper_array = gene_data_indexed[_eu].fillna(0).values
+        error_lower_array = gene_data_indexed[_el].fillna(0).values
 
         gene_bar_settings = st.session_state.get(f"{gene}_bar_settings", {})
 
@@ -513,6 +523,26 @@ class GraphGenerator:
                 annotation_text=ref_line_label or f"{ref_line_value:.2f}",
                 annotation_position=ann_position,
                 annotation_font=dict(size=10, color="#666666", family=PLOTLY_FONT_FAMILY),
+            )
+
+        # Optional per-bar sample size (n=) — publication convention
+        if settings.get("show_n") and "n_replicates" in gene_data_indexed.columns:
+            for _i in range(n_bars):
+                _n = gene_data_indexed.iloc[_i].get("n_replicates")
+                if pd.notna(_n):
+                    fig.add_annotation(
+                        x=_i, y=0, yref="y", text=f"n={int(_n)}",
+                        showarrow=False, yshift=9,
+                        font=dict(size=9, color="#555555", family=PLOTLY_FONT_FAMILY),
+                    )
+
+        # Error-bar caption — always state what the error bars represent
+        if settings.get("show_error", True):
+            fig.add_annotation(
+                text=error_caption, xref="paper", yref="paper",
+                x=0.0, y=legend_y_frac, xanchor="left", yanchor="top",
+                showarrow=False,
+                font=dict(size=9, color="#888888", family=PLOTLY_FONT_FAMILY),
             )
 
         return fig

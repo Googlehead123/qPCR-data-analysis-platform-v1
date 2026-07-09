@@ -19,7 +19,7 @@ from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
 from qpcr.analysis import AnalysisEngine as _CoreAnalysisEngine
-from qpcr.auto import screen_data, recommend_test, interpret_results
+from qpcr.auto import screen_data, recommend_test, interpret_results, build_miqe_checklist
 
 try:
     from streamlit_sortables import sort_items
@@ -4470,7 +4470,9 @@ with tab4:
         if label_mode_key not in st.session_state.graph_settings:
             st.session_state.graph_settings[label_mode_key] = "Auto-wrap"
 
-        tb_row2 = st.columns([2, 2])
+        _EB_LABELS = {"Livak ±SD": "livak_sd", "95% CI": "ci95", "SEM": "sem", "SD": "sd"}
+        _eb_names = list(_EB_LABELS.keys())
+        tb_row2 = st.columns([2, 2, 1.6, 1.0])
         with tb_row2[0]:
             selected_ref = st.selectbox(
                 "Reference Line",
@@ -4491,6 +4493,23 @@ with tab4:
                 help="How x-axis labels handle long text",
             )
             st.session_state.graph_settings[label_mode_key] = label_mode
+        with tb_row2[2]:
+            _cur_mode = st.session_state.graph_settings.get("error_bar_mode", "livak_sd")
+            _cur_label = next((k for k, v in _EB_LABELS.items() if v == _cur_mode), "Livak ±SD")
+            _eb_choice = st.selectbox(
+                "Error bars", _eb_names, index=_eb_names.index(_cur_label),
+                key="eb_mode_global",
+                help="Livak ±SD (fold-change domain, default) · 95% CI · SEM/SD (Ct domain). "
+                     "Applies to all genes; the caption on each chart states which is shown.",
+            )
+            st.session_state.graph_settings["error_bar_mode"] = _EB_LABELS[_eb_choice]
+        with tb_row2[3]:
+            st.session_state.graph_settings["show_n"] = st.toggle(
+                "Show n=",
+                value=st.session_state.graph_settings.get("show_n", False),
+                key="show_n_global",
+                help="Annotate each bar with its replicate count.",
+            )
 
         if f"{current_gene}_bar_settings" not in st.session_state:
             st.session_state[f"{current_gene}_bar_settings"] = {}
@@ -4779,6 +4798,8 @@ with tab4:
         current_settings["y_min"] = gs.get(f"{current_gene}_y_min")
         current_settings["y_max"] = gs.get(f"{current_gene}_y_max")
         current_settings["label_mode"] = gs.get(f"{current_gene}_label_mode", "Auto-wrap")
+        current_settings["error_bar_mode"] = gs.get("error_bar_mode", "livak_sd")
+        current_settings["show_n"] = gs.get("show_n", False)
 
         display_gene_name = st.session_state.gene_display_names.get(current_gene, current_gene)
 
@@ -5126,6 +5147,15 @@ with tab5:
                 )
             except Exception as e:
                 st.error(f"Provenance generation failed: {e}")
+            try:
+                st.download_button(
+                    "⬇️ Download MIQE Checklist (.md)",
+                    data=build_miqe_checklist(_current_provenance()),
+                    file_name=f"qPCR_MIQE_checklist_{efficacy}_{timestamp}.md",
+                    mime="text/markdown", use_container_width=True, key="dl_miqe",
+                )
+            except Exception as e:
+                st.error(f"MIQE checklist generation failed: {e}")
 
         # ---- One-click full bundle ----
         st.markdown("---")
@@ -5136,12 +5166,13 @@ with tab5:
                 bundle = {}
                 _disp_map = st.session_state.get("gene_display_names", {})
                 with st.spinner("Building complete report bundle..."):
-                    # Provenance (reproducibility record)
+                    # Provenance + MIQE checklist (reproducibility records)
                     try:
-                        bundle[f"provenance_{efficacy}_{timestamp}.json"] = json.dumps(
-                            _current_provenance(), indent=2)
+                        _prov = _current_provenance()
+                        bundle[f"provenance_{efficacy}_{timestamp}.json"] = json.dumps(_prov, indent=2)
+                        bundle[f"MIQE_checklist_{efficacy}_{timestamp}.md"] = build_miqe_checklist(_prov)
                     except Exception as e:
-                        st.warning(f"Provenance skipped: {e}")
+                        st.warning(f"Provenance/MIQE skipped: {e}")
                     # Excel
                     try:
                         _qc, _rep, _excl = _build_export_extras()

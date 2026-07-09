@@ -163,6 +163,17 @@ class AnalysisEngine:
                 )
                 hk_cv = (hk_sd / hk_ct_mean * 100) if hk_ct_mean > 0 else np.nan
 
+                # Fold-change-domain 95% CI (t-based on the target-replicate SEM;
+                # same asymmetric 2^-x transform as the Livak ±SD bars). Target-
+                # only, matching SD/SEM by design; 0 when n<2. Offered as an
+                # alternative to the ±SD bars (reviewers often prefer CIs).
+                if sem > 0 and n_target >= 2:
+                    _ci = float(stats.t.ppf(0.975, n_target - 1)) * sem
+                    fc_ci_upper = 2 ** (-(np.clip(ddct - _ci, -50, 50))) - rel_expr
+                    fc_ci_lower = rel_expr - 2 ** (-(np.clip(ddct + _ci, -50, 50)))
+                else:
+                    fc_ci_upper = fc_ci_lower = 0
+
                 results.append(
                     {
                         "Target": target,
@@ -187,6 +198,8 @@ class AnalysisEngine:
                         # Upper/lower bounds account for nonlinear 2^x transform
                         "FC_Error_Upper": (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr) if sd > 0 else 0,
                         "FC_Error_Lower": (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50)))) if sd > 0 else 0,
+                        "FC_CI_Upper": fc_ci_upper,
+                        "FC_CI_Lower": fc_ci_lower,
                     }
                 )
 
