@@ -133,6 +133,95 @@ def render_sidebar_rail():
             )
 
 
+def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_type,
+                     excluded_wells, excluded_samples, n_genes, n_samples, timestamp,
+                     app_version="qPCR Analysis Suite v3.1"):
+    """Build a reproducibility/provenance record for an analysis run.
+
+    Pure function (no Streamlit / global state) so it is unit-testable. Captures
+    the parameters a reviewer needs to reproduce the run (MIQE-style): method,
+    reference gene/condition, comparisons, stats test, and every excluded well
+    with its gene/sample.
+    """
+    excl_list = []
+    if isinstance(excluded_wells, dict):
+        for key, wells in excluded_wells.items():
+            if isinstance(key, (tuple, list)) and len(key) == 2:
+                gene, sample = key
+            else:
+                gene, sample = "?", str(key)
+            for w in sorted(wells):
+                excl_list.append({"gene": str(gene), "sample": str(sample), "well": str(w)})
+    excl_list.sort(key=lambda d: (d["gene"], d["sample"], d["well"]))
+    return {
+        "generated": timestamp,
+        "software": app_version,
+        "method": "Livak 2^-ddCt, single reference gene",
+        "fdr_correction": "Benjamini-Hochberg",
+        "efficacy_type": efficacy or None,
+        "reference_gene": hk_gene or None,
+        "reference_condition": ref_condition or None,
+        "comparison_conditions": [c for c in (cmp_conditions or []) if c],
+        "statistical_test": "Welch t-test" if ttest_type == "welch" else "Student t-test",
+        "n_genes": int(n_genes),
+        "n_samples": int(n_samples),
+        "excluded_samples": sorted(excluded_samples) if excluded_samples else [],
+        "excluded_wells_count": len(excl_list),
+        "excluded_wells": excl_list,
+    }
+
+
+def format_provenance_text(prov: dict) -> str:
+    """Human-readable multi-line summary of a provenance record (pure)."""
+    cmp = ", ".join(prov.get("comparison_conditions") or []) or "—"
+    excl_s = ", ".join(prov.get("excluded_samples") or []) or "none"
+    lines = [
+        "qPCR ANALYSIS PROVENANCE",
+        f"Generated:            {prov.get('generated')}",
+        f"Software:             {prov.get('software')}",
+        f"Method:               {prov.get('method')}",
+        f"FDR correction:       {prov.get('fdr_correction')}",
+        f"Efficacy type:        {prov.get('efficacy_type')}",
+        f"Reference gene:       {prov.get('reference_gene')}",
+        f"Reference condition:  {prov.get('reference_condition')}",
+        f"Comparison(s):        {cmp}",
+        f"Statistical test:     {prov.get('statistical_test')}",
+        f"Genes analysed:       {prov.get('n_genes')}",
+        f"Samples:              {prov.get('n_samples')}",
+        f"Excluded samples:     {excl_s}",
+        f"Excluded wells:       {prov.get('excluded_wells_count')}",
+    ]
+    for e in prov.get("excluded_wells") or []:
+        lines.append(f"    - {e['gene']} / {e['sample']} / well {e['well']}")
+    return "\n".join(lines)
+
+
+def _current_provenance():
+    """Assemble a provenance record from current session state (UI helper)."""
+    data = st.session_state.get("data")
+    try:
+        n_genes = int(data["Target"].nunique()) if data is not None else 0
+        n_samples = int(data["Sample"].nunique()) if data is not None else 0
+    except Exception:
+        n_genes = n_samples = 0
+    return build_provenance(
+        efficacy=st.session_state.get("selected_efficacy"),
+        hk_gene=st.session_state.get("hk_gene"),
+        ref_condition=st.session_state.get("analysis_ref_condition"),
+        cmp_conditions=[
+            st.session_state.get("analysis_cmp_condition"),
+            st.session_state.get("analysis_cmp_condition_2"),
+            st.session_state.get("analysis_cmp_condition_3"),
+        ],
+        ttest_type=st.session_state.get("ttest_type", "welch"),
+        excluded_wells=st.session_state.get("excluded_wells", {}),
+        excluded_samples=st.session_state.get("excluded_samples", set()),
+        n_genes=n_genes,
+        n_samples=n_samples,
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="qPCR Analysis Suite",
@@ -4041,6 +4130,14 @@ with tab3:
         excluded_well_count = sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells)
         col4.metric("Excluded", excluded_well_count)
 
+        # Reproducibility / provenance record (MIQE-style) — travels with exports.
+        with st.expander("🔬 Analysis Provenance (reproducibility record)", expanded=False):
+            st.code(format_provenance_text(_current_provenance()), language=None)
+            st.caption(
+                "This record — method, reference gene/condition, comparisons, test, "
+                "and every excluded well — is downloadable on the Export tab."
+            )
+
         # Show results per gene
         st.subheader("Gene-by-Gene Results")
 
@@ -4923,6 +5020,18 @@ with tab5:
             except Exception as e:
                 st.error(f"Config generation failed: {e}")
 
+        # ---- Provenance (reproducibility record) ----
+        if st.session_state.get("processed_data"):
+            try:
+                st.download_button(
+                    "⬇️ Download Provenance (JSON)",
+                    data=json.dumps(_current_provenance(), indent=2),
+                    file_name=f"qPCR_provenance_{efficacy}_{timestamp}.json",
+                    mime="application/json", use_container_width=True, key="dl_provenance",
+                )
+            except Exception as e:
+                st.error(f"Provenance generation failed: {e}")
+
         # ---- One-click full bundle ----
         st.markdown("---")
         if st.session_state.graphs:
@@ -4932,6 +5041,12 @@ with tab5:
                 bundle = {}
                 _disp_map = st.session_state.get("gene_display_names", {})
                 with st.spinner("Building complete report bundle..."):
+                    # Provenance (reproducibility record)
+                    try:
+                        bundle[f"provenance_{efficacy}_{timestamp}.json"] = json.dumps(
+                            _current_provenance(), indent=2)
+                    except Exception as e:
+                        st.warning(f"Provenance skipped: {e}")
                     # Excel
                     try:
                         _qc, _rep, _excl = _build_export_extras()
