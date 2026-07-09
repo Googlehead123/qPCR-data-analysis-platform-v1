@@ -574,7 +574,8 @@ class QualityControl:
         for r_idx, row_letter in enumerate(rows):
             for c_idx, col_num in enumerate(cols):
                 well_name = f"{row_letter}{col_num}"
-                if well_name in excluded_wells:
+                well_name_padded = f"{row_letter}{col_num:02d}"
+                if well_name in excluded_wells or well_name_padded in excluded_wells:
                     fig.add_annotation(
                         x=str(col_num),
                         y=row_letter,
