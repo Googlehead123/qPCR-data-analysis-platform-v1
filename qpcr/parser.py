@@ -178,7 +178,11 @@ class QPCRParser:
             for enc in ["utf-8", "utf-16", "utf-16-le", "latin-1", "cp1252"]:
                 try:
                     df = pd.read_csv(
-                        file, encoding=enc, low_memory=False, skip_blank_lines=False
+                        file, encoding=enc, low_memory=False, skip_blank_lines=False,
+                        keep_default_na=False,
+                        na_values=["", "NA", "N/A", "NaN", "#N/A", "#N/A N/A",
+                                   "#NA", "-NaN", "-nan", "nan", "<NA>",
+                                   "Undetermined", "undetermined"],
                     )
                     break
                 except (UnicodeDecodeError, UnicodeError):

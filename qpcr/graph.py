@@ -58,6 +58,7 @@ class GraphGenerator:
         show_data_points: bool = False,
         replicate_data: pd.DataFrame = None,
         color_preset: str = None,
+        ref_condition: str = None,
     ) -> go.Figure:
         """Create individual graph for each gene with proper data handling"""
 
@@ -122,11 +123,19 @@ class GraphGenerator:
         from qpcr.constants import GRAPH_PRESETS
 
         # ---- BAR COLORS ----
+        # Reference condition — match by condition name (exact), FC fallback (single match only)
         _is_ref = [False] * n_bars
-        if "Fold_Change" in gene_data_indexed.columns:
+        if ref_condition:
             for i, (_, r) in enumerate(gene_data_indexed.iterrows()):
-                if abs(r.get("Fold_Change", 0) - 1.0) < 0.001:
+                if r.get("Condition") == ref_condition:
                     _is_ref[i] = True
+        elif "Fold_Change" in gene_data_indexed.columns:
+            _fc_matches = [
+                i for i, (_, r) in enumerate(gene_data_indexed.iterrows())
+                if abs(r.get("Fold_Change", 0) - 1.0) < 0.001
+            ]
+            if len(_fc_matches) == 1:
+                _is_ref[_fc_matches[0]] = True
 
         bar_colors = ["#FFFFFF"] * n_bars
         if color_preset and color_preset != "Custom" and color_preset in GRAPH_PRESETS:

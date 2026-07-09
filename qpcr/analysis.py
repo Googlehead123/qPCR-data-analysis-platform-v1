@@ -200,18 +200,16 @@ class AnalysisEngine:
         processed: pd.DataFrame,
         compare_condition: str,
         compare_condition_2: str = None,
+        compare_condition_3: str = None,
         raw_data: pd.DataFrame = None,
         hk_gene: str = None,
         sample_mapping: dict = None,
         ttest_type: str = "welch",
         excluded_wells=None,
     ) -> pd.DataFrame:
-        """T-test comparing each condition to compare_condition (and optionally compare_condition_2).
+        """T-test comparing each condition to compare_condition (and optionally 2nd/3rd).
 
-        Args:
-            ttest_type: "welch" for Welch's t-test (unequal variance), "student" for Student's t-test (equal variance)
-            excluded_wells: Either a dict {(gene, sample): set_of_wells} for
-                per-gene-sample exclusions, or a flat set of well IDs, or None.
+        Significance symbols: * (1st), # (2nd), † (3rd).
         """
 
         # Use session_state fallbacks
@@ -228,6 +226,7 @@ class AnalysisEngine:
             excluded_wells_dict = excluded_wells
         else:
             excluded_wells_dict = None
+            # Legacy flat set: pre-filter raw_data globally
             if excluded_wells and raw_data is not None:
                 raw_data = raw_data[~raw_data["Well"].isin(excluded_wells)].copy()
 
@@ -241,14 +240,19 @@ class AnalysisEngine:
         _onesamp_warnings = []
         _stats_skipped = []
 
+        # Add second/third p-value columns if compare conditions are provided
         if compare_condition_2:
             results["p_value_2"] = np.nan
             results["significance_2"] = ""
+        if compare_condition_3:
+            results["p_value_3"] = np.nan
+            results["significance_3"] = ""
 
         for target in results["Target"].unique():
             if pd.isna(target):
                 continue
 
+            # Map conditions
             t_rows = raw_data[raw_data["Target"] == target].copy()
             if t_rows.empty:
                 continue
@@ -290,34 +294,31 @@ class AnalysisEngine:
             dct_by_cond = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
+                # FIX-09: Removed arbitrary hk_mean > 45 threshold.
+                # Only skip on truly invalid values (NaN or non-positive).
+                # High CT values are legitimate (low HK expression) and should
+                # produce a warning upstream, not silently drop data.
                 if np.isnan(hk_mean) or hk_mean <= 0:
                     _stats_skipped.append(f"{target}/{cond}: invalid HK mean ({hk_mean})")
                     continue
                 ct_vals = grp["CT"].values
+                # Drop NaN CTs and clamp the exponent the same way calculate_ddct
+                # does (±50). Without this, a pathological CT/HK pair can produce
+                # extremely large values that swamp the t-test variance.
                 ct_vals = ct_vals[~np.isnan(ct_vals)]
                 if ct_vals.size == 0:
                     continue
-                # Clamp to match calculate_ddct's ±50 guard.
                 dct = np.clip(ct_vals - hk_mean, -50, 50)
                 dct_by_cond[cond] = dct
 
             # FIRST COMPARISON: compare_condition
-            # NOTE: When each condition has a single biological sample with technical
-            # replicates, this t-test assesses technical reproducibility only.
-            # For biological significance, biological replicates (independent samples)
-            # are required. Results should be interpreted accordingly.
             ref_vals = dct_by_cond.get(compare_condition, np.array([]))
+            if ref_vals.size == 0:
+                _stats_skipped.append(f"{target}: no data for comparison condition '{compare_condition}'")
             if ref_vals.size >= 1:
                 for cond, vals in dct_by_cond.items():
                     if cond == compare_condition or vals.size == 0:
                         continue
-
-                    # Warn when sample sizes are very small (likely technical replicates only)
-                    if ref_vals.size <= 3 and vals.size <= 3:
-                        _onesamp_warnings.append(
-                            f"{target}/{cond}: n={vals.size} vs ref n={ref_vals.size} "
-                            f"(technical replicates — interpret p-values with caution)"
-                        )
 
                     try:
                         with warnings.catch_warnings():
@@ -328,14 +329,22 @@ class AnalysisEngine:
                                     ref_vals, vals, equal_var=equal_var
                                 )
                             elif vals.size == 1 and ref_vals.size >= 2:
+                                # FIX-16: Track one-sample t-test usage
                                 _onesamp_warnings.append(f"{target}/{cond} (n=1 vs ref n={ref_vals.size})")
                                 _, p_val = stats.ttest_1samp(ref_vals, vals[0])
                             elif ref_vals.size == 1 and vals.size >= 2:
+                                # FIX-16: Track one-sample t-test usage
                                 _onesamp_warnings.append(f"{target}/{cond} (ref n=1 vs n={vals.size})")
                                 _, p_val = stats.ttest_1samp(vals, ref_vals[0])
                             else:
+                                # n=1 vs ref n=1: no t-test is possible. Record it so
+                                # the blank significance column has an explanation
+                                # instead of silently showing nothing.
                                 p_val = np.nan
-                    except (ValueError, TypeError):
+                                if vals.size == 1 and ref_vals.size == 1:
+                                    _stats_skipped.append(
+                                        f"{target}/{cond}: no p-value (n=1 vs ref n=1)")
+                    except (ValueError, TypeError) as e:
                         p_val = np.nan
 
                     mask = (results["Target"] == target) & (
@@ -373,7 +382,7 @@ class AnalysisEngine:
                                     _, p_val_2 = stats.ttest_1samp(vals, ref_vals_2[0])
                                 else:
                                     p_val_2 = np.nan
-                        except (ValueError, TypeError):
+                        except (ValueError, TypeError) as e:
                             p_val_2 = np.nan
 
                         mask = (results["Target"] == target) & (
@@ -389,12 +398,54 @@ class AnalysisEngine:
                             elif p_val_2 < 0.05:
                                 results.loc[mask, "significance_2"] = "#"
 
+            # THIRD COMPARISON: compare_condition_3 (if provided)
+            if compare_condition_3:
+                ref_vals_3 = dct_by_cond.get(compare_condition_3, np.array([]))
+                if ref_vals_3.size >= 1:
+                    for cond, vals in dct_by_cond.items():
+                        if cond == compare_condition_3 or vals.size == 0:
+                            continue
+
+                        try:
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore", RuntimeWarning)
+                                equal_var = ttest_type == "student"
+                                if ref_vals_3.size >= 2 and vals.size >= 2:
+                                    _, p_val_3 = stats.ttest_ind(
+                                        ref_vals_3, vals, equal_var=equal_var
+                                    )
+                                elif vals.size == 1 and ref_vals_3.size >= 2:
+                                    _, p_val_3 = stats.ttest_1samp(ref_vals_3, vals[0])
+                                elif ref_vals_3.size == 1 and vals.size >= 2:
+                                    _, p_val_3 = stats.ttest_1samp(vals, ref_vals_3[0])
+                                else:
+                                    p_val_3 = np.nan
+                        except (ValueError, TypeError):
+                            p_val_3 = np.nan
+
+                        mask = (results["Target"] == target) & (
+                            results["Condition"] == cond
+                        )
+                        results.loc[mask, "p_value_3"] = p_val_3
+
+                        if not np.isnan(p_val_3):
+                            if p_val_3 < 0.001:
+                                results.loc[mask, "significance_3"] = "\u2020\u2020\u2020"
+                            elif p_val_3 < 0.01:
+                                results.loc[mask, "significance_3"] = "\u2020\u2020"
+                            elif p_val_3 < 0.05:
+                                results.loc[mask, "significance_3"] = "\u2020"
+
         results = AnalysisEngine._apply_fdr_correction(
             results, "p_value", "p_value_fdr", "significance_fdr", "*"
         )
         if compare_condition_2:
             results = AnalysisEngine._apply_fdr_correction(
                 results, "p_value_2", "p_value_fdr_2", "significance_fdr_2", "#"
+            )
+        if compare_condition_3:
+            results = AnalysisEngine._apply_fdr_correction(
+                results, "p_value_3", "p_value_fdr_3", "significance_fdr_3", "\u2020"
             )
 
         # FIX-16: Attach one-sample t-test warnings for caller to display
