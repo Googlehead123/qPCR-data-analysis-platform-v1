@@ -19,6 +19,7 @@ from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
 from qpcr.analysis import AnalysisEngine as _CoreAnalysisEngine
+from qpcr.auto import screen_data, recommend_test, interpret_results
 
 try:
     from streamlit_sortables import sort_items
@@ -220,6 +221,44 @@ def _current_provenance():
         n_samples=n_samples,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
+
+
+def format_interpretation_text(interp_list, lang="en"):
+    """Join per-gene interpretation narratives into one text block (pure)."""
+    key = "narrative_ko" if lang == "ko" else "narrative_en"
+    return "\n\n".join(gi.get(key, "") for gi in (interp_list or []))
+
+
+def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
+    """Advisory per-gene statistical-test recommendation (ref vs the primary
+    comparison condition), assessed on log-scale per-replicate values
+    (ddCt = -log2(fold change)), which is the normality-correct scale."""
+    recs = {}
+    if raw is None or not hk or not ref or not processed_data:
+        return recs
+    try:
+        reps = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excluded)
+    except Exception:
+        return recs
+
+    def _log(vals):
+        a = np.asarray(vals, dtype=float)
+        a = a[(~np.isnan(a)) & (a > 0)]
+        return (-np.log2(a)) if a.size else a
+
+    for gene, gdf in processed_data.items():
+        if "Condition" not in gdf.columns:
+            continue
+        others = [c for c in gdf["Condition"].tolist() if c != ref]
+        if not others:
+            continue
+        cmp_cond = others[0]
+        g = reps[reps["Target"] == gene] if not reps.empty else reps
+        ref_vals = _log(g[g["Condition"] == ref]["Replicate_FC"].values) if not g.empty else []
+        cmp_vals = _log(g[g["Condition"] == cmp_cond]["Replicate_FC"].values) if not g.empty else []
+        rec = recommend_test([ref_vals, cmp_vals])
+        recs[gene] = {"comparison": f"{cmp_cond} vs {ref}", **rec}
+    return recs
 
 
 # ==================== PAGE CONFIG ====================
@@ -4203,6 +4242,62 @@ with tab3:
                     file_name=f"{gene}_results_{datetime.now().strftime('%Y%m%d')}.csv",
                     mime="text/csv", key=f"csv_{gene}", use_container_width=True,
                 )
+
+        # ---- Auto-Analyze (deterministic, reproducible — no external LLM) ----
+        st.markdown("---")
+        st.subheader("🤖 Auto-Analyze")
+        st.caption(
+            "Reproducible automation — data screening, transparent statistical-test "
+            "selection, and interpretation vs. the expected efficacy direction. "
+            "Advisory: the ΔΔCt numbers above remain authoritative."
+        )
+        _eff_cfg = EFFICACY_CONFIG.get(st.session_state.get("selected_efficacy"), {})
+        _expected = _eff_cfg.get("expected_direction")
+        _auto_ref = st.session_state.get("analysis_ref_condition")
+
+        with st.expander("🔍 Data screening", expanded=False):
+            _scr = screen_data(st.session_state.get("data"), st.session_state.get("hk_gene"))
+            _emit = {"error": st.error, "warning": st.warning, "info": st.info}
+            for _iss in _scr["issues"]:
+                _emit.get(_iss["level"], st.write)(_iss["message"])
+
+        _interp = interpret_results(st.session_state.processed_data, _expected, _auto_ref)
+        with st.expander("🧠 Interpretation", expanded=True):
+            _lang = st.radio("Language", ["English", "한국어"], horizontal=True,
+                             key="auto_interp_lang", label_visibility="collapsed")
+            _lk = "ko" if _lang == "한국어" else "en"
+            for _gi in _interp:
+                _flag = ""
+                if any(r["verdict"] == "opposite to expected" for r in _gi["rows"]):
+                    _flag = " ⚠️"
+                elif any(r["verdict"] == "as expected" for r in _gi["rows"]):
+                    _flag = " ✅"
+                st.markdown(f"**{_gi['gene']}**{_flag}")
+                st.write(_gi["narrative_ko"] if _lk == "ko" else _gi["narrative_en"])
+            if not _expected:
+                st.caption("No expected-direction reference is defined for this efficacy "
+                           "category — showing measured direction only.")
+
+        with st.expander("📐 Recommended statistical test (advisory)", expanded=False):
+            _recs = _auto_test_recommendations(
+                st.session_state.processed_data, st.session_state.get("data"),
+                st.session_state.get("hk_gene"), _auto_ref,
+                st.session_state.get("sample_mapping", {}),
+                st.session_state.get("excluded_wells", {}),
+            )
+            if _recs:
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Gene": g, "Comparison": v["comparison"],
+                         "Recommended test": v["test"], "Why": v["reason"]}
+                        for g, v in _recs.items()
+                    ]),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption("Advisory — the app computes the test selected in the Mapping "
+                           "tab; use this to sanity-check that choice.")
+            else:
+                st.info("Test recommendation needs raw data, a reference gene, and a reference condition.")
 
         st.success("Results ready. Go to **Graphs** tab to visualize.")
 
