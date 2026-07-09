@@ -48,6 +48,21 @@ class AnalysisEngine:
             lambda x: sample_mapping.get(x, {}).get("group", "Treatment")
         )
 
+        # Row-wise per-gene-sample well exclusion. A Condition may pool multiple
+        # raw samples, and well IDs can repeat across uploaded files, so match each
+        # row against its OWN sample's exclusion set instead of a single
+        # representative sample (mirrors calculate_statistics). Using .iloc[0] here
+        # silently dropped exclusions on every sample but the first in a pooled
+        # Condition, making the bar disagree with its own p-value/scatter.
+        def _drop_excluded_wells(df, gene_key):
+            if excluded_wells_dict is None or df.empty:
+                return df
+            mask = df.apply(
+                lambda r: r["Well"] in excluded_wells_dict.get((gene_key, r["Sample"]), set()),
+                axis=1,
+            )
+            return df[~mask]
+
         results = []
         # FIX-06: Accumulate warnings for skipped genes/conditions
         _skipped_warnings = []
@@ -65,27 +80,20 @@ class AnalysisEngine:
                 if len(cond_data) == 0:
                     continue
 
-                # Per-gene-sample well exclusion: filter target wells
-                if excluded_wells_dict is not None:
-                    sample_name = cond_data["Sample"].iloc[0]
-                    target_excluded = excluded_wells_dict.get((target, sample_name), set())
-                    cond_data = cond_data[~cond_data["Well"].isin(target_excluded)]
-                    if len(cond_data) == 0:
-                        _skipped_warnings.append(
-                            f"Gene '{target}', condition '{condition}': all wells excluded"
-                        )
-                        continue
+                # Per-gene-sample well exclusion: filter target wells row-wise
+                cond_data = _drop_excluded_wells(cond_data, target)
+                if len(cond_data) == 0:
+                    _skipped_warnings.append(
+                        f"Gene '{target}', condition '{condition}': all wells excluded"
+                    )
+                    continue
 
                 hk_data = data[
                     (data["Condition"] == condition) & (data["Target"] == hk_gene)
                 ]
 
-                # Per-gene-sample well exclusion: filter HK wells using HK gene key
-                if excluded_wells_dict is not None:
-                    hk_sample_name = hk_data["Sample"].iloc[0] if len(hk_data) > 0 else None
-                    if hk_sample_name:
-                        hk_excluded = excluded_wells_dict.get((hk_gene, hk_sample_name), set())
-                        hk_data = hk_data[~hk_data["Well"].isin(hk_excluded)]
+                # Per-gene-sample well exclusion: filter HK wells row-wise
+                hk_data = _drop_excluded_wells(hk_data, hk_gene)
 
                 if len(hk_data) == 0:
                     _skipped_warnings.append(
@@ -116,16 +124,9 @@ class AnalysisEngine:
                     (data["Condition"] == ref_sample) & (data["Target"] == hk_gene)
                 ]
 
-                # Apply per-gene-sample exclusion to reference wells too
-                if excluded_wells_dict is not None and len(ref_target) > 0:
-                    ref_sample_name = ref_target["Sample"].iloc[0]
-                    ref_target_excluded = excluded_wells_dict.get((target, ref_sample_name), set())
-                    ref_target = ref_target[~ref_target["Well"].isin(ref_target_excluded)]
-
-                if excluded_wells_dict is not None and len(ref_hk) > 0:
-                    ref_hk_sample_name = ref_hk["Sample"].iloc[0]
-                    ref_hk_excluded = excluded_wells_dict.get((hk_gene, ref_hk_sample_name), set())
-                    ref_hk = ref_hk[~ref_hk["Well"].isin(ref_hk_excluded)]
+                # Apply per-gene-sample exclusion to reference wells too (row-wise)
+                ref_target = _drop_excluded_wells(ref_target, target)
+                ref_hk = _drop_excluded_wells(ref_hk, hk_gene)
 
                 if len(ref_target) > 0 and len(ref_hk) > 0:
                     ref_delta_ct = ref_target["CT"].mean() - ref_hk["CT"].mean()
@@ -281,7 +282,12 @@ class AnalysisEngine:
             )
             hk_means = hk_rows.groupby("Condition")["CT"].mean().to_dict()
 
-            rel_expr = {}
+            # Per-replicate ΔCt per condition, used for the significance tests.
+            # The t-test runs on ΔCt (≈normally distributed), NOT on 2^-ΔCt
+            # (right-skewed) — testing the exponentiated fold-change violates the
+            # normality assumption and distorts p-values. A two-sided test is
+            # unaffected by the ΔCt→fold-change sign flip.
+            dct_by_cond = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
                 if np.isnan(hk_mean) or hk_mean <= 0:
@@ -291,20 +297,18 @@ class AnalysisEngine:
                 ct_vals = ct_vals[~np.isnan(ct_vals)]
                 if ct_vals.size == 0:
                     continue
-                # Clamp the exponent to match calculate_ddct's ±50 guard; without
-                # this, a pathological CT/HK pair can produce huge values that
-                # swamp the t-test variance.
+                # Clamp to match calculate_ddct's ±50 guard.
                 dct = np.clip(ct_vals - hk_mean, -50, 50)
-                rel_expr[cond] = 2 ** (-dct)
+                dct_by_cond[cond] = dct
 
             # FIRST COMPARISON: compare_condition
             # NOTE: When each condition has a single biological sample with technical
             # replicates, this t-test assesses technical reproducibility only.
             # For biological significance, biological replicates (independent samples)
             # are required. Results should be interpreted accordingly.
-            ref_vals = rel_expr.get(compare_condition, np.array([]))
+            ref_vals = dct_by_cond.get(compare_condition, np.array([]))
             if ref_vals.size >= 1:
-                for cond, vals in rel_expr.items():
+                for cond, vals in dct_by_cond.items():
                     if cond == compare_condition or vals.size == 0:
                         continue
 
@@ -349,9 +353,9 @@ class AnalysisEngine:
 
             # SECOND COMPARISON: compare_condition_2 (if provided)
             if compare_condition_2:
-                ref_vals_2 = rel_expr.get(compare_condition_2, np.array([]))
+                ref_vals_2 = dct_by_cond.get(compare_condition_2, np.array([]))
                 if ref_vals_2.size >= 1:
-                    for cond, vals in rel_expr.items():
+                    for cond, vals in dct_by_cond.items():
                         if cond == compare_condition_2 or vals.size == 0:
                             continue
 

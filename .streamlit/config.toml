@@ -1,8 +1,10 @@
 [theme]
-primaryColor = "#00d4aa"
+# Cosmax-branded: red primary accent aligns native widgets (toggles, sliders,
+# radios, checkboxes) with the app's red/monochrome design instead of leaking teal.
+primaryColor = "#EA1D22"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F2F6"
-textColor = "#262730"
+secondaryBackgroundColor = "#F3F0ED"
+textColor = "#1d1d1f"
 font = "sans serif"
 
 [server]
