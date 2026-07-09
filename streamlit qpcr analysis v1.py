@@ -1773,7 +1773,13 @@ class AnalysisEngine:
                                 _onesamp_warnings.append(f"{target}/{cond} (ref n=1 vs n={vals.size})")
                                 _, p_val = stats.ttest_1samp(vals, ref_vals[0])
                             else:
+                                # n=1 vs ref n=1: no t-test is possible. Record it so
+                                # the blank significance column has an explanation
+                                # instead of silently showing nothing.
                                 p_val = np.nan
+                                if vals.size == 1 and ref_vals.size == 1:
+                                    _stats_skipped.append(
+                                        f"{target}/{cond}: no p-value (n=1 vs ref n=1)")
                     except (ValueError, TypeError) as e:
                         p_val = np.nan
 
@@ -2188,7 +2194,12 @@ class AnalysisEngine:
             return True
 
         except Exception as e:
+            import traceback
             st.error(f"Analysis failed: {e}")
+            # Keep the full traceback available (collapsed) so production
+            # failures can actually be diagnosed instead of a one-line message.
+            with st.expander("Show technical details"):
+                st.code(traceback.format_exc())
             return False
 
 
