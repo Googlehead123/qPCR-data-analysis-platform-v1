@@ -5274,12 +5274,40 @@ with tab2:
         if "baseline" in config["controls"]:
             group_types.insert(0, "Baseline")
 
+        # Smart default group: match a new sample's name against the efficacy
+        # category's known control labels so e.g. "Non-treated" pre-selects
+        # "Negative Control" instead of "Treatment". Always overridable below.
+        _role_to_group = {
+            "baseline": "Baseline",
+            "negative": "Negative Control",
+            "positive": "Positive Control",
+        }
+
+        def _suggest_group(sample_name):
+            sl = str(sample_name).strip().lower()
+            if not sl:
+                return "Treatment"
+            controls = config.get("controls", {})
+            # Exact label match first (highest confidence), then substring.
+            for role in ("baseline", "negative", "positive"):
+                label = controls.get(role)
+                if label and sl == str(label).strip().lower():
+                    grp = _role_to_group[role]
+                    return grp if grp in group_types else "Treatment"
+            for role in ("baseline", "negative", "positive"):
+                label = controls.get(role)
+                ll = str(label).strip().lower() if label else ""
+                if ll and (ll in sl or sl in ll):
+                    grp = _role_to_group[role]
+                    return grp if grp in group_types else "Treatment"
+            return "Treatment"
+
         # Ensure all samples in sample_order have mapping
         for sample in st.session_state.sample_order:
             if sample not in st.session_state.sample_mapping:
                 st.session_state.sample_mapping[sample] = {
                     "condition": sample,
-                    "group": "Treatment",
+                    "group": _suggest_group(sample),
                     "concentration": "",
                     "include": True,
                 }
@@ -5874,6 +5902,12 @@ with tab3:
                 )
 
                 st.dataframe(styled, use_container_width=True)
+                st.download_button(
+                    "⬇️ Download CSV",
+                    data=display_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{gene}_results_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv", key=f"csv_{gene}", use_container_width=True,
+                )
 
         st.success("Results ready. Go to **Graphs** tab to visualize.")
 
