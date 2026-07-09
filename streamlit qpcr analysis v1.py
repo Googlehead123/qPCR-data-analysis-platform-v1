@@ -3898,8 +3898,6 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     wb = load_workbook(output_buf)
     hk_gene = params.get("Housekeeping_Gene", params.get("reference_gene", "\u03b2-Actin"))
 
-    # Track which chart files correspond to which gene (for phase 2)
-    gene_chart_map = {}
     _used_sheet_names = set(wb.sheetnames)
     # Track display name per chart file so phase 2 can render the right
     # Y-axis title even when sheet names were truncated/deduplicated.
@@ -4049,10 +4047,6 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
 
         ws.add_chart(chart, "I3")
 
-        # Track chart index for this gene (0-based among all charts in workbook)
-        chart_idx = sum(len(s._charts) for s in wb.worksheets) - 1
-        gene_chart_map[f"xl/charts/chart{chart_idx}.xml"] = gene
-
     # ---- Phase 1 complete: save workbook to bytes ----
     phase1_buf = io.BytesIO()
     wb.save(phase1_buf)
@@ -4065,14 +4059,23 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     phase1_buf.seek(0)
     zf_in = zipfile.ZipFile(phase1_buf, "r")
 
-    # Identify which chart files are gene charts (the ones we just added)
+    # Identify which chart files are gene charts (the ones we just added).
+    # Sort NUMERICALLY (chart1, chart2, ..., chart10, chart11) — a plain sorted()
+    # is lexicographic (chart1, chart10, chart11, ..., chart2) which mispairs
+    # genes to charts as soon as there are 10+ genes, stamping the wrong gene
+    # name onto a chart's Y-axis title.
+    def _chart_file_num(name):
+        m = re.search(r"chart(\d+)\.xml$", name)
+        return int(m.group(1)) if m else 0
+
     all_chart_files = sorted(
-        n for n in zf_in.namelist()
-        if n.startswith("xl/charts/chart") and n.endswith(".xml")
+        (n for n in zf_in.namelist()
+         if n.startswith("xl/charts/chart") and n.endswith(".xml")),
+        key=_chart_file_num,
     )
-    # Gene chart files are the last N chart files (one per gene with data).
-    # Use the display-name order captured during phase 1 so the Y-axis title
-    # matches the sheet name even when gene names were renamed/sanitized.
+    # Gene chart files are the last N chart files (one per gene with data), in
+    # creation order. Use the display-name order captured during phase 1 so the
+    # Y-axis title matches the sheet name even when gene names were renamed.
     n_gene_charts = len(display_for_chart_order)
     gene_chart_files = all_chart_files[-n_gene_charts:] if n_gene_charts > 0 else []
     gene_for_chart = dict(zip(gene_chart_files, display_for_chart_order))
