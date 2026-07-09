@@ -130,6 +130,32 @@ def test_both_attempts_fail_raises_actionable_error(monkeypatch):
         export_utils.export_figure_to_bytes(fig, fmt="png")
 
 
+# ---- build_zip ----------------------------------------------------------
+
+def test_build_zip_mixed_content_types():
+    import io
+    import zipfile
+
+    z = export_utils.build_zip({
+        "report.txt": "hello",           # str
+        "data.bin": b"\x00\x01\x02",     # bytes
+        "stream.dat": io.BytesIO(b"xyz"),  # file-like
+        "dropped.pptx": None,             # skipped
+    })
+    zf = zipfile.ZipFile(io.BytesIO(z))
+    assert zf.namelist() == ["report.txt", "data.bin", "stream.dat"]
+    assert zf.read("report.txt") == b"hello"
+    assert zf.read("stream.dat") == b"xyz"
+
+
+def test_build_zip_empty():
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(export_utils.build_zip({})))
+    assert zf.namelist() == []
+
+
 # ---- real end-to-end render (skips if no working browser present) --------
 
 def test_real_export_succeeds_if_browser_available():

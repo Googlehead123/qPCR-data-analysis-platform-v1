@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS
-from qpcr.export_utils import export_figure_to_bytes
+from qpcr.export_utils import export_figure_to_bytes, build_zip
 
 try:
     from streamlit_sortables import sort_items
@@ -6585,22 +6585,28 @@ with tab5:
 
         rpt_cols = st.columns(2)
         with rpt_cols[0]:
-            try:
-                _qc, _rep, _excl = _build_export_extras()
-                excel_data = export_to_excel(
-                    st.session_state.data, st.session_state.processed_data,
-                    analysis_params, st.session_state.sample_mapping,
-                    qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
-                    gene_display_names=st.session_state.get("gene_display_names", {}),
-                )
+            # Gated behind a button + spinner: export_to_excel post-processes chart
+            # XML per gene, so running it on every tab rerun (slider moves, expander
+            # toggles) is wasteful. Mirrors the PowerPoint pattern below.
+            if st.button("Generate Excel Report", key="gen_excel", use_container_width=True):
+                with st.spinner("Building Excel report..."):
+                    try:
+                        _qc, _rep, _excl = _build_export_extras()
+                        st.session_state["_excel_export"] = export_to_excel(
+                            st.session_state.data, st.session_state.processed_data,
+                            analysis_params, st.session_state.sample_mapping,
+                            qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
+                            gene_display_names=st.session_state.get("gene_display_names", {}),
+                        )
+                    except Exception as e:
+                        st.error(f"Excel generation failed: {e}")
+            if "_excel_export" in st.session_state:
                 st.download_button(
-                    "Download Excel Report", data=excel_data,
+                    "Download Excel Report", data=st.session_state["_excel_export"],
                     file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
-            except Exception as e:
-                st.error(f"Excel generation failed: {e}")
 
         with rpt_cols[1]:
             if st.button("Generate PowerPoint", key="gen_ppt", use_container_width=True):
@@ -6665,6 +6671,70 @@ with tab5:
             except Exception as e:
                 st.error(f"Config generation failed: {e}")
 
+        # ---- One-click full bundle ----
+        st.markdown("---")
+        if st.session_state.graphs:
+            if st.button("📦 Generate Complete Report Bundle (ZIP)", key="gen_bundle",
+                         use_container_width=True,
+                         help="Excel + PowerPoint + interactive HTML + PNG images in one download"):
+                bundle = {}
+                _disp_map = st.session_state.get("gene_display_names", {})
+                with st.spinner("Building complete report bundle..."):
+                    # Excel
+                    try:
+                        _qc, _rep, _excl = _build_export_extras()
+                        bundle[f"qPCR_{efficacy}_{timestamp}.xlsx"] = export_to_excel(
+                            st.session_state.data, st.session_state.processed_data,
+                            analysis_params, st.session_state.sample_mapping,
+                            qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
+                            gene_display_names=_disp_map,
+                        )
+                    except Exception as e:
+                        st.warning(f"Excel skipped: {e}")
+                    # PowerPoint
+                    try:
+                        ppt_bytes = PPTGenerator.generate_presentation(
+                            st.session_state.graphs, st.session_state.processed_data,
+                            analysis_params, graph_settings=st.session_state.get("graph_settings"),
+                            gene_display_names=_disp_map,
+                        )
+                        bundle[f"qPCR_Report_{efficacy}_{timestamp}.pptx"] = ppt_bytes
+                    except Exception as e:
+                        st.warning(f"PowerPoint skipped: {e}")
+                    # Interactive HTML
+                    try:
+                        _html = ["<html><head><meta charset='utf-8'><title>qPCR Graphs</title></head><body>",
+                                 f"<h1>{efficacy} Analysis</h1>",
+                                 f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"]
+                        for gene, fig in st.session_state.graphs.items():
+                            _html.append(f"<h2>{_disp_map.get(gene, gene)}</h2>")
+                            _html.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+                        _html.append("</body></html>")
+                        bundle[f"qPCR_graphs_{efficacy}_{timestamp}.html"] = "\n".join(_html)
+                    except Exception as e:
+                        st.warning(f"HTML skipped: {e}")
+                    # PNG images (high-res)
+                    for gene, fig in st.session_state.graphs.items():
+                        try:
+                            _fc = go.Figure(fig)
+                            _om = fig.layout.margin
+                            _pb = max(180, _om.b if _om and _om.b else 180)
+                            _fc.update_layout(width=1200, height=800 + max(0, _pb - 180),
+                                margin=dict(b=_pb), font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
+                            bundle[f"images/{gene}.png"] = ReportGenerator._fig_to_image(
+                                _fc, format="png", scale=3, width=1200, height=800 + max(0, _pb - 180))
+                        except Exception as e:
+                            st.warning(f"Image skipped ({gene}): {e}")
+                if bundle:
+                    st.session_state["_bundle_export"] = build_zip(bundle)
+                    st.success(f"Bundle ready — {len(bundle)} files.")
+            if "_bundle_export" in st.session_state:
+                st.download_button(
+                    "⬇️ Download Complete Report (ZIP)", data=st.session_state["_bundle_export"],
+                    file_name=f"qPCR_full_report_{efficacy}_{timestamp}.zip",
+                    mime="application/zip", use_container_width=True,
+                )
+
         # ---- Gene Images ----
         st.markdown("---")
         st.subheader("Gene Images")
@@ -6678,9 +6748,16 @@ with tab5:
             img_height = st.number_input("Height (px)", min_value=300, max_value=2000, value=800, step=100)
 
         if st.session_state.graphs:
-            img_cols = st.columns(min(len(st.session_state.graphs), 4))
-            for idx, (gene, fig) in enumerate(st.session_state.graphs.items()):
-                with img_cols[idx % len(img_cols)]:
+            fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
+            mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
+            scale = 3 if fmt == "png" else 1
+            # Rendering each figure launches headless Chrome (~seconds each), so gate
+            # it behind an explicit button instead of re-rendering on every rerun.
+            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images", use_container_width=True):
+                rendered, failed = {}, []
+                prog = st.progress(0.0, text="Rendering images...")
+                genes = list(st.session_state.graphs.items())
+                for idx, (gene, fig) in enumerate(genes):
                     try:
                         fig_copy = go.Figure(fig)
                         _orig_m = fig.layout.margin
@@ -6688,15 +6765,33 @@ with tab5:
                         _adj_h = img_height + max(0, _pub_b - 180)
                         fig_copy.update_layout(width=img_width, height=_adj_h, margin=dict(b=_pub_b),
                             font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
-                        fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
-                        mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
-                        scale = 3 if fmt == "png" else 1
-                        img_bytes = ReportGenerator._fig_to_image(fig_copy, format=fmt, scale=scale, width=img_width, height=_adj_h)
-                        st.download_button(label=f"{gene}.{fmt}", data=img_bytes,
-                            file_name=f"{gene}_{datetime.now().strftime('%Y%m%d')}.{fmt}",
-                            mime=mime, key=f"img_{gene}", use_container_width=True)
+                        rendered[gene] = ReportGenerator._fig_to_image(
+                            fig_copy, format=fmt, scale=scale, width=img_width, height=_adj_h)
                     except Exception as e:
-                        st.warning(f"Failed: {gene} — {e}")
+                        failed.append(f"{gene}: {e}")
+                    prog.progress((idx + 1) / len(genes), text=f"Rendered {idx + 1}/{len(genes)}")
+                prog.empty()
+                st.session_state["_gene_images"] = {"fmt": fmt, "images": rendered}
+                if failed:
+                    st.warning("Some images failed:\n" + "\n".join(failed))
+
+            cached = st.session_state.get("_gene_images")
+            if cached and cached.get("images"):
+                _cfmt = cached["fmt"]
+                _cmime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[_cfmt]
+                today = datetime.now().strftime("%Y%m%d")
+                st.download_button(
+                    f"⬇️ Download All Images (.zip, {len(cached['images'])})",
+                    data=build_zip({f"{g}.{_cfmt}": b for g, b in cached["images"].items()}),
+                    file_name=f"qPCR_images_{efficacy}_{today}.zip",
+                    mime="application/zip", use_container_width=True, key="dl_images_zip",
+                )
+                img_cols = st.columns(min(len(cached["images"]), 4))
+                for idx, (gene, img_bytes) in enumerate(cached["images"].items()):
+                    with img_cols[idx % len(img_cols)]:
+                        st.download_button(label=f"{gene}.{_cfmt}", data=img_bytes,
+                            file_name=f"{gene}_{today}.{_cfmt}",
+                            mime=_cmime, key=f"img_{gene}", use_container_width=True)
     else:
         st.warning("Complete analysis first.")
 

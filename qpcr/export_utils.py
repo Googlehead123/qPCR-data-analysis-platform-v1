@@ -25,9 +25,11 @@ hardened behaviour:
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import threading
+import zipfile
 
 # Preference order: real Chrome first (most reliable headless), then Chromium.
 _CHROME_EXE_NAMES = (
@@ -100,6 +102,26 @@ def _download_fallback_chrome() -> str:
     path = str(pio.get_chrome())
     _downloaded_chrome_path = path
     return path
+
+
+def build_zip(files: dict) -> bytes:
+    """Bundle ``{filename: content}`` into a ZIP archive, returned as bytes.
+
+    Accepts ``bytes``, ``str`` (encoded UTF-8), or objects with ``.getvalue()``
+    (e.g. ``io.BytesIO``). Entries whose content is ``None`` are skipped, so a
+    partially-failed report bundle still yields a usable archive.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in files.items():
+            if data is None:
+                continue
+            if hasattr(data, "getvalue"):
+                data = data.getvalue()
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            zf.writestr(name, data)
+    return buf.getvalue()
 
 
 def _looks_like_browser_error(err: Exception) -> bool:
