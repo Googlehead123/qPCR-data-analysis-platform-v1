@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU, EFFICACY_CONFIG
+from qpcr.export_utils import export_figure_to_bytes
 
 
 class ReportGenerator:
@@ -20,34 +21,14 @@ class ReportGenerator:
     SLIDE_HEIGHT_INCHES = 7.5
 
     @staticmethod
-    def _fig_to_image(fig: go.Figure, format: str = "png", scale: int = 2) -> bytes:
-        """Convert Plotly figure to image bytes with proper error handling for Kaleido/Chrome."""
-        import os
+    def _fig_to_image(fig: go.Figure, format: str = "png", scale: int = 2,
+                      width: int = None, height: int = None) -> bytes:
+        """Convert a Plotly figure to image bytes.
 
-        # Set BROWSER_PATH for choreographer (kaleido's browser driver) on Streamlit Cloud.
-        # choreographer reads os.environ["BROWSER_PATH"], not "CHROME_PATH".
-        if not os.environ.get("BROWSER_PATH"):
-            for chrome_path in [
-                "/usr/bin/chromium",
-                "/usr/bin/chromium-browser",
-                "/usr/bin/google-chrome",
-                "/usr/bin/google-chrome-stable",
-            ]:
-                if os.path.exists(chrome_path):
-                    os.environ["BROWSER_PATH"] = chrome_path
-                    break
-
-        try:
-            return fig.to_image(format=format, scale=scale)
-        except Exception as e:
-            error_msg = str(e)
-            if "Chrome" in error_msg or "chromium" in error_msg.lower():
-                raise RuntimeError(
-                    "Image export requires Chrome/Chromium. "
-                    "On Streamlit Cloud, add 'chromium' to packages.txt. "
-                    "Locally, install Chrome or run: plotly_get_chrome"
-                ) from e
-            raise
+        Delegates to the shared, environment-hardened renderer in
+        ``qpcr.export_utils`` (browser auto-detection + Chrome-download fallback).
+        """
+        return export_figure_to_bytes(fig, fmt=format, scale=scale, width=width, height=height)
 
     @staticmethod
     def create_presentation(
@@ -533,7 +514,7 @@ class PPTGenerator:
         line.line.fill.background()
 
         try:
-            img_bytes = fig.to_image(format="png", scale=2, width=1200, height=900)
+            img_bytes = ReportGenerator._fig_to_image(fig, format="png", scale=2, width=1200, height=900)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
