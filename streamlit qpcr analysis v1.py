@@ -1,3 +1,12 @@
+# Cap native BLAS/OpenMP thread pools BEFORE numpy/scipy/pandas import. On
+# constrained hosts (e.g. Streamlit Cloud's shared CPU) these libraries spawn
+# more threads than cores, which can crash scipy.stats/LAPACK calls with a
+# native segfault. One thread per pool is safe and usually faster there.
+import os as _os
+for _tv in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_tv, "1")
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -4255,49 +4264,66 @@ with tab3:
         _expected = _eff_cfg.get("expected_direction")
         _auto_ref = st.session_state.get("analysis_ref_condition")
 
-        with st.expander("🔍 Data screening", expanded=False):
-            _scr = screen_data(st.session_state.get("data"), st.session_state.get("hk_gene"))
-            _emit = {"error": st.error, "warning": st.warning, "info": st.info}
-            for _iss in _scr["issues"]:
-                _emit.get(_iss["level"], st.write)(_iss["message"])
+        # Compute ON DEMAND ONLY. Screening + interpretation + the native
+        # scipy.stats (Shapiro/Levene) test recommendation are expensive and were
+        # previously executed on EVERY rerun (expander bodies run even when
+        # collapsed). On Streamlit Cloud's constrained tier that repeated native
+        # + memory load crashed the process with a segfault. Run once on click,
+        # cache in session_state, and render from the cache.
+        if st.button("▶ Run Auto-Analyze", key="run_auto_analyze", use_container_width=True):
+            with st.spinner("Analyzing..."):
+                st.session_state["_auto_analyze"] = {
+                    "screening": screen_data(st.session_state.get("data"), st.session_state.get("hk_gene")),
+                    "interp": interpret_results(st.session_state.processed_data, _expected, _auto_ref),
+                    "recs": _auto_test_recommendations(
+                        st.session_state.processed_data, st.session_state.get("data"),
+                        st.session_state.get("hk_gene"), _auto_ref,
+                        st.session_state.get("sample_mapping", {}),
+                        st.session_state.get("excluded_wells", {}),
+                    ),
+                }
 
-        _interp = interpret_results(st.session_state.processed_data, _expected, _auto_ref)
-        with st.expander("🧠 Interpretation", expanded=True):
-            _lang = st.radio("Language", ["English", "한국어"], horizontal=True,
-                             key="auto_interp_lang", label_visibility="collapsed")
-            _lk = "ko" if _lang == "한국어" else "en"
-            for _gi in _interp:
-                _flag = ""
-                if any(r["verdict"] == "opposite to expected" for r in _gi["rows"]):
-                    _flag = " ⚠️"
-                elif any(r["verdict"] == "as expected" for r in _gi["rows"]):
-                    _flag = " ✅"
-                st.markdown(f"**{_gi['gene']}**{_flag}")
-                st.write(_gi["narrative_ko"] if _lk == "ko" else _gi["narrative_en"])
-            if not _expected:
-                st.caption("No expected-direction reference is defined for this efficacy "
-                           "category — showing measured direction only.")
+        _auto = st.session_state.get("_auto_analyze")
+        if not _auto:
+            st.caption("Click **Run Auto-Analyze** for data screening, interpretation, and a "
+                       "statistical-test recommendation.")
+        else:
+            with st.expander("🔍 Data screening", expanded=False):
+                _emit = {"error": st.error, "warning": st.warning, "info": st.info}
+                for _iss in _auto["screening"]["issues"]:
+                    _emit.get(_iss["level"], st.write)(_iss["message"])
 
-        with st.expander("📐 Recommended statistical test (advisory)", expanded=False):
-            _recs = _auto_test_recommendations(
-                st.session_state.processed_data, st.session_state.get("data"),
-                st.session_state.get("hk_gene"), _auto_ref,
-                st.session_state.get("sample_mapping", {}),
-                st.session_state.get("excluded_wells", {}),
-            )
-            if _recs:
-                st.dataframe(
-                    pd.DataFrame([
-                        {"Gene": g, "Comparison": v["comparison"],
-                         "Recommended test": v["test"], "Why": v["reason"]}
-                        for g, v in _recs.items()
-                    ]),
-                    use_container_width=True, hide_index=True,
-                )
-                st.caption("Advisory — the app computes the test selected in the Mapping "
-                           "tab; use this to sanity-check that choice.")
-            else:
-                st.info("Test recommendation needs raw data, a reference gene, and a reference condition.")
+            with st.expander("🧠 Interpretation", expanded=True):
+                _lang = st.radio("Language", ["English", "한국어"], horizontal=True,
+                                 key="auto_interp_lang", label_visibility="collapsed")
+                _lk = "ko" if _lang == "한국어" else "en"
+                for _gi in _auto["interp"]:
+                    _flag = ""
+                    if any(r["verdict"] == "opposite to expected" for r in _gi["rows"]):
+                        _flag = " ⚠️"
+                    elif any(r["verdict"] == "as expected" for r in _gi["rows"]):
+                        _flag = " ✅"
+                    st.markdown(f"**{_gi['gene']}**{_flag}")
+                    st.write(_gi["narrative_ko"] if _lk == "ko" else _gi["narrative_en"])
+                if not _expected:
+                    st.caption("No expected-direction reference is defined for this efficacy "
+                               "category — showing measured direction only.")
+
+            with st.expander("📐 Recommended statistical test (advisory)", expanded=False):
+                _recs = _auto["recs"]
+                if _recs:
+                    st.dataframe(
+                        pd.DataFrame([
+                            {"Gene": g, "Comparison": v["comparison"],
+                             "Recommended test": v["test"], "Why": v["reason"]}
+                            for g, v in _recs.items()
+                        ]),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.caption("Advisory — the app computes the test selected in the Mapping "
+                               "tab; use this to sanity-check that choice.")
+                else:
+                    st.info("Test recommendation needs raw data, a reference gene, and a reference condition.")
 
         st.success("Results ready. Go to **Graphs** tab to visualize.")
 
