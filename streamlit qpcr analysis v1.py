@@ -1063,8 +1063,6 @@ if "analysis_stale" not in st.session_state:
 if "gene_display_names" not in st.session_state:
     st.session_state.gene_display_names = {}
 
-if "experiment_desc" not in st.session_state:
-    st.session_state.experiment_desc = {"concentration": "1 ppm", "treatment_time": "24 h"}
 
 # ==================== EFFICACY DATABASE ====================
 EFFICACY_CONFIG = {
@@ -3100,7 +3098,6 @@ with tab1:
                 st.session_state.hk_gene = None
                 st.session_state.selected_efficacy = None
                 st.session_state.gene_display_names = {}
-                st.session_state.experiment_desc = {}
                 st.session_state.qc_reviewed = False
                 for key in [
                     "selected_gene_idx",
@@ -4792,8 +4789,6 @@ with tab5:
             "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
-            "concentration": st.session_state.experiment_desc.get("concentration", "1 ppm"),
-            "treatment_time": st.session_state.experiment_desc.get("treatment_time", "24 h"),
             "ttest_type": st.session_state.get("ttest_type", "welch"),
         }
 
@@ -4824,30 +4819,14 @@ with tab5:
         efficacy = st.session_state.selected_efficacy
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-        # PPT experiment description (collapsed)
-        with st.expander("Experiment Description (for PPT)", expanded=False):
-            conc_val = st.text_input(
-                "Sample concentration",
-                value=st.session_state.experiment_desc.get("concentration", "1 ppm"),
-                key="exp_concentration",
-            )
-            st.session_state.experiment_desc["concentration"] = conc_val
-            time_val = st.text_input(
-                "Treatment time",
-                value=st.session_state.experiment_desc.get("treatment_time", "24 h"),
-                key="exp_treatment_time",
-            )
-            st.session_state.experiment_desc["treatment_time"] = time_val
-
-        # ---- Reports ----
+        # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")
 
         rpt_cols = st.columns(2)
         with rpt_cols[0]:
             # Gated behind a button + spinner: export_to_excel post-processes chart
-            # XML per gene, so running it on every tab rerun (slider moves, expander
-            # toggles) is wasteful. Mirrors the PowerPoint pattern below.
-            if st.button("Generate Excel Report", key="gen_excel", use_container_width=True):
+            # XML per gene, so running it on every rerun would be wasteful.
+            if st.button("Generate Excel report", key="gen_excel", use_container_width=True):
                 with st.spinner("Building Excel report..."):
                     try:
                         _qc, _rep, _excl = _build_export_extras()
@@ -4861,7 +4840,7 @@ with tab5:
                         st.error(f"Excel generation failed: {e}")
             if "_excel_export" in st.session_state:
                 st.download_button(
-                    "Download Excel Report", data=st.session_state["_excel_export"],
+                    "Download Excel report", data=st.session_state["_excel_export"],
                     file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
@@ -4888,138 +4867,6 @@ with tab5:
                     file_name=f"qPCR_Report_{efficacy}_{timestamp}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     use_container_width=True,
-                )
-
-        rpt_cols2 = st.columns(2)
-        with rpt_cols2[0]:
-            if st.session_state.graphs:
-                try:
-                    html_parts = [
-                        "<html><head><title>qPCR Graphs</title></head><body>",
-                        f"<h1>{efficacy} Analysis</h1>",
-                        f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
-                    ]
-                    _disp_map = st.session_state.get("gene_display_names", {})
-                    for gene, fig in st.session_state.graphs.items():
-                        html_parts.append(f"<h2>{_disp_map.get(gene, gene)}</h2>")
-                        html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-                    html_parts.append("</body></html>")
-                    combined_html = "\n".join(html_parts)
-                    st.download_button(
-                        "Download Interactive HTML", data=combined_html,
-                        file_name=f"qPCR_graphs_{efficacy}_{timestamp}.html",
-                        mime="text/html", use_container_width=True,
-                    )
-                except Exception as e:
-                    st.error(f"HTML generation failed: {e}")
-
-        with rpt_cols2[1]:
-            try:
-                config_data = {
-                    "analysis_params": analysis_params,
-                    "sample_mapping": st.session_state.sample_mapping,
-                    "graph_settings": st.session_state.graph_settings,
-                    "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
-                }
-                st.download_button(
-                    "Download Analysis Config",
-                    data=json.dumps(config_data, indent=2),
-                    file_name=f"config_{timestamp}.json",
-                    mime="application/json", use_container_width=True,
-                )
-            except Exception as e:
-                st.error(f"Config generation failed: {e}")
-
-        # ---- Provenance (reproducibility record) ----
-        if st.session_state.get("processed_data"):
-            try:
-                st.download_button(
-                    "⬇️ Download Provenance (JSON)",
-                    data=json.dumps(_current_provenance(), indent=2),
-                    file_name=f"qPCR_provenance_{efficacy}_{timestamp}.json",
-                    mime="application/json", use_container_width=True, key="dl_provenance",
-                )
-            except Exception as e:
-                st.error(f"Provenance generation failed: {e}")
-            try:
-                st.download_button(
-                    "⬇️ Download MIQE Checklist (.md)",
-                    data=build_miqe_checklist(_current_provenance()),
-                    file_name=f"qPCR_MIQE_checklist_{efficacy}_{timestamp}.md",
-                    mime="text/markdown", use_container_width=True, key="dl_miqe",
-                )
-            except Exception as e:
-                st.error(f"MIQE checklist generation failed: {e}")
-
-        # ---- One-click full bundle ----
-        st.markdown("---")
-        if st.session_state.graphs:
-            if st.button("📦 Generate Complete Report Bundle (ZIP)", key="gen_bundle",
-                         use_container_width=True,
-                         help="Excel + PowerPoint + interactive HTML + PNG images in one download"):
-                bundle = {}
-                _disp_map = st.session_state.get("gene_display_names", {})
-                with st.spinner("Building complete report bundle..."):
-                    # Provenance + MIQE checklist (reproducibility records)
-                    try:
-                        _prov = _current_provenance()
-                        bundle[f"provenance_{efficacy}_{timestamp}.json"] = json.dumps(_prov, indent=2)
-                        bundle[f"MIQE_checklist_{efficacy}_{timestamp}.md"] = build_miqe_checklist(_prov)
-                    except Exception as e:
-                        st.warning(f"Provenance/MIQE skipped: {e}")
-                    # Excel
-                    try:
-                        _qc, _rep, _excl = _build_export_extras()
-                        bundle[f"qPCR_{efficacy}_{timestamp}.xlsx"] = export_to_excel(
-                            st.session_state.data, st.session_state.processed_data,
-                            analysis_params, st.session_state.sample_mapping,
-                            qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
-                            gene_display_names=_disp_map,
-                        )
-                    except Exception as e:
-                        st.warning(f"Excel skipped: {e}")
-                    # PowerPoint
-                    try:
-                        ppt_bytes = PPTGenerator.generate_presentation(
-                            st.session_state.graphs, st.session_state.processed_data,
-                            analysis_params, graph_settings=st.session_state.get("graph_settings"),
-                            gene_display_names=_disp_map,
-                        )
-                        bundle[f"qPCR_Report_{efficacy}_{timestamp}.pptx"] = ppt_bytes
-                    except Exception as e:
-                        st.warning(f"PowerPoint skipped: {e}")
-                    # Interactive HTML
-                    try:
-                        _html = ["<html><head><meta charset='utf-8'><title>qPCR Graphs</title></head><body>",
-                                 f"<h1>{efficacy} Analysis</h1>",
-                                 f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"]
-                        for gene, fig in st.session_state.graphs.items():
-                            _html.append(f"<h2>{_disp_map.get(gene, gene)}</h2>")
-                            _html.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-                        _html.append("</body></html>")
-                        bundle[f"qPCR_graphs_{efficacy}_{timestamp}.html"] = "\n".join(_html)
-                    except Exception as e:
-                        st.warning(f"HTML skipped: {e}")
-                    # PNG images (high-res)
-                    for gene, fig in st.session_state.graphs.items():
-                        try:
-                            _fc = go.Figure(fig)
-                            _om = fig.layout.margin
-                            _pb = max(180, _om.b if _om and _om.b else 180)
-                            _fc.update_layout(width=1200, height=800 + max(0, _pb - 180),
-                                margin=dict(b=_pb), font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
-                            bundle[f"images/{gene}.png"] = ReportGenerator._fig_to_image(
-                                _fc, format="png", scale=3, width=1200, height=800 + max(0, _pb - 180))
-                        except Exception as e:
-                            st.warning(f"Image skipped ({gene}): {e}")
-                if bundle:
-                    st.session_state["_bundle_export"] = build_zip(bundle)
-                    st.success(f"Bundle ready — {len(bundle)} files.")
-            if "_bundle_export" in st.session_state:
-                st.download_button(
-                    "⬇️ Download Complete Report (ZIP)", data=st.session_state["_bundle_export"],
-                    file_name=f"qPCR_full_report_{efficacy}_{timestamp}.zip",
-                    mime="application/zip", use_container_width=True,
                 )
 
         # ---- Gene Images ----
