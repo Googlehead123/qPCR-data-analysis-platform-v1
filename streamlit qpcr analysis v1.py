@@ -281,7 +281,7 @@ st.set_page_config(
 # ==================== GLOBAL THEME (Cosmax-branded) ====================
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css');
 
     :root {
         --cosmax-red: #EA1D22;
@@ -297,12 +297,20 @@ st.markdown("""
         --frost: #c1c6c7;
         --radius: 12px;
         --radius-sm: 8px;
+        /* spacing scale (4·8·12·16·24·32) */
+        --sp-1: 4px; --sp-2: 8px; --sp-3: 12px;
+        --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+        /* type scale */
+        --fs-h1: 1.9rem; --fs-h2: 1.4rem; --fs-h3: 1.12rem;
+        --fs-body: 0.9rem; --fs-label: 0.85rem; --fs-caption: 0.78rem;
     }
 
-    /* Base typography — Inter for latin, Korean fallbacks for efficacy labels */
+    /* Base typography — Pretendard covers Latin + Hangul (efficacy labels 탄력/항노화…);
+       system Korean faces as graceful fallback if the CDN is unreachable. */
     html, body, [class*="css"] {
-        font-family: 'Inter', 'Pretendard', 'Noto Sans KR', -apple-system,
-                     BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+        font-family: 'Pretendard', 'Pretendard Variable', -apple-system,
+                     BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic',
+                     'Noto Sans KR', 'Segoe UI', sans-serif;
     }
 
     /* Clean headers with a subtle red tick under h1 */
@@ -396,6 +404,22 @@ st.markdown("""
 
     /* Dataframes */
     [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: var(--radius-sm); }
+
+    /* Tabular numerals — Ct / fold-change / p-values align in columns */
+    [data-testid="stMetricValue"],
+    [data-testid="stDataFrame"], [data-testid="stTable"],
+    [data-testid="stNumberInput"] input,
+    [data-testid="stDataEditor"] {
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+    }
+
+    /* Reusable card surface for grouped sections (QC audit, mapping, graph panel) */
+    .cx-card {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: var(--sp-4); margin-bottom: var(--sp-3);
+    }
+    .cx-card-muted { background: var(--lab-white); }
 
     /* Input labels */
     [data-testid="stSelectbox"] label,
