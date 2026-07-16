@@ -597,3 +597,101 @@ class TestExcelExportFixes:
         headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         assert "Target" in headers
         assert "Target_Raw" not in headers
+
+
+class TestAutoSelectReplicates:
+    """Automatic best-2-of-3 replicate QC (min-pairwise-SD, threshold-flagged)."""
+
+    @staticmethod
+    def _mk(rows):
+        return pd.DataFrame(rows, columns=["Well", "Sample", "Target", "CT"])
+
+    def test_keeps_all_when_within_threshold(self):
+        from qpcr.quality_control import QualityControl
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 20.1),
+            ("A3", "S1", "G1", 20.2),
+        ])
+        excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
+        assert excl == {}
+        assert audit == []  # 'ok' groups are not surfaced
+
+    def test_trims_outlier_to_best_two(self):
+        from qpcr.quality_control import QualityControl
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 20.1),
+            ("A3", "S1", "G1", 25.0),  # clear outlier
+        ])
+        excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
+        assert excl == {("G1", "S1"): {"A3"}}
+        assert len(audit) == 1
+        row = audit[0]
+        assert row["status"] == "trimmed"
+        assert row["dropped_wells"] == ["A3"]
+        assert set(row["kept_wells"]) == {"A1", "A2"}
+        assert row["final_sd"] <= 0.3 < row["orig_sd"]
+
+    def test_unresolved_keeps_best_two_and_flags(self):
+        from qpcr.quality_control import QualityControl
+        # Three roughly equidistant values — best pair still exceeds 0.3.
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 22.0),
+            ("A3", "S1", "G1", 25.0),
+        ])
+        excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
+        assert audit[0]["status"] == "unresolved"
+        # Never drops a whole condition: exactly one well dropped, two kept.
+        assert len(audit[0]["kept_wells"]) == 2
+        assert len(audit[0]["dropped_wells"]) == 1
+        assert audit[0]["final_sd"] > 0.3
+
+    def test_pair_over_threshold_cannot_trim(self):
+        from qpcr.quality_control import QualityControl
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 21.0),  # pair SD ~0.71 > 0.3, only 2 wells
+        ])
+        excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
+        assert excl == {}  # nothing dropped — can't go below 2
+        assert audit[0]["status"] == "unresolved"
+        assert audit[0]["dropped_wells"] == []
+
+    def test_nan_ct_excluded_from_selection(self):
+        from qpcr.quality_control import QualityControl
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 20.1),
+            ("A3", "S1", "G1", np.nan),  # undetermined — ignored
+        ])
+        excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
+        assert excl == {}
+        assert audit == []  # two valid CTs, within threshold
+
+    def test_respects_preexisting_exclusions(self):
+        from qpcr.quality_control import QualityControl
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 20.1),
+            ("A3", "S1", "G1", 25.0),
+        ])
+        # A3 already excluded → remaining pair is within threshold → no action.
+        excl, audit = QualityControl.auto_select_replicates(
+            df, sd_threshold=0.3, excluded_wells={("G1", "S1"): {"A3"}}
+        )
+        assert excl == {}
+        assert audit == []
+
+    def test_keeps_minimum_pairwise_sd_pair(self):
+        from qpcr.quality_control import QualityControl
+        # Closest pair is A2/A3 (24.0, 25.0); A1 (20.0) is the outlier.
+        df = self._mk([
+            ("A1", "S1", "G1", 20.0),
+            ("A2", "S1", "G1", 24.0),
+            ("A3", "S1", "G1", 25.0),
+        ])
+        excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
+        assert excl == {("G1", "S1"): {"A1"}}
+        assert set(audit[0]["kept_wells"]) == {"A2", "A3"}

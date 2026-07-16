@@ -270,6 +270,29 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     return recs
 
 
+def apply_auto_qc(threshold: float = None) -> None:
+    """Run automatic best-2-of-3 replicate QC and store exclusions + audit.
+
+    Triplicates within the SD threshold keep all replicates; those above are
+    trimmed to their best 2 (closest CTs); triplicates that still exceed the
+    threshold keep their best 2 and are flagged 'unresolved'. This is applied
+    automatically on upload (so the user can go straight to mapping) and re-run
+    when the threshold changes. It replaces the auto-decided exclusions wholesale
+    — a threshold change is a clean re-evaluation; per-well/audit overrides made
+    afterwards persist until the threshold changes again.
+    """
+    data = st.session_state.get("data")
+    if data is None or getattr(data, "empty", True):
+        return
+    if threshold is None:
+        threshold = st.session_state.get("qc_sd_threshold", 0.3)
+    threshold = float(threshold)
+    exclusions, audit = QualityControl.auto_select_replicates(data, sd_threshold=threshold)
+    st.session_state.excluded_wells = {k: set(v) for k, v in exclusions.items()}
+    st.session_state.auto_qc_audit = audit
+    st.session_state.qc_sd_threshold = threshold
+
+
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="qPCR Analysis Suite",
@@ -2712,6 +2735,11 @@ with tab1:
                 }
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
+
+                # Automatic replicate QC (best-2-of-3 at SD 0.3) so the user can
+                # go straight to mapping; fully reviewable/reversible in the QC tab.
+                apply_auto_qc(0.3)
+
                 if had_previous_analysis:
                     st.info("Previous analysis results cleared due to new data upload.")
 
@@ -2987,84 +3015,100 @@ with tab_qc:
                 if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
                     st.rerun()
 
-            # ---- Auto-Exclude High SD Outliers ----
+            # ---- Automatic replicate QC (best-2-of-3) ----
             st.markdown("---")
-            auto_excl_cols = st.columns([2, 1, 1])
-            with auto_excl_cols[0]:
-                sd_thresh = st.slider(
-                    "SD Threshold (Ct)",
-                    min_value=0.3, max_value=1.0, value=0.5, step=0.1,
-                    key="sd_threshold_slider",
-                    help="Triplicates with CT SD above this will be flagged",
+            aq_top = st.columns([1.4, 3])
+            with aq_top[0]:
+                _cur_thresh = float(st.session_state.get("qc_sd_threshold", 0.3))
+                new_thresh = st.number_input(
+                    "CT SD threshold",
+                    min_value=0.05, max_value=1.0, value=_cur_thresh, step=0.05,
+                    format="%.2f", key="qc_sd_threshold_input",
+                    help="Triplicates above this SD are automatically trimmed to their "
+                         "best 2 replicates (closest CT values).",
                 )
-            with auto_excl_cols[1]:
-                find_all_btn = st.button(
-                    "🔍 Find All Outliers", key="find_all_sd_outliers", use_container_width=True
+            if abs(new_thresh - _cur_thresh) > 1e-9:
+                st.session_state.excluded_wells_history.append(
+                    {k: set(v) for k, v in st.session_state.excluded_wells.items()}
                 )
-            with auto_excl_cols[2]:
-                # Per-gene button — read gene filter from previous render cycle
-                _prev_gene = st.session_state.get("qc_gene_filter", "All Genes")
-                if _prev_gene and _prev_gene != "All Genes":
-                    clean_gene_btn = st.button(
-                        f"🧹 Clean {_prev_gene}", key="clean_gene_btn", use_container_width=True
-                    )
+                apply_auto_qc(new_thresh)
+                st.rerun()
+
+            sd_thresh = float(st.session_state.get("qc_sd_threshold", 0.3))
+            audit = st.session_state.get("auto_qc_audit", []) or []
+            n_trim = sum(1 for a in audit if a.get("status") == "trimmed")
+            n_unres = sum(1 for a in audit if a.get("status") == "unresolved")
+            with aq_top[1]:
+                if n_trim or n_unres:
+                    msg = (f"**Auto-QC** at SD ≤ {sd_thresh:.2f}: "
+                           f"**{n_trim}** triplicate(s) trimmed to best 2")
+                    if n_unres:
+                        msg += (f"; **{n_unres}** still above threshold — "
+                                "kept best 2, flagged for review")
+                    st.markdown(f"<div style='padding-top:28px'>{msg}.</div>",
+                                unsafe_allow_html=True)
                 else:
-                    clean_gene_btn = False
+                    st.markdown(
+                        f"<div style='padding-top:28px'>**Auto-QC** at SD ≤ {sd_thresh:.2f}: "
+                        "all triplicates within threshold — nothing removed.</div>",
+                        unsafe_allow_html=True,
+                    )
 
-            # Handle find buttons
-            if find_all_btn:
-                suggestions = QualityControl.find_high_sd_outliers(
-                    data, st.session_state.get("excluded_wells", {}), sd_threshold=sd_thresh,
-                )
-                st.session_state["_sd_outlier_suggestions"] = suggestions
-
-            if clean_gene_btn:
-                suggestions = QualityControl.find_high_sd_outliers(
-                    data, st.session_state.get("excluded_wells", {}),
-                    sd_threshold=sd_thresh, gene_filter=_prev_gene,
-                )
-                st.session_state["_sd_outlier_suggestions"] = suggestions
-
-            # Display preview table
-            suggestions = st.session_state.get("_sd_outlier_suggestions", [])
-            if suggestions:
-                st.markdown(f"**Found {len(suggestions)} high-SD outlier(s):**")
-                preview_df = pd.DataFrame(suggestions)
-                preview_df.insert(0, "Exclude", True)
-                edited = st.data_editor(
-                    preview_df[["Exclude", "Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"]],
-                    disabled=["Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"],
-                    key="sd_outlier_preview",
-                    use_container_width=True,
-                )
-
-                apply_cols = st.columns([3, 1])
-                with apply_cols[1]:
-                    if st.button("Apply Selected", key="apply_sd_exclusions", type="primary", use_container_width=True):
-                        selected = edited[edited["Exclude"]]
-                        # Save undo history
-                        if "excluded_wells_history" in st.session_state:
-                            st.session_state.excluded_wells_history.append(
-                                {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                            )
-                        excl_dict = st.session_state.get("excluded_wells", {})
-                        if not isinstance(excl_dict, dict):
-                            excl_dict = {}
-                        for _, row in selected.iterrows():
-                            key = (row["Target"], row["Sample"])
-                            if key not in excl_dict:
-                                excl_dict[key] = set()
-                            excl_dict[key].add(row["Well"])
-                        st.session_state.excluded_wells = excl_dict
-                        st.session_state.pop("_sd_outlier_suggestions", None)
-                        st.success(f"Excluded {len(selected)} well(s).")
+            # What auto-QC did — reviewable & reversible per triplicate
+            if audit:
+                with st.expander(
+                    f"Auto-QC decisions ({len(audit)}) — review & override",
+                    expanded=bool(n_unres),
+                ):
+                    st.caption(
+                        "Each row is a triplicate auto-QC acted on. Untick **Keep "
+                        "auto-selection** to restore all replicates for that triplicate, "
+                        "then **Apply overrides**. Changing the threshold above re-runs "
+                        "automatic selection."
+                    )
+                    _excl = st.session_state.excluded_wells
+                    audit_rows = []
+                    for a in audit:
+                        key = (a["Target"], a["Sample"])
+                        dropped = a["dropped_wells"]
+                        currently_kept = (
+                            all(w in _excl.get(key, set()) for w in dropped)
+                            if dropped else True
+                        )
+                        audit_rows.append({
+                            "Keep auto-selection": currently_kept,
+                            "Gene": a["Target"],
+                            "Sample": a["Sample"],
+                            "Status": "flagged — review" if a["status"] == "unresolved" else "trimmed",
+                            "SD before": a["orig_sd"],
+                            "SD after": a["final_sd"],
+                            "Dropped well(s)": ", ".join(dropped) or "—",
+                        })
+                    edited_audit = st.data_editor(
+                        pd.DataFrame(audit_rows),
+                        disabled=["Gene", "Sample", "Status", "SD before", "SD after", "Dropped well(s)"],
+                        hide_index=True, use_container_width=True, key="auto_qc_audit_editor",
+                    )
+                    if st.button("Apply overrides", key="apply_auto_qc_overrides", type="primary"):
+                        st.session_state.excluded_wells_history.append(
+                            {k: set(v) for k, v in st.session_state.excluded_wells.items()}
+                        )
+                        for i, a in enumerate(audit):
+                            dropped = a["dropped_wells"]
+                            if not dropped:
+                                continue
+                            key = (a["Target"], a["Sample"])
+                            keep = bool(edited_audit.iloc[i]["Keep auto-selection"])
+                            if keep:
+                                st.session_state.excluded_wells.setdefault(key, set()).update(dropped)
+                            else:
+                                cur = st.session_state.excluded_wells.get(key)
+                                if cur:
+                                    for w in dropped:
+                                        cur.discard(w)
+                                    if not cur:
+                                        del st.session_state.excluded_wells[key]
                         st.rerun()
-                with apply_cols[0]:
-                    if st.button("Dismiss", key="dismiss_sd_suggestions"):
-                        st.session_state.pop("_sd_outlier_suggestions", None)
-                        st.rerun()
-            elif find_all_btn or clean_gene_btn:
-                st.info("No triplicates exceed the SD threshold.")
 
             st.markdown("---")
 
@@ -3101,8 +3145,9 @@ with tab_qc:
                     f"{g} ({c})" for g, c in sorted(_flagged_genes.items())
                 )
                 st.warning(
-                    f"⚠️ **{len(_flagged_well_lookup)} high-SD outliers** (SD > {sd_thresh}): {_gene_parts} — "
-                    f"Click **Find All Outliers** above to review and exclude."
+                    f"⚠️ **{len(_flagged_well_lookup)} triplicate(s) still above SD {sd_thresh:.2f}** after "
+                    f"auto-QC (best 2 kept): {_gene_parts} — see **Auto-QC decisions** above, "
+                    f"or fine-tune wells below."
                 )
 
             # ---- Filter Controls ----
@@ -3395,21 +3440,11 @@ with tab_qc:
 
             if _ov_flagged_rows:
                 flagged_overview = pd.DataFrame(_ov_flagged_rows)
-                flag_ov_col1, flag_ov_col2 = st.columns([3, 1])
-                with flag_ov_col1:
-                    st.warning(f"Found {len(flagged_overview)} wells with high triplicate SD")
-                with flag_ov_col2:
-                    if st.button(
-                        "Exclude All Flagged",
-                        use_container_width=True,
-                        key="qc_overview_exclude_flagged",
-                    ):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
-                        for _, row in flagged_overview.iterrows():
-                            exclude_well(row["Well"], row["Target"], row["Sample"])
-                        st.rerun()
+                st.warning(
+                    f"{len(flagged_overview)} triplicate(s) remain above SD {sd_thresh:.2f} "
+                    "after auto-QC (best 2 kept). Review under **Auto-QC decisions** or the "
+                    "**Triplicate Browser** — a triplicate is never auto-reduced below 2 wells."
+                )
 
                 st.dataframe(
                     flagged_overview,
