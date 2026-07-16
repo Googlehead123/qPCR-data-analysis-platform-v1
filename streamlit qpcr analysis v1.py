@@ -4213,6 +4213,8 @@ with tab2:
             col_drag, _col_spacer = st.columns([2, 3])
             with col_drag:
                 sorted_labels = sort_items(items=order_labels, direction="vertical")
+            # Guard: the component can return None (headless / first render).
+            sorted_labels = sorted_labels or order_labels
 
             new_order = [label_to_sample[lbl] for lbl in sorted_labels] + excluded_samples_list
             if new_order != st.session_state.sample_order:
