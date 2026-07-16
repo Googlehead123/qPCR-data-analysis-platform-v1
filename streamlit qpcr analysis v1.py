@@ -3040,11 +3040,12 @@ st.title("qPCR Analysis Suite")
 st.caption("Gene-by-gene analysis with efficacy-specific workflows")
 
 # Main tabs
-tab1, tab_qc, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab_qc, tab2, tab_ov, tab3, tab4, tab5 = st.tabs(
     [
         "Upload",
         "QC Check",
         "Mapping",
+        "Overview",
         "Analysis",
         "Graphs",
         "Export",
@@ -4505,6 +4506,231 @@ with tab2:
             st.warning("No samples available for analysis.")
 
 # ==================== TAB 3: ANALYSIS ====================
+with tab_ov:
+    maybe_autorun_analysis()
+    st.header("Results overview")
+    st.caption(
+        "Auto-assembled from the analysis — verdict, benchmarked effect, and every "
+        "gene at a glance. Fine-tune individual charts in Graphs; download the "
+        "report in Export."
+    )
+
+    if not st.session_state.get("processed_data"):
+        st.info("No results yet — map samples and run analysis on the Mapping tab first.")
+    else:
+        st.session_state.setdefault("graph_settings", {})
+        processed = st.session_state.processed_data
+        eff = st.session_state.get("selected_efficacy")
+        cfg = EFFICACY_CONFIG.get(eff, {}) or {}
+        efficacy_config = cfg
+        gene_list = list(processed.keys())
+        ref_condition = st.session_state.get("analysis_ref_condition")
+
+        all_res = pd.concat(processed.values(), ignore_index=True)
+        conditions = list(dict.fromkeys(all_res["Condition"].astype(str).tolist()))
+        _so = st.session_state.get("sample_order", [])
+        _sm = st.session_state.get("sample_mapping", {})
+        if _so and _sm:
+            _ordered, _seen = [], set()
+            for _s in _so:
+                if _sm.get(_s, {}).get("include", True):
+                    _c = str(_sm.get(_s, {}).get("condition", _s))
+                    if _c in conditions and _c not in _seen:
+                        _ordered.append(_c); _seen.add(_c)
+            for _c in conditions:
+                if _c not in _seen:
+                    _ordered.append(_c); _seen.add(_c)
+            conditions = _ordered
+
+        controls = cfg.get("controls", {}) or {}
+
+        def _match(label):
+            if not label:
+                return None
+            ll = str(label).strip().lower()
+            for c in conditions:
+                if str(c).strip().lower() == ll:
+                    return c
+            for c in conditions:
+                cl = str(c).strip().lower()
+                if ll and (ll in cl or cl in ll):
+                    return c
+            return None
+
+        bench_default = _match(controls.get("positive"))
+        control_conditions = {ref_condition} | {
+            _match(controls.get(r)) for r in ("negative", "positive", "baseline")
+        }
+        control_conditions.discard(None)
+        treatments = [c for c in conditions if c not in control_conditions] or [
+            c for c in conditions if c != ref_condition
+        ]
+
+        def _col(df):
+            return "Fold_Change" if "Fold_Change" in df.columns else (
+                "Relative_Expression" if "Relative_Expression" in df.columns else None)
+
+        def _fold(gene, cond):
+            df = processed[gene]
+            col = _col(df)
+            if col is None:
+                return None
+            r = df[df["Condition"].astype(str) == str(cond)]
+            if r.empty:
+                return None
+            v = r[col].values[0]
+            return None if pd.isna(v) else float(v)
+
+        def _sig(gene, cond):
+            df = processed[gene]
+            if "significance" not in df.columns:
+                return ""
+            r = df[df["Condition"].astype(str) == str(cond)]
+            return "" if r.empty else str(r["significance"].values[0] or "")
+
+        def _pval(gene, cond):
+            df = processed[gene]
+            if "p_value" not in df.columns:
+                return None
+            r = df[df["Condition"].astype(str) == str(cond)]
+            if r.empty:
+                return None
+            v = r["p_value"].values[0]
+            return None if pd.isna(v) else float(v)
+
+        def _mean_abs_logfc(cond):
+            vals = []
+            for g in gene_list:
+                f = _fold(g, cond)
+                if f and f > 0:
+                    vals.append(abs(np.log2(f)))
+            return sum(vals) / len(vals) if vals else 0.0
+
+        hl_default = max(treatments, key=_mean_abs_logfc) if treatments else None
+
+        # experiment header
+        cell = cfg.get("cell", "—")
+        desc = cfg.get("description", "") or ""
+        eng = desc.split(" - ")[0].split(" – ")[0].strip()
+        st.markdown(
+            "<div style='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap'>"
+            f"<span style='font-size:22px;font-weight:700'>{eff or 'Results'}</span>"
+            f"<span style='color:var(--ink-faint);font-size:15px'>{eng}</span></div>"
+            "<div style='color:var(--ink-faint);font-size:13px;margin-top:4px'>"
+            f"Cell line <b style='color:var(--ink)'>{cell}</b> &nbsp;·&nbsp; "
+            f"Genes <b style='color:var(--ink)'>{len(gene_list)}</b> &nbsp;·&nbsp; "
+            f"Conditions <b style='color:var(--ink)'>{len(conditions)}</b> &nbsp;·&nbsp; "
+            f"Reference <b style='color:var(--ink)'>{ref_condition or '—'}</b></div>",
+            unsafe_allow_html=True,
+        )
+
+        # benchmark + highlight selectors (auto, overridable)
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            bopts = ["(none)"] + conditions
+            bidx = bopts.index(bench_default) if bench_default in bopts else 0
+            benchmark = st.selectbox(
+                "Benchmark (positive control)", bopts, index=bidx,
+                key="overview_benchmark",
+                help="Auto-selected from the efficacy category's positive control; override if needed.",
+            )
+            benchmark = None if benchmark == "(none)" else benchmark
+        with sc2:
+            if treatments:
+                hidx = treatments.index(hl_default) if hl_default in treatments else 0
+                highlight = st.selectbox(
+                    "Highlight active", treatments, index=hidx, key="overview_highlight",
+                    help="Test article summarized in the verdict and %-of-benchmark.",
+                )
+            else:
+                highlight = None
+
+        # per-gene verdict + matrix
+        expected_map = cfg.get("expected_direction", {}) or {}
+        rows = []
+        passes = graded = sig_count = 0
+        bench_pcts = []
+        for g in gene_list:
+            exp = expected_map.get(g)
+            hl_fold = _fold(g, highlight) if highlight else None
+            hl_sig = _sig(g, highlight) if highlight else ""
+            hl_p = _pval(g, highlight) if highlight else None
+            is_sig = bool(hl_sig) or (hl_p is not None and hl_p < 0.05)
+            if is_sig:
+                sig_count += 1
+            verdict_cell = "—"
+            if exp and highlight and hl_fold is not None:
+                graded += 1
+                obs = "up" if hl_fold > 1 else "down"
+                ok = (obs == exp) and is_sig
+                if ok:
+                    passes += 1
+                verdict_cell = f"{'↑' if exp == 'up' else '↓'} {'pass' if ok else 'check'}"
+            pct = None
+            if benchmark and highlight:
+                bf = _fold(g, benchmark)
+                if bf is not None and hl_fold is not None and abs(bf - 1) > 1e-6:
+                    pct = (hl_fold - 1) / (bf - 1) * 100
+                    bench_pcts.append(pct)
+            row = {"Gene": g}
+            for cond in conditions:
+                f = _fold(g, cond)
+                row[cond] = "—" if f is None else f"{f:.2f}{_sig(g, cond)}"
+            if expected_map:
+                row["Expected"] = verdict_cell
+            if benchmark and highlight:
+                row[f"% of {benchmark}"] = "—" if pct is None else f"{pct:.0f}%"
+            rows.append(row)
+        matrix = pd.DataFrame(rows)
+
+        # verdict banner
+        if graded:
+            allpass = passes == graded
+            color = "#2f7d5b" if allpass else "#B8860B"
+            avg_bench = (f" · reaches ~{sum(bench_pcts)/len(bench_pcts):.0f}% of {benchmark}"
+                         if bench_pcts else "")
+            st.markdown(
+                "<div style='display:flex;gap:14px;align-items:center;background:var(--surface,#fff);"
+                "border:1px solid var(--line,#e6e1db);border-left:4px solid " + color + ";"
+                "border-radius:12px;padding:14px 18px;margin:14px 0'>"
+                "<div style='font-size:18px;font-weight:700;color:" + color + "'>"
+                + ("✓" if allpass else "!") + "</div><div>"
+                f"<div style='font-weight:700'>{passes}/{graded} markers moved in the expected direction</div>"
+                f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active <b>{highlight}</b>{avg_bench}.</div>"
+                "</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info(
+                f"{sig_count}/{len(gene_list)} genes significant vs control "
+                "(no expected-direction defined for this category)."
+            )
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Markers as expected", f"{passes}/{graded}" if graded else "—")
+        m2.metric("Significant vs control", f"{sig_count}/{len(gene_list)}")
+        m3.metric("Avg % of benchmark",
+                  f"{sum(bench_pcts)/len(bench_pcts):.0f}%" if bench_pcts else "—")
+
+        # gene panel (auto-styled small multiples, consistent with Graphs)
+        st.markdown("##### Gene panel")
+        _cols = st.columns(min(len(gene_list), 3) or 1)
+        for i, g in enumerate(gene_list):
+            with _cols[i % len(_cols)]:
+                _ensure_bar_settings(g, processed[g])
+                try:
+                    fig = build_gene_figure(g, processed[g], efficacy_config)
+                    st.plotly_chart(fig, use_container_width=True, key=f"ov_fig_{g}")
+                except Exception as e:
+                    st.warning(f"{g}: chart unavailable ({e})")
+
+        # fold-change matrix
+        st.markdown("##### Fold-change matrix")
+        st.caption("Fold change vs reference; significance markers are vs the p-value comparison control.")
+        st.dataframe(matrix, use_container_width=True, hide_index=True)
+        st.caption("Download the full Excel / PowerPoint report from the **Export** tab.")
+
+
 with tab3:
     # Auto-rerun if QC exclusions, stat options, or the sample mapping changed.
     maybe_autorun_analysis()
