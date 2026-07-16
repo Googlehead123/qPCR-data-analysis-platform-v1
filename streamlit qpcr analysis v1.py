@@ -58,7 +58,11 @@ def render_step_indicator(current_step: str):
     has_data = st.session_state.get("data") is not None
     has_analysis = bool(st.session_state.get("processed_data"))
     has_graphs = bool(st.session_state.get("graphs"))
-    mapping_done = st.session_state.get("mapping_finalized", False)
+    # Mapping no longer has an explicit "Finalize" step — it's "done" once the
+    # user has engaged the tab (efficacy auto-selected there) with samples mapped.
+    mapping_done = bool(st.session_state.get("selected_efficacy")) and bool(
+        st.session_state.get("sample_mapping")
+    )
 
     qc_done = has_data and (
         sum(len(v) for v in st.session_state.get("excluded_wells", {}).values()) > 0
@@ -104,7 +108,8 @@ def render_sidebar_rail():
         "qc": st.session_state.get("qc_reviewed", False) or (
             has_data and sum(len(v) for v in st.session_state.get("excluded_wells", {}).values()) > 0
         ),
-        "mapping": st.session_state.get("mapping_finalized", False),
+        "mapping": bool(st.session_state.get("selected_efficacy"))
+        and bool(st.session_state.get("sample_mapping")),
         "analysis": bool(st.session_state.get("processed_data")),
         "graphs": bool(st.session_state.get("graphs")),
         "export": bool(st.session_state.get("graphs")),
@@ -291,6 +296,47 @@ def apply_auto_qc(threshold: float = None) -> None:
     st.session_state.excluded_wells = {k: set(v) for k, v in exclusions.items()}
     st.session_state.auto_qc_audit = audit
     st.session_state.qc_sd_threshold = threshold
+
+
+def _analysis_state_snapshot() -> dict:
+    """Signature of everything that should trigger an analysis re-run: QC
+    exclusions, stat options, and the sample mapping (condition names + include
+    flags). Order is deliberately excluded — reordering only changes display,
+    which graphs/exports read live from sample_order without a re-run."""
+    m = st.session_state.get("sample_mapping", {})
+    return {
+        "excluded_wells": {
+            str(k): sorted(v) for k, v in st.session_state.get("excluded_wells", {}).items()
+        },
+        "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
+        "ttest_type": st.session_state.get("ttest_type", "welch"),
+        "mapping": {
+            s: (v.get("condition", s), bool(v.get("include", True)))
+            for s, v in sorted(m.items())
+        },
+    }
+
+
+def maybe_autorun_analysis() -> None:
+    """Re-run analysis automatically when QC exclusions, stat options, or the
+    sample mapping change since the last run. Unifies the previously separate
+    QC-drift (auto) and mapping-change (manual button) paths into one signal."""
+    if not (
+        st.session_state.get("processed_data")
+        and "_exclusion_snapshot" in st.session_state
+        and "_last_ref_sample_key" in st.session_state
+    ):
+        return
+    if _analysis_state_snapshot() != st.session_state["_exclusion_snapshot"]:
+        ok = AnalysisEngine.run_full_analysis(
+            st.session_state["_last_ref_sample_key"],
+            st.session_state["_last_cmp_sample_key"],
+            st.session_state.get("_last_cmp_sample_key_2"),
+            st.session_state.get("_last_cmp_sample_key_3"),
+        )
+        if ok:
+            st.session_state.analysis_stale = False
+            st.info("Analysis auto-updated to reflect changes in QC, mapping, or settings.")
 
 
 # ==================== PAGE CONFIG ====================
@@ -1067,12 +1113,9 @@ class AnalysisEngine(_CoreAnalysisEngine):
                 # new analysis (and the new rename map) instead of the prior run.
                 st.session_state.pop("_ppt_export", None)
 
-                # Store exclusion snapshot for auto-rerun detection
-                st.session_state['_exclusion_snapshot'] = {
-                    'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
-                    'excluded_samples': sorted(st.session_state.get('excluded_samples', set())),
-                    'ttest_type': st.session_state.get('ttest_type', 'welch')
-                }
+                # Store state snapshot for auto-rerun detection (QC exclusions,
+                # stat options, and the sample mapping).
+                st.session_state['_exclusion_snapshot'] = _analysis_state_snapshot()
 
             st.success(
                 "✅ Full analysis complete. Go to the Graphs tab to visualize results."
@@ -3696,198 +3739,118 @@ with tab2:
                     return grp if grp in group_types else "Treatment"
             return "Treatment"
 
-        # Ensure all samples in sample_order have mapping
+        # Ensure all samples in sample_order have mapping. The Group is now
+        # auto-derived (the manual Group column was removed) and refreshed every
+        # render so it tracks the selected efficacy type; it is metadata only —
+        # it feeds the Excel Summary grouping but never the ΔΔCt/stat maths.
         for sample in st.session_state.sample_order:
-            if sample not in st.session_state.sample_mapping:
-                st.session_state.sample_mapping[sample] = {
-                    "condition": sample,
-                    "group": _suggest_group(sample),
-                    "concentration": "",
-                    "include": True,
-                }
-            if "include" not in st.session_state.sample_mapping[sample]:
-                st.session_state.sample_mapping[sample]["include"] = True
+            entry = st.session_state.sample_mapping.get(sample)
+            if entry is None:
+                entry = {"condition": sample, "group": "Treatment",
+                         "concentration": "", "include": True}
+                st.session_state.sample_mapping[sample] = entry
+            entry.setdefault("include", True)
+            entry.setdefault("concentration", "")
+            entry["group"] = _suggest_group(sample)
 
-        # Header row matching column proportions below
-        hdr0, hdr_ord, hdr1, hdr2, hdr3 = st.columns([0.6, 0.5, 2, 3.5, 2.5])
+        st.caption(
+            "Choose which samples to include and name their conditions. "
+            "Samples sharing a condition name are treated as biological replicates."
+        )
+
+        # Header row (Group column removed — group is auto-derived now)
+        hdr0, hdr_ord, hdr1, hdr2 = st.columns([0.5, 0.4, 2.2, 4])
         hdr0.markdown("**Use**")
         hdr_ord.markdown("**#**")
         hdr1.markdown("**Original**")
-        hdr2.markdown("**Condition Name**")
-        hdr3.markdown("**Group**")
+        hdr2.markdown("**Condition name**")
 
-        # FIXED: Display ALL samples in sample_order (including excluded ones)
+        # Display ALL samples in current order (excluded ones shown dimmed)
         display_samples = st.session_state.sample_order.copy()
 
-        # Sample rows with improved spacing
         for i, sample in enumerate(display_samples):
             # FIX-04: Guard against samples not in mapping (desync protection)
             if sample not in st.session_state.sample_mapping:
                 continue
-            # Container for each row
-            with st.container():
-                col0, col_order, col1, col2, col3 = st.columns(
-                    [0.6, 0.5, 2, 3.5, 2.5]
+            # Per-sample keys (no list-index suffix) so reordering doesn't remount
+            # every row below the change point.
+            col0, col_order, col1, col2 = st.columns([0.5, 0.4, 2.2, 4])
+            with col0:
+                include = st.checkbox(
+                    "Include sample",
+                    value=st.session_state.sample_mapping[sample].get("include", True),
+                    key=f"include_{sample}",
+                    label_visibility="collapsed",
                 )
+                st.session_state.sample_mapping[sample]["include"] = include
+            with col_order:
+                st.markdown(
+                    f"<div style='text-align:center; padding-top:8px; "
+                    f"color:var(--ink-faint);'>{i + 1}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col1:
+                _dim = "" if include else "opacity:0.4;"
+                st.markdown(
+                    f"<div style='padding-top:8px; font-size:0.9rem; {_dim}'>{sample}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col2:
+                cond = st.text_input(
+                    "Condition",
+                    st.session_state.sample_mapping[sample]["condition"],
+                    key=f"cond_{sample}",
+                    label_visibility="collapsed",
+                    placeholder="Enter condition name...",
+                    max_chars=50,
+                )
+                st.session_state.sample_mapping[sample]["condition"] = cond
 
-                # Include checkbox
-                with col0:
-                    include = st.checkbox(
-                        "Include sample",
-                        value=st.session_state.sample_mapping[sample].get(
-                            "include", True
-                        ),
-                        key=f"include_{sample}_{i}",
-                        label_visibility="collapsed",
-                    )
-                    st.session_state.sample_mapping[sample]["include"] = include
+        # ---- Order (always available; reflects live into graphs and exports) ----
+        st.markdown("#### Order")
+        st.caption("Drag included samples to set the display order used in graphs and exports.")
 
-                # Order number
-                with col_order:
-                    st.markdown(
-                        f"<div style='text-align: center; padding-top: 10px;'><b>{i + 1}</b></div>",
-                        unsafe_allow_html=True,
-                    )
+        current_order = st.session_state.sample_order
+        included_order = [
+            s for s in current_order
+            if st.session_state.sample_mapping.get(s, {}).get("include", True)
+        ]
+        excluded_samples_list = [
+            s for s in current_order
+            if not st.session_state.sample_mapping.get(s, {}).get("include", True)
+        ]
 
-                # Original sample name (non-editable)
-                with col1:
-                    st.text_input(
-                        "Original",
-                        sample,
-                        key=f"orig_{sample}_{i}",
-                        disabled=True,
-                        label_visibility="collapsed",
-                    )
-
-                # Condition name (editable)
-                with col2:
-                    cond = st.text_input(
-                        "Condition",
-                        st.session_state.sample_mapping[sample]["condition"],
-                        key=f"cond_{sample}_{i}",
-                        label_visibility="collapsed",
-                        placeholder="Enter condition name...",
-                        max_chars=50,
-                    )
-                    st.session_state.sample_mapping[sample]["condition"] = cond
-
-                # Group selector
-                with col3:
-                    grp_idx = 0
-                    previous_group = st.session_state.sample_mapping[sample].get("group", "Treatment")
-                    try:
-                        grp_idx = group_types.index(previous_group)
-                    except (ValueError, KeyError):
-                        # FIX-08: Warn when group type resets due to efficacy change
-                        st.caption(f"⚠️ '{previous_group}' not available; reset to '{group_types[0]}'")
-                        st.session_state.sample_mapping[sample]["group"] = group_types[0]
-
-                    grp = st.selectbox(
-                        "Group",
-                        group_types,
-                        index=grp_idx,
-                        key=f"grp_{sample}_{i}",
-                        label_visibility="collapsed",
-                    )
-                    st.session_state.sample_mapping[sample]["group"] = grp
-
-                st.markdown("")
-
-        if st.button("Finalize Mapping", type="primary", use_container_width=True, key="finalize_mapping"):
-            st.session_state.mapping_finalized = True
-            st.session_state.analysis_stale = False
-            st.rerun()
-        st.caption("Lock in condition names and groups, then run analysis below.")
-
-        if st.session_state.get("mapping_finalized", False):
-            edit_col1, edit_col2 = st.columns([3, 1])
-            with edit_col2:
-                if st.button("✏️ Edit Mapping", key="edit_mapping", use_container_width=True):
-                    st.session_state.mapping_finalized = False
-                    st.session_state.analysis_stale = True
-                    st.rerun()
-            st.markdown("### 🔀 Drag to Reorder Samples")
-            st.caption("Drag included samples to set the display order for graphs and exports.")
-
-            current_order = st.session_state.sample_order
-            included_order = [
-                s for s in current_order
-                if st.session_state.sample_mapping.get(s, {}).get("include", True)
-            ]
-            excluded_samples_list = [
-                s for s in current_order
-                if not st.session_state.sample_mapping.get(s, {}).get("include", True)
-            ]
-
-            reorder_mode = st.radio(
-                "Reorder method",
-                ["Arrow buttons (fast)", "Drag-and-drop"],
-                horizontal=True,
-                key="reorder_mode",
-                label_visibility="collapsed",
+        if sort_items is None:
+            st.info(
+                "Drag-and-drop needs `streamlit-sortables` "
+                "(`pip install streamlit-sortables`); order falls back to natural sort."
             )
+        elif not included_order:
+            st.info("No included samples to order \u2014 include samples above first.")
+        else:
+            st.markdown(
+                "<style>.sortable-item{padding:6px 14px!important;margin:2px 0!important;"
+                "border-radius:8px!important;font-size:0.85rem!important;max-width:420px!important;}</style>",
+                unsafe_allow_html=True,
+            )
+            order_labels = []
+            label_to_sample = {}
+            for s_ in included_order:
+                cond = st.session_state.sample_mapping.get(s_, {}).get("condition", s_)
+                label = f"{cond}  ({s_})" if cond != s_ else s_
+                if label in label_to_sample:
+                    label = f"{cond}  ({s_}) #{included_order.index(s_) + 1}"
+                order_labels.append(label)
+                label_to_sample[label] = s_
 
-            if reorder_mode == "Arrow buttons (fast)":
-                for i, sample in enumerate(included_order):
-                    cond = st.session_state.sample_mapping.get(sample, {}).get("condition", sample)
-                    cond_short = cond if len(cond) <= 25 else cond[:22] + "..."
-                    sample_short = sample if len(sample) <= 20 else sample[:17] + "..."
-                    lbl = f"{cond_short}  ({sample_short})" if cond != sample else sample_short
-                    btn_cols = st.columns([0.5, 0.5, 5])
-                    with btn_cols[0]:
-                        if i > 0 and st.button("\u2191", key=f"up_{sample}", help="Move up"):
-                            included_order[i], included_order[i - 1] = included_order[i - 1], included_order[i]
-                            st.session_state.sample_order = included_order + excluded_samples_list
-                            st.rerun()
-                    with btn_cols[1]:
-                        if i < len(included_order) - 1 and st.button("\u2193", key=f"dn_{sample}", help="Move down"):
-                            included_order[i], included_order[i + 1] = included_order[i + 1], included_order[i]
-                            st.session_state.sample_order = included_order + excluded_samples_list
-                            st.rerun()
-                    with btn_cols[2]:
-                        st.markdown(f"<span style='font-size:0.9rem;'>{lbl}</span>", unsafe_allow_html=True)
-            elif sort_items is not None:
-                # Build unique labels: "Condition Name  (Original)" format
-                order_labels = []
-                label_to_sample = {}
-                for s in included_order:
-                    cond = st.session_state.sample_mapping.get(s, {}).get("condition", s)
-                    label = f"{cond}  ({s})" if cond != s else s
-                    if label in label_to_sample:
-                        label = f"{cond}  ({s}) #{included_order.index(s) + 1}"
-                    order_labels.append(label)
-                    label_to_sample[label] = s
+            col_drag, _col_spacer = st.columns([2, 3])
+            with col_drag:
+                sorted_labels = sort_items(items=order_labels, direction="vertical")
 
-                st.markdown("""
-                <style>
-                .sortable-item {
-                    padding: 6px 14px !important;
-                    margin: 2px 0 !important;
-                    border-radius: 8px !important;
-                    font-size: 0.85rem !important;
-                    max-width: 400px !important;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-
-                if not order_labels:
-                    st.info("No included samples to reorder. Include samples above first.")
-                    sorted_labels = []
-                else:
-                    col_drag, col_spacer = st.columns([2, 3])
-                    with col_drag:
-                        sorted_labels = sort_items(items=order_labels, direction="vertical")
-
-                new_included_order = [label_to_sample[lbl] for lbl in sorted_labels]
-                new_order = new_included_order + excluded_samples_list
-
-                if new_order != st.session_state.sample_order:
-                    st.session_state.sample_order = new_order
-            else:
-                st.warning(
-                    "Drag-and-drop requires `streamlit-sortables`. "
-                    "Install with: `pip install streamlit-sortables`"
-                )
+            new_order = [label_to_sample[lbl] for lbl in sorted_labels] + excluded_samples_list
+            if new_order != st.session_state.sample_order:
+                st.session_state.sample_order = new_order
+                st.rerun()
 
         # Update excluded_samples from include flags
         st.session_state.excluded_samples = set(
@@ -4184,38 +4147,8 @@ with tab2:
 
 # ==================== TAB 3: ANALYSIS ====================
 with tab3:
-    # Auto-rerun if exclusion state changed since last analysis
-    if (st.session_state.get('processed_data') and
-        '_exclusion_snapshot' in st.session_state and
-        '_last_ref_sample_key' in st.session_state):
-
-        current_snapshot = {
-            'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
-            'excluded_samples': sorted(st.session_state.get('excluded_samples', set())),
-            'ttest_type': st.session_state.get('ttest_type', 'welch')
-        }
-
-        if current_snapshot != st.session_state['_exclusion_snapshot']:
-            AnalysisEngine.run_full_analysis(
-                st.session_state['_last_ref_sample_key'],
-                st.session_state['_last_cmp_sample_key'],
-                st.session_state.get('_last_cmp_sample_key_2'),
-                st.session_state.get('_last_cmp_sample_key_3'),
-            )
-            st.info("Analysis auto-updated to reflect changes in QC exclusions or settings.")
-
-    if st.session_state.get("analysis_stale", False):
-        st.warning("⚠️ Mapping changed since last analysis. Results may be outdated.")
-        if st.button("Re-run Analysis", key="rerun_stale_analysis", type="primary"):
-            ref_key = st.session_state.get("_last_ref_sample_key")
-            cmp_key = st.session_state.get("_last_cmp_sample_key")
-            if ref_key and cmp_key:
-                ok = AnalysisEngine.run_full_analysis(ref_key, cmp_key,
-                    st.session_state.get("_last_cmp_sample_key_2"),
-                    st.session_state.get("_last_cmp_sample_key_3"))
-                if ok:
-                    st.session_state.analysis_stale = False
-                    st.rerun()
+    # Auto-rerun if QC exclusions, stat options, or the sample mapping changed.
+    maybe_autorun_analysis()
 
     render_step_indicator("analysis")
     st.header("Analysis Results")
@@ -4393,11 +4326,9 @@ with tab3:
 
 # ==================== TAB 4: GRAPHS ====================
 with tab4:
+    maybe_autorun_analysis()
     render_step_indicator("graphs")
     st.header("Individual Gene Graphs")
-
-    if st.session_state.get("analysis_stale", False):
-        st.warning("⚠️ Mapping changed since last analysis. Go to Analysis tab to re-run.")
 
     # Graph tab styles handled by global theme
 
@@ -5015,60 +4946,33 @@ with tab5:
     render_step_indicator("export")
     st.header("Export Results")
 
-    # Detect when settings have drifted from the snapshot taken during the last
-    # analysis run. If they have, the significance markers / fold changes in
-    # processed_data no longer reflect what the user currently has selected,
-    # and any Excel/PPT exported now will carry the stale values.
-    if st.session_state.get("processed_data") and "_exclusion_snapshot" in st.session_state:
-        _snap = st.session_state["_exclusion_snapshot"]
-        _cur = {
-            "excluded_wells": {
-                str(k): sorted(v)
-                for k, v in st.session_state.get("excluded_wells", {}).items()
-            },
-            "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
-            "ttest_type": st.session_state.get("ttest_type", "welch"),
-        }
-        if _cur != _snap:
-            st.warning(
-                "⚠️ Settings changed since the last analysis run "
-                "(QC exclusions, excluded samples, or t-test type). The exports "
-                "below still reflect the previous run. Open the **Analysis** tab "
-                "to auto-rerun, or click **Re-run Analysis** there before exporting."
-            )
-        if st.session_state.get("analysis_stale", False):
-            st.warning(
-                "⚠️ Sample mapping or comparison group changed since the last "
-                "analysis. Significance values may be outdated — re-run analysis "
-                "before exporting."
-            )
+    # Auto-rerun analysis if QC exclusions, stat options, or mapping changed,
+    # so exports never carry stale fold changes / significance markers.
+    maybe_autorun_analysis()
 
-        # Cross-check that the stored ref/cmp condition names still exist in the
-        # current mapping. If the user renamed a condition after running
-        # analysis, processed_data labels diverge from the mapping and exports
-        # will carry the old name.
+    # Defensive guard: if a condition was renamed after the last run, the stored
+    # analysis labels may not match the current mapping (normally clean post-rerun).
+    if st.session_state.get("processed_data"):
         _mapped_conditions = {
             (st.session_state.get("sample_mapping", {}) or {}).get(s, {}).get("condition", s)
             for s in (st.session_state.get("sample_mapping", {}) or {})
         }
-        _ref = st.session_state.get("analysis_ref_condition")
         _missing = [
             (_label, _val)
             for _label, _val in (
-                ("Reference", _ref),
+                ("Reference", st.session_state.get("analysis_ref_condition")),
                 ("Compare (*)", st.session_state.get("analysis_cmp_condition")),
                 ("Compare (#)", st.session_state.get("analysis_cmp_condition_2")),
-                ("Compare (†)", st.session_state.get("analysis_cmp_condition_3")),
+                ("Compare (\u2020)", st.session_state.get("analysis_cmp_condition_3")),
             )
             if _val and _mapped_conditions and _val not in _mapped_conditions
         ]
         if _missing:
             _items = ", ".join(f"{lbl}={v!r}" for lbl, v in _missing)
             st.warning(
-                f"⚠️ Some analysis comparison conditions are no longer present "
-                f"in the current sample mapping: {_items}. The exports will "
-                f"label charts with the old condition names. Re-run analysis "
-                f"so labels match the current mapping."
+                f"\u26a0\ufe0f Some analysis comparison conditions are no longer present "
+                f"in the current sample mapping: {_items}. Re-open the Mapping tab and "
+                f"re-run analysis so labels match."
             )
 
     if st.session_state.processed_data:
