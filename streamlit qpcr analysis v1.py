@@ -22,7 +22,7 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
 
-from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS
+from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS, EFFICACY_CONFIG
 from qpcr.export_utils import export_figure_to_bytes, build_zip
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
@@ -1065,134 +1065,8 @@ if "gene_display_names" not in st.session_state:
 
 
 # ==================== EFFICACY DATABASE ====================
-EFFICACY_CONFIG = {
-    "탄력": {
-        "genes": ["COL1A1", "ELN", "FBN-1", "FBN1"],
-        "cell": "HS68 fibroblast",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "TGFb",
-            "compare_to": "negative",
-        },
-        "description": "Elasticity - Non-treated vs TGFb (positive) vs Treatments",
-    },
-    "항노화": {
-        "genes": ["COL1A1", "COL1", "MMP-1", "MMP1"],
-        "cell": "HS68 fibroblast",
-        "controls": {
-            "baseline": "Non-treated (No UV)",
-            "negative": "UVB only",
-            "positive": "UVB+TGFb",
-            "compare_to": "negative",
-        },
-        "description": "Anti-aging - COL1↑ (recovery), MMP1↓ (inhibition) after UVB damage",
-        "expected_direction": {
-            "COL1A1": "up",
-            "COL1": "up",
-            "MMP-1": "down",
-            "MMP1": "down",
-        },
-    },
-    "보습": {
-        "genes": ["AQP3", "HAS3"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Retinoic acid",
-            "compare_to": "negative",
-        },
-        "description": "Hydration - Non-treated vs Retinoic acid (positive) vs Treatments",
-    },
-    "장벽": {
-        "genes": ["FLG", "CLDN", "IVL"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Retinoic acid",
-            "compare_to": "negative",
-        },
-        "description": "Barrier function - Non-treated vs Retinoic acid (positive) vs Treatments",
-    },
-    "표피증식": {
-        "genes": ["KI67", "PCNA"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "TGFb or FBS",
-            "compare_to": "negative",
-        },
-        "description": "Proliferation - Non-treated vs TGFb/FBS (positive) vs Treatments",
-    },
-    "멜라닌억제": {
-        "genes": ["MITF", "TYR", "Melanin"],
-        "cell": "B16F10 melanocyte",
-        "controls": {
-            "baseline": "Non-treated",
-            "negative": "α-MSH only",
-            "positive": "α-MSH+Arbutin",
-            "compare_to": "negative",
-        },
-        "description": "Melanin inhibition - α-MSH induced vs α-MSH+Arbutin (positive) vs α-MSH+Treatments",
-        "expected_direction": {"MITF": "down", "TYR": "down", "Melanin": "down"},
-    },
-    "진정": {
-        "genes": ["IL1B", "IL-1β", "IL6", "TNFA", "TNFα"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "baseline": "Non-treated",
-            "negative": "IL4+PolyIC (Inflammation)",
-            "positive": "Inflammation+Dexamethasone",
-            "compare_to": "negative",
-        },
-        "description": "Anti-inflammation - Reduce IL1β/IL6/TNFα (all should decrease)",
-        "expected_direction": {
-            "IL1B": "down",
-            "IL-1β": "down",
-            "IL6": "down",
-            "TNFA": "down",
-            "TNFα": "down",
-        },
-    },
-    "지질억제": {
-        "genes": ["SREBPA", "SREBPa", "SREBPC", "SREBPc", "PPARY", "PPARy"],
-        "cell": "SZ95 sebocyte",
-        "controls": {
-            "baseline": "Non-treated",
-            "negative": "IGF only",
-            "positive": "IGF+Reference inhibitor",
-            "compare_to": "negative",
-        },
-        "description": "Sebum inhibition - IGF induced vs IGF+Treatments",
-        "expected_direction": {
-            "SREBPA": "down",
-            "SREBPa": "down",
-            "SREBPC": "down",
-            "SREBPc": "down",
-            "PPARY": "down",
-            "PPARy": "down",
-        },
-    },
-    "냉감": {
-        "genes": ["TRPM8", "CIRBP"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Menthol",
-            "compare_to": "negative",
-        },
-        "description": "Cooling effect - Non-treated vs Menthol (positive) vs Treatments",
-    },
-    "모근 강화": {
-        "genes": ["VEGF", "COL17A1", "HGF", "FGF7", "FLG"],
-        "cell": "HFDPC / HaCaT",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Minoxidil",
-            "compare_to": "negative",
-        },
-        "description": "Hair root strengthening - VEGF, COL17A1, HGF, FGF7, FLG expression",
-    },
-}
+# EFFICACY_CONFIG is imported from qpcr.constants (single source of truth,
+# derived from 효능평가항목_update.xlsx). Do not redefine it here.
 
 
 # ==================== ANALYSIS CONSTANTS ====================
@@ -4032,7 +3906,6 @@ with tab2:
         st.session_state.selected_efficacy = efficacy
 
         config = EFFICACY_CONFIG[efficacy]
-        st.info(f"**{config['description']}**")
         st.caption(f"Cell line: {config['cell']} | Genes: {', '.join(config['genes'])}")
 
         # Show control structure
