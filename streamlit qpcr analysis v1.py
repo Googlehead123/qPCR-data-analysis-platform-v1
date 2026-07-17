@@ -22,7 +22,7 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
 
-from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS
+from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS, EFFICACY_CONFIG
 from qpcr.export_utils import export_figure_to_bytes, build_zip
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
@@ -58,7 +58,11 @@ def render_step_indicator(current_step: str):
     has_data = st.session_state.get("data") is not None
     has_analysis = bool(st.session_state.get("processed_data"))
     has_graphs = bool(st.session_state.get("graphs"))
-    mapping_done = st.session_state.get("mapping_finalized", False)
+    # Mapping no longer has an explicit "Finalize" step — it's "done" once the
+    # user has engaged the tab (efficacy auto-selected there) with samples mapped.
+    mapping_done = bool(st.session_state.get("selected_efficacy")) and bool(
+        st.session_state.get("sample_mapping")
+    )
 
     qc_done = has_data and (
         sum(len(v) for v in st.session_state.get("excluded_wells", {}).values()) > 0
@@ -104,7 +108,8 @@ def render_sidebar_rail():
         "qc": st.session_state.get("qc_reviewed", False) or (
             has_data and sum(len(v) for v in st.session_state.get("excluded_wells", {}).values()) > 0
         ),
-        "mapping": st.session_state.get("mapping_finalized", False),
+        "mapping": bool(st.session_state.get("selected_efficacy"))
+        and bool(st.session_state.get("sample_mapping")),
         "analysis": bool(st.session_state.get("processed_data")),
         "graphs": bool(st.session_state.get("graphs")),
         "export": bool(st.session_state.get("graphs")),
@@ -270,6 +275,437 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     return recs
 
 
+def apply_auto_qc(threshold: float = None) -> None:
+    """Run automatic best-2-of-3 replicate QC and store exclusions + audit.
+
+    Triplicates within the SD threshold keep all replicates; those above are
+    trimmed to their best 2 (closest CTs); triplicates that still exceed the
+    threshold keep their best 2 and are flagged 'unresolved'. This is applied
+    automatically on upload (so the user can go straight to mapping) and re-run
+    when the threshold changes. It replaces the auto-decided exclusions wholesale
+    — a threshold change is a clean re-evaluation; per-well/audit overrides made
+    afterwards persist until the threshold changes again.
+    """
+    data = st.session_state.get("data")
+    if data is None or getattr(data, "empty", True):
+        return
+    if threshold is None:
+        threshold = st.session_state.get("qc_sd_threshold", 0.3)
+    threshold = float(threshold)
+    exclusions, audit = QualityControl.auto_select_replicates(data, sd_threshold=threshold)
+    st.session_state.excluded_wells = {k: set(v) for k, v in exclusions.items()}
+    st.session_state.auto_qc_audit = audit
+    st.session_state.qc_sd_threshold = threshold
+
+
+def _analysis_state_snapshot() -> dict:
+    """Signature of everything that should trigger an analysis re-run: QC
+    exclusions, stat options, and the sample mapping (condition names + include
+    flags). Order is deliberately excluded — reordering only changes display,
+    which graphs/exports read live from sample_order without a re-run."""
+    m = st.session_state.get("sample_mapping", {})
+    return {
+        "excluded_wells": {
+            str(k): sorted(v) for k, v in st.session_state.get("excluded_wells", {}).items()
+        },
+        "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
+        "ttest_type": st.session_state.get("ttest_type", "welch"),
+        "mapping": {
+            s: (v.get("condition", s), bool(v.get("include", True)))
+            for s, v in sorted(m.items())
+        },
+    }
+
+
+def maybe_autorun_analysis() -> None:
+    """Re-run analysis automatically when QC exclusions, stat options, or the
+    sample mapping change since the last run. Unifies the previously separate
+    QC-drift (auto) and mapping-change (manual button) paths into one signal."""
+    if not (
+        st.session_state.get("processed_data")
+        and "_exclusion_snapshot" in st.session_state
+        and "_last_ref_sample_key" in st.session_state
+    ):
+        return
+    if _analysis_state_snapshot() != st.session_state["_exclusion_snapshot"]:
+        ok = AnalysisEngine.run_full_analysis(
+            st.session_state["_last_ref_sample_key"],
+            st.session_state["_last_cmp_sample_key"],
+            st.session_state.get("_last_cmp_sample_key_2"),
+            st.session_state.get("_last_cmp_sample_key_3"),
+        )
+        if ok:
+            st.session_state.analysis_stale = False
+            st.info("Analysis auto-updated to reflect changes in QC, mapping, or settings.")
+
+
+def _ensure_bar_settings(gene, gene_data) -> None:
+    """Initialise per-bar settings for a gene (color + per-symbol sig + error)."""
+    key = f"{gene}_bar_settings"
+    store = st.session_state.setdefault(key, {})
+    for _, row in gene_data.iterrows():
+        bk = f"{gene}_{row['Condition']}"
+        bs = store.setdefault(bk, {
+            "color": "#FFFFFF", "show_sig": True, "show_sig_1": True,
+            "show_sig_2": True, "show_sig_3": True, "show_err": True,
+        })
+        for sk in ("show_sig_1", "show_sig_2", "show_sig_3"):
+            bs.setdefault(sk, bs.get("show_sig", True))
+
+
+def resolve_gene_settings(gene: str) -> dict:
+    """Fold a gene's per-gene overrides onto the global graph_settings.
+
+    Single source of truth for the settings dict passed to
+    GraphGenerator.create_gene_graph — previously duplicated between the main
+    chart and the (removed) quick-view block.
+    """
+    gs = st.session_state.graph_settings
+    cs = gs.copy()
+    cs["show_significance"] = gs.get(f"{gene}_show_sig", True)
+    cs["show_error"] = gs.get(f"{gene}_show_err", True)
+    cs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.45)
+    cs["figure_width"] = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
+    cs["figure_height"] = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
+    cs["font_size"] = gs.get(f"{gene}_font_size", gs.get("font_size", 14))
+    cs["bar_opacity"] = gs.get(f"{gene}_bar_opacity", gs.get("bar_opacity", 0.85))
+    cs["marker_line_width"] = gs.get(f"{gene}_marker_line_width", gs.get("marker_line_width", 1))
+    cs["y_min"] = gs.get(f"{gene}_y_min")
+    cs["y_max"] = gs.get(f"{gene}_y_max")
+    cs["label_mode"] = gs.get(f"{gene}_label_mode", "Auto-wrap")
+    cs["error_bar_mode"] = gs.get("error_bar_mode", "livak_sd")
+    cs["show_n"] = gs.get("show_n", False)
+    cs["y_log_scale"] = gs.get(f"{gene}_y_log", gs.get("y_log_scale", False))
+    cs["show_legend"] = gs.get("show_legend", False)
+    return cs
+
+
+def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
+    """Build a Plotly figure for one gene from its resolved settings."""
+    cs = resolve_gene_settings(gene)
+    ref_condition = st.session_state.graph_settings.get(f"{gene}_ref_line", "None")
+    ref_val = ref_lbl = None
+    if ref_condition and ref_condition != "None":
+        rr = gene_data[gene_data["Condition"] == ref_condition]
+        if not rr.empty and pd.notna(rr["Relative_Expression"].values[0]):
+            ref_val = rr["Relative_Expression"].values[0]
+            ref_lbl = f"{ref_condition}: {ref_val:.2f}"
+    replicate_df = None
+    show_dp = st.session_state.graph_settings.get(f"{gene}_show_data_points", False)
+    if show_dp:
+        raw = st.session_state.get("data")
+        hk = st.session_state.get("hk_gene")
+        ref = st.session_state.get("analysis_ref_condition")
+        mapping = st.session_state.get("sample_mapping", {})
+        excl = st.session_state.get("excluded_wells", set())
+        if raw is not None and hk and ref:
+            reps = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
+            replicate_df = reps[reps["Target"] == gene]
+    return GraphGenerator.create_gene_graph(
+        gene_data, gene, cs, efficacy_config,
+        sample_order=st.session_state.get("sample_order"),
+        display_gene_name=st.session_state.gene_display_names.get(gene, gene),
+        ref_line_value=ref_val, ref_line_label=ref_lbl,
+        show_data_points=show_dp, replicate_data=replicate_df,
+        color_preset=st.session_state.graph_settings.get(f"{gene}_color_preset", "Classic"),
+        ref_condition=st.session_state.get("analysis_ref_condition"),
+    )
+
+
+def build_all_figures(gene_list, efficacy_config: dict) -> None:
+    """Populate st.session_state.graphs for EVERY gene, off-screen (no render).
+
+    Replaces the old 'All Gene Graphs (Quick View)' side effect so that exports
+    (Excel/PPT/images/bundle) always reflect full per-gene styling — even for
+    genes the user never opened — without rendering N charts on screen.
+    """
+    graphs = st.session_state.setdefault("graphs", {})
+    for gene in gene_list:
+        gd = st.session_state.processed_data.get(gene)
+        if gd is None or gd.empty:
+            continue
+        _ensure_bar_settings(gene, gd)
+        try:
+            graphs[gene] = build_gene_figure(gene, gd, efficacy_config)
+        except Exception:
+            # A single gene failing to render must not break the tab or exports.
+            pass
+
+
+def _render_per_bar_table(current_gene, gene_data):
+    """Per-condition color + significance/error toggles for one gene.
+
+    Preserves the preset-vs-custom color sync (a preset switch updates the
+    displayed color; a manual pick flips the gene to 'Custom')."""
+    gs = st.session_state.graph_settings
+    gs.setdefault("bar_colors_per_sample", {})
+    store = st.session_state[f"{current_gene}_bar_settings"]
+
+    # Sort to match the chart's bar order (sample_order -> condition)
+    disp = gene_data.copy()
+    _so = st.session_state.get("sample_order", [])
+    _sm = st.session_state.get("sample_mapping", {})
+    if _so and _sm:
+        order, seen = [], set()
+        for _s in _so:
+            if _sm.get(_s, {}).get("include", True):
+                _c = _sm.get(_s, {}).get("condition", _s)
+                if _c in disp["Condition"].values and _c not in seen:
+                    order.append(_c); seen.add(_c)
+        for _c in disp["Condition"].unique():
+            if _c not in seen:
+                order.append(_c)
+        disp["Condition"] = pd.Categorical(disp["Condition"], categories=order, ordered=True)
+        disp = disp.sort_values("Condition").reset_index(drop=True)
+
+    hdr = st.columns([3, 0.8, 2.5])
+    hdr[0].markdown("<small>**Condition**</small>", unsafe_allow_html=True)
+    hdr[1].markdown("<small>**Color**</small>", unsafe_allow_html=True)
+    with hdr[2]:
+        _oh = st.columns(4)
+        for _hi, _hlbl in enumerate([
+            "<small>**✱**<br><span style='color:#888'>Sig.1</span></small>",
+            "<small>**#**<br><span style='color:#888'>Sig.2</span></small>",
+            "<small>**†**<br><span style='color:#888'>Sig.3</span></small>",
+            "<small>**±**<br><span style='color:#888'>Err</span></small>",
+        ]):
+            _oh[_hi].markdown(_hlbl, unsafe_allow_html=True)
+
+    option_labels = ["✱", "#", "†", "±"]
+    option_keys = ["show_sig_1", "show_sig_2", "show_sig_3", "show_err"]
+
+    for _, row in disp.iterrows():
+        condition = row["Condition"]
+        group = row.get("Group", "Treatment")
+        bar_key = f"{current_gene}_{condition}"
+        bs = store[bar_key]
+
+        rc = st.columns([3, 0.8, 2.5])
+        lbl = condition if len(condition) <= 22 else condition[:19] + "..."
+        rc[0].markdown(
+            f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
+            unsafe_allow_html=True,
+        )
+        _active_pn = gs.get(f"{current_gene}_color_preset", "Classic")
+        _cp_key = f"cp_{current_gene}_{condition}"
+        _desired_key = f"_desired_{_cp_key}"
+        if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
+            _preset = GRAPH_PRESETS[_active_pn]
+            _is_ref = (condition == st.session_state.get("analysis_ref_condition"))
+            _display_color = _preset["ref"] if _is_ref else _preset["color"]
+            if st.session_state.get(_desired_key) != _display_color:
+                st.session_state[_cp_key] = _display_color
+                st.session_state[_desired_key] = _display_color
+        else:
+            _display_color = gs.get("bar_colors_per_sample", {}).get(bar_key, bs.get("color", "#FFFFFF"))
+
+        new_color = rc[1].color_picker("c", _display_color, key=_cp_key, label_visibility="collapsed")
+
+        if _active_pn != "Custom":
+            if new_color != _display_color:
+                gs[f"{current_gene}_color_preset"] = "Custom"
+                st.session_state[_desired_key] = new_color
+                bs["color"] = new_color
+                gs.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
+            else:
+                bs["color"] = _display_color
+                gs.setdefault("bar_colors_per_sample", {})[bar_key] = _display_color
+        else:
+            st.session_state[_desired_key] = new_color
+            bs["color"] = new_color
+            gs.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
+
+        with rc[2]:
+            oc = st.columns(4)
+            for oi, (ol, ok) in enumerate(zip(option_labels, option_keys)):
+                bs[ok] = oc[oi].checkbox(
+                    ol, bs.get(ok, True),
+                    key=f"{ok}_{current_gene}_{condition}",
+                    label_visibility="collapsed",
+                )
+        bs["show_sig"] = bs["show_sig_1"] or bs["show_sig_2"] or bs["show_sig_3"]
+
+
+@st.fragment
+def render_gene_editor(current_gene):
+    """Per-gene live editor: tabbed controls over a chart that updates in place.
+    A Streamlit fragment, so a control change reruns only this block, not the
+    whole app."""
+    efficacy_config = EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {})
+    gene_data = st.session_state.processed_data[current_gene]
+    gs = st.session_state.graph_settings
+
+    gs.setdefault(f"{current_gene}_show_sig", True)
+    gs.setdefault(f"{current_gene}_show_err", True)
+    gs.setdefault(f"{current_gene}_bar_gap", 0.45)
+    gs.setdefault(f"{current_gene}_color_preset", "Classic")
+    gs.setdefault(f"{current_gene}_show_data_points", False)
+    gs.setdefault(f"{current_gene}_label_mode", "Auto-wrap")
+    ref_options = ["None"] + gene_data["Condition"].tolist()
+    if gs.get(f"{current_gene}_ref_line", "None") not in ref_options:
+        gs[f"{current_gene}_ref_line"] = "None"
+    _ensure_bar_settings(current_gene, gene_data)
+
+    label_modes = ["Auto-wrap", "Angled 45°", "Angled 90°", "Horizontal"]
+    _EB_LABELS = {"Livak ±SD": "livak_sd", "95% CI": "ci95", "SEM": "sem", "SD": "sd"}
+
+    t_style, t_labels, t_colors, t_axis, t_stats = st.tabs(
+        ["Style", "Labels", "Colors", "Axis", "Stats"])
+
+    with t_style:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            preset_names = list(GRAPH_PRESETS.keys()) + ["Custom"]
+            cur = gs.get(f"{current_gene}_color_preset", "Classic")
+            if cur not in preset_names:
+                cur = "Custom"
+            gs[f"{current_gene}_color_preset"] = st.selectbox(
+                "Color preset", preset_names, index=preset_names.index(cur),
+                key=f"preset_{current_gene}")
+            gs[f"{current_gene}_bar_opacity"] = st.slider(
+                "Bar opacity", 0.3, 1.0,
+                value=float(gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.85))),
+                step=0.05, key=f"bo_{current_gene}")
+        with c2:
+            gs[f"{current_gene}_bar_gap"] = st.select_slider(
+                "Bar gap", options=[round(x * 0.05, 2) for x in range(2, 21)],
+                value=gs.get(f"{current_gene}_bar_gap", 0.45), key=f"gap_sl_{current_gene}")
+            gs[f"{current_gene}_marker_line_width"] = st.slider(
+                "Outline width", 0, 3,
+                value=int(gs.get(f"{current_gene}_marker_line_width", gs.get("marker_line_width", 1))),
+                key=f"ow_{current_gene}")
+        with c3:
+            gs[f"{current_gene}_bg_color"] = st.color_picker(
+                "Background",
+                gs.get(f"{current_gene}_bg_color", gs.get("plot_bgcolor", "#FFFFFF")),
+                key=f"bg_{current_gene}")
+            size_names = list(FIGURE_SIZE_PRESETS.keys()) + ["Custom"]
+            spk = f"{current_gene}_size_preset"
+            gs.setdefault(spk, "PPT Full")
+            cur_sp = gs.get(spk, "PPT Full")
+            if cur_sp not in size_names:
+                cur_sp = "Custom"
+            sel_sp = st.selectbox("Size preset", size_names, index=size_names.index(cur_sp),
+                key=f"size_preset_{current_gene}")
+            prev_sp = gs.get(spk, "PPT Full")
+            if sel_sp != "Custom" and sel_sp in FIGURE_SIZE_PRESETS:
+                gs[f"{current_gene}_figure_width"] = FIGURE_SIZE_PRESETS[sel_sp]["width"]
+                gs[f"{current_gene}_figure_height"] = FIGURE_SIZE_PRESETS[sel_sp]["height"]
+            gs[spk] = sel_sp
+            if sel_sp != prev_sp:
+                st.rerun(scope="fragment")
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            fw = st.slider("Width (cm)", 10.0, 40.0,
+                value=float(gs.get(f"{current_gene}_figure_width", gs.get("figure_width", 28))),
+                step=0.5, key=f"fig_w_{current_gene}")
+        with sc2:
+            fh = st.slider("Height (cm)", 6.0, 25.0,
+                value=float(gs.get(f"{current_gene}_figure_height", gs.get("figure_height", 16))),
+                step=0.5, key=f"fig_h_{current_gene}")
+        gs[f"{current_gene}_figure_width"] = fw
+        gs[f"{current_gene}_figure_height"] = fh
+        if sel_sp != "Custom" and sel_sp in FIGURE_SIZE_PRESETS:
+            p = FIGURE_SIZE_PRESETS[sel_sp]
+            if fw != p["width"] or fh != p["height"]:
+                gs[spk] = "Custom"
+        if st.button("Reset this gene", key=f"reset_all_{current_gene}"):
+            st.session_state.pop(f"{current_gene}_bar_settings", None)
+            for k in [f"{current_gene}_show_sig", f"{current_gene}_show_err",
+                      f"{current_gene}_bar_gap", f"{current_gene}_show_data_points",
+                      f"{current_gene}_color_preset", f"{current_gene}_size_preset",
+                      f"{current_gene}_figure_width", f"{current_gene}_figure_height",
+                      f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
+                      f"{current_gene}_marker_line_width", f"{current_gene}_tick_size",
+                      f"{current_gene}_ylabel_size", f"{current_gene}_bg_color",
+                      f"{current_gene}_y_min", f"{current_gene}_y_max",
+                      f"{current_gene}_label_mode", f"{current_gene}_y_log",
+                      f"{current_gene}_ref_line"]:
+                gs.pop(k, None)
+            st.rerun(scope="fragment")
+
+    with t_labels:
+        c1, c2 = st.columns(2)
+        with c1:
+            gene_display = st.text_input("Gene display name",
+                value=st.session_state.gene_display_names.get(current_gene, current_gene),
+                key=f"gene_display_{current_gene}", placeholder=current_gene)
+            gds = (gene_display.strip() if gene_display else "")[:50]
+            if gds and gds != current_gene:
+                st.session_state.gene_display_names[current_gene] = gds
+            elif current_gene in st.session_state.gene_display_names:
+                del st.session_state.gene_display_names[current_gene]
+            gs[f"{current_gene}_label_mode"] = st.selectbox("X-label mode", label_modes,
+                index=label_modes.index(gs.get(f"{current_gene}_label_mode", "Auto-wrap")),
+                key=f"lbl_mode_{current_gene}",
+                help="How x-axis labels handle long text")
+            gs[f"{current_gene}_ref_line"] = st.selectbox("Reference line", ref_options,
+                index=ref_options.index(gs.get(f"{current_gene}_ref_line", "None")),
+                key=f"ref_sel_{current_gene}",
+                help="Horizontal dashed line at a condition's expression level")
+        with c2:
+            gs[f"{current_gene}_font_size"] = st.slider("Global font", 8, 28,
+                value=gs.get(f"{current_gene}_font_size", gs.get("font_size", 14)),
+                key=f"gf_{current_gene}")
+            gs[f"{current_gene}_tick_size"] = st.slider("X-tick labels", 8, 24,
+                value=gs.get(f"{current_gene}_tick_size", 12), key=f"ts_{current_gene}")
+            gs[f"{current_gene}_ylabel_size"] = st.slider("Y-axis label", 8, 24,
+                value=gs.get(f"{current_gene}_ylabel_size", 14), key=f"ys_{current_gene}")
+
+    with t_colors:
+        _render_per_bar_table(current_gene, gene_data)
+
+    with t_axis:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ymin = st.number_input("Y-axis min", value=gs.get(f"{current_gene}_y_min"),
+                placeholder="Auto", key=f"ymin_{current_gene}", help="Empty = auto range")
+        with c2:
+            ymax = st.number_input("Y-axis max", value=gs.get(f"{current_gene}_y_max"),
+                placeholder="Auto", key=f"ymax_{current_gene}", help="Empty = auto range")
+        with c3:
+            gs[f"{current_gene}_y_log"] = st.toggle("Log y-axis",
+                value=gs.get(f"{current_gene}_y_log", False), key=f"ylog_{current_gene}",
+                help="Log-scale the expression axis")
+        if ymin is not None and ymax is not None and ymax > 0 and ymin >= ymax:
+            st.warning("Y-axis min must be less than max. Using auto range.")
+            ymin = ymax = None
+        if ymin is not None:
+            gs[f"{current_gene}_y_min"] = ymin
+        else:
+            gs.pop(f"{current_gene}_y_min", None)
+        if ymax is not None:
+            gs[f"{current_gene}_y_max"] = ymax
+        else:
+            gs.pop(f"{current_gene}_y_max", None)
+
+    with t_stats:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            gs[f"{current_gene}_show_sig"] = st.toggle("Significance */#/†",
+                gs.get(f"{current_gene}_show_sig", True), key=f"tgl_sig_{current_gene}")
+            gs[f"{current_gene}_show_err"] = st.toggle("Error bars",
+                gs.get(f"{current_gene}_show_err", True), key=f"tgl_err_{current_gene}")
+        with c2:
+            gs[f"{current_gene}_show_data_points"] = st.toggle("Data points",
+                gs.get(f"{current_gene}_show_data_points", False), key=f"tgl_dp_{current_gene}")
+            gs["show_legend"] = st.toggle("Legend", value=gs.get("show_legend", False),
+                key="show_legend_global", help="Show the trace legend")
+        with c3:
+            _cur_mode = gs.get("error_bar_mode", "livak_sd")
+            _cur_label = next((k for k, v in _EB_LABELS.items() if v == _cur_mode), "Livak ±SD")
+            _eb = st.selectbox("Error bar type", list(_EB_LABELS.keys()),
+                index=list(_EB_LABELS.keys()).index(_cur_label), key="eb_mode_global",
+                help="Livak ±SD (fold-change domain) · 95% CI · SEM/SD (Ct domain). Applies to all genes.")
+            gs["error_bar_mode"] = _EB_LABELS[_eb]
+            gs["show_n"] = st.toggle("Show n=", value=gs.get("show_n", False),
+                key="show_n_global", help="Annotate each bar with its replicate count")
+
+    fig = build_gene_figure(current_gene, gene_data, efficacy_config)
+    st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
+    st.session_state.graphs[current_gene] = fig
+
+
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="qPCR Analysis Suite",
@@ -281,7 +717,7 @@ st.set_page_config(
 # ==================== GLOBAL THEME (Cosmax-branded) ====================
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css');
 
     :root {
         --cosmax-red: #EA1D22;
@@ -297,12 +733,20 @@ st.markdown("""
         --frost: #c1c6c7;
         --radius: 12px;
         --radius-sm: 8px;
+        /* spacing scale (4·8·12·16·24·32) */
+        --sp-1: 4px; --sp-2: 8px; --sp-3: 12px;
+        --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+        /* type scale */
+        --fs-h1: 1.9rem; --fs-h2: 1.4rem; --fs-h3: 1.12rem;
+        --fs-body: 0.9rem; --fs-label: 0.85rem; --fs-caption: 0.78rem;
     }
 
-    /* Base typography — Inter for latin, Korean fallbacks for efficacy labels */
+    /* Base typography — Pretendard covers Latin + Hangul (efficacy labels 탄력/항노화…);
+       system Korean faces as graceful fallback if the CDN is unreachable. */
     html, body, [class*="css"] {
-        font-family: 'Inter', 'Pretendard', 'Noto Sans KR', -apple-system,
-                     BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+        font-family: 'Pretendard', 'Pretendard Variable', -apple-system,
+                     BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic',
+                     'Noto Sans KR', 'Segoe UI', sans-serif;
     }
 
     /* Clean headers with a subtle red tick under h1 */
@@ -396,6 +840,22 @@ st.markdown("""
 
     /* Dataframes */
     [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: var(--radius-sm); }
+
+    /* Tabular numerals — Ct / fold-change / p-values align in columns */
+    [data-testid="stMetricValue"],
+    [data-testid="stDataFrame"], [data-testid="stTable"],
+    [data-testid="stNumberInput"] input,
+    [data-testid="stDataEditor"] {
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+    }
+
+    /* Reusable card surface for grouped sections (QC audit, mapping, graph panel) */
+    .cx-card {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: var(--sp-4); margin-bottom: var(--sp-3);
+    }
+    .cx-card-muted { background: var(--lab-white); }
 
     /* Input labels */
     [data-testid="stSelectbox"] label,
@@ -603,138 +1063,10 @@ if "analysis_stale" not in st.session_state:
 if "gene_display_names" not in st.session_state:
     st.session_state.gene_display_names = {}
 
-if "experiment_desc" not in st.session_state:
-    st.session_state.experiment_desc = {"concentration": "1 ppm", "treatment_time": "24 h"}
 
 # ==================== EFFICACY DATABASE ====================
-EFFICACY_CONFIG = {
-    "탄력": {
-        "genes": ["COL1A1", "ELN", "FBN-1", "FBN1"],
-        "cell": "HS68 fibroblast",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "TGFb",
-            "compare_to": "negative",
-        },
-        "description": "Elasticity - Non-treated vs TGFb (positive) vs Treatments",
-    },
-    "항노화": {
-        "genes": ["COL1A1", "COL1", "MMP-1", "MMP1"],
-        "cell": "HS68 fibroblast",
-        "controls": {
-            "baseline": "Non-treated (No UV)",
-            "negative": "UVB only",
-            "positive": "UVB+TGFb",
-            "compare_to": "negative",
-        },
-        "description": "Anti-aging - COL1↑ (recovery), MMP1↓ (inhibition) after UVB damage",
-        "expected_direction": {
-            "COL1A1": "up",
-            "COL1": "up",
-            "MMP-1": "down",
-            "MMP1": "down",
-        },
-    },
-    "보습": {
-        "genes": ["AQP3", "HAS3"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Retinoic acid",
-            "compare_to": "negative",
-        },
-        "description": "Hydration - Non-treated vs Retinoic acid (positive) vs Treatments",
-    },
-    "장벽": {
-        "genes": ["FLG", "CLDN", "IVL"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Retinoic acid",
-            "compare_to": "negative",
-        },
-        "description": "Barrier function - Non-treated vs Retinoic acid (positive) vs Treatments",
-    },
-    "표피증식": {
-        "genes": ["KI67", "PCNA"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "TGFb or FBS",
-            "compare_to": "negative",
-        },
-        "description": "Proliferation - Non-treated vs TGFb/FBS (positive) vs Treatments",
-    },
-    "멜라닌억제": {
-        "genes": ["MITF", "TYR", "Melanin"],
-        "cell": "B16F10 melanocyte",
-        "controls": {
-            "baseline": "Non-treated",
-            "negative": "α-MSH only",
-            "positive": "α-MSH+Arbutin",
-            "compare_to": "negative",
-        },
-        "description": "Melanin inhibition - α-MSH induced vs α-MSH+Arbutin (positive) vs α-MSH+Treatments",
-        "expected_direction": {"MITF": "down", "TYR": "down", "Melanin": "down"},
-    },
-    "진정": {
-        "genes": ["IL1B", "IL-1β", "IL6", "TNFA", "TNFα"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "baseline": "Non-treated",
-            "negative": "IL4+PolyIC (Inflammation)",
-            "positive": "Inflammation+Dexamethasone",
-            "compare_to": "negative",
-        },
-        "description": "Anti-inflammation - Reduce IL1β/IL6/TNFα (all should decrease)",
-        "expected_direction": {
-            "IL1B": "down",
-            "IL-1β": "down",
-            "IL6": "down",
-            "TNFA": "down",
-            "TNFα": "down",
-        },
-    },
-    "지질억제": {
-        "genes": ["SREBPA", "SREBPa", "SREBPC", "SREBPc", "PPARY", "PPARy"],
-        "cell": "SZ95 sebocyte",
-        "controls": {
-            "baseline": "Non-treated",
-            "negative": "IGF only",
-            "positive": "IGF+Reference inhibitor",
-            "compare_to": "negative",
-        },
-        "description": "Sebum inhibition - IGF induced vs IGF+Treatments",
-        "expected_direction": {
-            "SREBPA": "down",
-            "SREBPa": "down",
-            "SREBPC": "down",
-            "SREBPc": "down",
-            "PPARY": "down",
-            "PPARy": "down",
-        },
-    },
-    "냉감": {
-        "genes": ["TRPM8", "CIRBP"],
-        "cell": "HaCaT keratinocyte",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Menthol",
-            "compare_to": "negative",
-        },
-        "description": "Cooling effect - Non-treated vs Menthol (positive) vs Treatments",
-    },
-    "모근 강화": {
-        "genes": ["VEGF", "COL17A1", "HGF", "FGF7", "FLG"],
-        "cell": "HFDPC / HaCaT",
-        "controls": {
-            "negative": "Non-treated",
-            "positive": "Minoxidil",
-            "compare_to": "negative",
-        },
-        "description": "Hair root strengthening - VEGF, COL17A1, HGF, FGF7, FLG expression",
-    },
-}
+# EFFICACY_CONFIG is imported from qpcr.constants (single source of truth,
+# derived from 효능평가항목_update.xlsx). Do not redefine it here.
 
 
 # ==================== ANALYSIS CONSTANTS ====================
@@ -1020,12 +1352,9 @@ class AnalysisEngine(_CoreAnalysisEngine):
                 # new analysis (and the new rename map) instead of the prior run.
                 st.session_state.pop("_ppt_export", None)
 
-                # Store exclusion snapshot for auto-rerun detection
-                st.session_state['_exclusion_snapshot'] = {
-                    'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
-                    'excluded_samples': sorted(st.session_state.get('excluded_samples', set())),
-                    'ttest_type': st.session_state.get('ttest_type', 'welch')
-                }
+                # Store state snapshot for auto-rerun detection (QC exclusions,
+                # stat options, and the sample mapping).
+                st.session_state['_exclusion_snapshot'] = _analysis_state_snapshot()
 
             st.success(
                 "✅ Full analysis complete. Go to the Graphs tab to visualize results."
@@ -2585,11 +2914,12 @@ st.title("qPCR Analysis Suite")
 st.caption("Gene-by-gene analysis with efficacy-specific workflows")
 
 # Main tabs
-tab1, tab_qc, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab_qc, tab2, tab_ov, tab3, tab4, tab5 = st.tabs(
     [
         "Upload",
         "QC Check",
         "Mapping",
+        "Overview",
         "Analysis",
         "Graphs",
         "Export",
@@ -2643,7 +2973,6 @@ with tab1:
                 st.session_state.hk_gene = None
                 st.session_state.selected_efficacy = None
                 st.session_state.gene_display_names = {}
-                st.session_state.experiment_desc = {}
                 st.session_state.qc_reviewed = False
                 for key in [
                     "selected_gene_idx",
@@ -2665,20 +2994,13 @@ with tab1:
                 # Re-initialize graph_settings to defaults
                 st.session_state.graph_settings = {
                     "color_scheme": "plotly_white",
-                    "title_size": 20,
                     "font_size": 14,
-                    "sig_font_size": 18,
                     "figure_height": 16,
                     "figure_width": 28,
                     "show_error": True,
                     "show_significance": True,
-                    "show_grid": True,
                     "show_legend": False,
-                    "xlabel": "Condition",
-                    "ylabel": "Relative mRNA Expression Level",
-                    "bar_colors": {},
                     "bar_gap": 0.45,
-                    "orientation": "v",
                     "bar_opacity": 0.85,
                     "marker_line_width": 1,
                     "y_log_scale": False,
@@ -2688,6 +3010,11 @@ with tab1:
                 }
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
+
+                # Automatic replicate QC (best-2-of-3 at SD 0.3) so the user can
+                # go straight to mapping; fully reviewable/reversible in the QC tab.
+                apply_auto_qc(0.3)
+
                 if had_previous_analysis:
                     st.info("Previous analysis results cleared due to new data upload.")
 
@@ -2963,84 +3290,100 @@ with tab_qc:
                 if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
                     st.rerun()
 
-            # ---- Auto-Exclude High SD Outliers ----
+            # ---- Automatic replicate QC (best-2-of-3) ----
             st.markdown("---")
-            auto_excl_cols = st.columns([2, 1, 1])
-            with auto_excl_cols[0]:
-                sd_thresh = st.slider(
-                    "SD Threshold (Ct)",
-                    min_value=0.3, max_value=1.0, value=0.5, step=0.1,
-                    key="sd_threshold_slider",
-                    help="Triplicates with CT SD above this will be flagged",
+            aq_top = st.columns([1.4, 3])
+            with aq_top[0]:
+                _cur_thresh = float(st.session_state.get("qc_sd_threshold", 0.3))
+                new_thresh = st.number_input(
+                    "CT SD threshold",
+                    min_value=0.05, max_value=1.0, value=_cur_thresh, step=0.05,
+                    format="%.2f", key="qc_sd_threshold_input",
+                    help="Triplicates above this SD are automatically trimmed to their "
+                         "best 2 replicates (closest CT values).",
                 )
-            with auto_excl_cols[1]:
-                find_all_btn = st.button(
-                    "🔍 Find All Outliers", key="find_all_sd_outliers", use_container_width=True
+            if abs(new_thresh - _cur_thresh) > 1e-9:
+                st.session_state.excluded_wells_history.append(
+                    {k: set(v) for k, v in st.session_state.excluded_wells.items()}
                 )
-            with auto_excl_cols[2]:
-                # Per-gene button — read gene filter from previous render cycle
-                _prev_gene = st.session_state.get("qc_gene_filter", "All Genes")
-                if _prev_gene and _prev_gene != "All Genes":
-                    clean_gene_btn = st.button(
-                        f"🧹 Clean {_prev_gene}", key="clean_gene_btn", use_container_width=True
-                    )
+                apply_auto_qc(new_thresh)
+                st.rerun()
+
+            sd_thresh = float(st.session_state.get("qc_sd_threshold", 0.3))
+            audit = st.session_state.get("auto_qc_audit", []) or []
+            n_trim = sum(1 for a in audit if a.get("status") == "trimmed")
+            n_unres = sum(1 for a in audit if a.get("status") == "unresolved")
+            with aq_top[1]:
+                if n_trim or n_unres:
+                    msg = (f"**Auto-QC** at SD ≤ {sd_thresh:.2f}: "
+                           f"**{n_trim}** triplicate(s) trimmed to best 2")
+                    if n_unres:
+                        msg += (f"; **{n_unres}** still above threshold — "
+                                "kept best 2, flagged for review")
+                    st.markdown(f"<div style='padding-top:28px'>{msg}.</div>",
+                                unsafe_allow_html=True)
                 else:
-                    clean_gene_btn = False
+                    st.markdown(
+                        f"<div style='padding-top:28px'>**Auto-QC** at SD ≤ {sd_thresh:.2f}: "
+                        "all triplicates within threshold — nothing removed.</div>",
+                        unsafe_allow_html=True,
+                    )
 
-            # Handle find buttons
-            if find_all_btn:
-                suggestions = QualityControl.find_high_sd_outliers(
-                    data, st.session_state.get("excluded_wells", {}), sd_threshold=sd_thresh,
-                )
-                st.session_state["_sd_outlier_suggestions"] = suggestions
-
-            if clean_gene_btn:
-                suggestions = QualityControl.find_high_sd_outliers(
-                    data, st.session_state.get("excluded_wells", {}),
-                    sd_threshold=sd_thresh, gene_filter=_prev_gene,
-                )
-                st.session_state["_sd_outlier_suggestions"] = suggestions
-
-            # Display preview table
-            suggestions = st.session_state.get("_sd_outlier_suggestions", [])
-            if suggestions:
-                st.markdown(f"**Found {len(suggestions)} high-SD outlier(s):**")
-                preview_df = pd.DataFrame(suggestions)
-                preview_df.insert(0, "Exclude", True)
-                edited = st.data_editor(
-                    preview_df[["Exclude", "Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"]],
-                    disabled=["Target", "Sample", "Well", "CT", "deviation", "group_sd", "n_replicates"],
-                    key="sd_outlier_preview",
-                    use_container_width=True,
-                )
-
-                apply_cols = st.columns([3, 1])
-                with apply_cols[1]:
-                    if st.button("Apply Selected", key="apply_sd_exclusions", type="primary", use_container_width=True):
-                        selected = edited[edited["Exclude"]]
-                        # Save undo history
-                        if "excluded_wells_history" in st.session_state:
-                            st.session_state.excluded_wells_history.append(
-                                {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                            )
-                        excl_dict = st.session_state.get("excluded_wells", {})
-                        if not isinstance(excl_dict, dict):
-                            excl_dict = {}
-                        for _, row in selected.iterrows():
-                            key = (row["Target"], row["Sample"])
-                            if key not in excl_dict:
-                                excl_dict[key] = set()
-                            excl_dict[key].add(row["Well"])
-                        st.session_state.excluded_wells = excl_dict
-                        st.session_state.pop("_sd_outlier_suggestions", None)
-                        st.success(f"Excluded {len(selected)} well(s).")
+            # What auto-QC did — reviewable & reversible per triplicate
+            if audit:
+                with st.expander(
+                    f"Auto-QC decisions ({len(audit)}) — review & override",
+                    expanded=bool(n_unres),
+                ):
+                    st.caption(
+                        "Each row is a triplicate auto-QC acted on. Untick **Keep "
+                        "auto-selection** to restore all replicates for that triplicate, "
+                        "then **Apply overrides**. Changing the threshold above re-runs "
+                        "automatic selection."
+                    )
+                    _excl = st.session_state.excluded_wells
+                    audit_rows = []
+                    for a in audit:
+                        key = (a["Target"], a["Sample"])
+                        dropped = a["dropped_wells"]
+                        currently_kept = (
+                            all(w in _excl.get(key, set()) for w in dropped)
+                            if dropped else True
+                        )
+                        audit_rows.append({
+                            "Keep auto-selection": currently_kept,
+                            "Gene": a["Target"],
+                            "Sample": a["Sample"],
+                            "Status": "flagged — review" if a["status"] == "unresolved" else "trimmed",
+                            "SD before": a["orig_sd"],
+                            "SD after": a["final_sd"],
+                            "Dropped well(s)": ", ".join(dropped) or "—",
+                        })
+                    edited_audit = st.data_editor(
+                        pd.DataFrame(audit_rows),
+                        disabled=["Gene", "Sample", "Status", "SD before", "SD after", "Dropped well(s)"],
+                        hide_index=True, use_container_width=True, key="auto_qc_audit_editor",
+                    )
+                    if st.button("Apply overrides", key="apply_auto_qc_overrides", type="primary"):
+                        st.session_state.excluded_wells_history.append(
+                            {k: set(v) for k, v in st.session_state.excluded_wells.items()}
+                        )
+                        for i, a in enumerate(audit):
+                            dropped = a["dropped_wells"]
+                            if not dropped:
+                                continue
+                            key = (a["Target"], a["Sample"])
+                            keep = bool(edited_audit.iloc[i]["Keep auto-selection"])
+                            if keep:
+                                st.session_state.excluded_wells.setdefault(key, set()).update(dropped)
+                            else:
+                                cur = st.session_state.excluded_wells.get(key)
+                                if cur:
+                                    for w in dropped:
+                                        cur.discard(w)
+                                    if not cur:
+                                        del st.session_state.excluded_wells[key]
                         st.rerun()
-                with apply_cols[0]:
-                    if st.button("Dismiss", key="dismiss_sd_suggestions"):
-                        st.session_state.pop("_sd_outlier_suggestions", None)
-                        st.rerun()
-            elif find_all_btn or clean_gene_btn:
-                st.info("No triplicates exceed the SD threshold.")
 
             st.markdown("---")
 
@@ -3077,8 +3420,9 @@ with tab_qc:
                     f"{g} ({c})" for g, c in sorted(_flagged_genes.items())
                 )
                 st.warning(
-                    f"⚠️ **{len(_flagged_well_lookup)} high-SD outliers** (SD > {sd_thresh}): {_gene_parts} — "
-                    f"Click **Find All Outliers** above to review and exclude."
+                    f"⚠️ **{len(_flagged_well_lookup)} triplicate(s) still above SD {sd_thresh:.2f}** after "
+                    f"auto-QC (best 2 kept): {_gene_parts} — see **Auto-QC decisions** above, "
+                    f"or fine-tune wells below."
                 )
 
             # ---- Filter Controls ----
@@ -3371,21 +3715,11 @@ with tab_qc:
 
             if _ov_flagged_rows:
                 flagged_overview = pd.DataFrame(_ov_flagged_rows)
-                flag_ov_col1, flag_ov_col2 = st.columns([3, 1])
-                with flag_ov_col1:
-                    st.warning(f"Found {len(flagged_overview)} wells with high triplicate SD")
-                with flag_ov_col2:
-                    if st.button(
-                        "Exclude All Flagged",
-                        use_container_width=True,
-                        key="qc_overview_exclude_flagged",
-                    ):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
-                        for _, row in flagged_overview.iterrows():
-                            exclude_well(row["Well"], row["Target"], row["Sample"])
-                        st.rerun()
+                st.warning(
+                    f"{len(flagged_overview)} triplicate(s) remain above SD {sd_thresh:.2f} "
+                    "after auto-QC (best 2 kept). Review under **Auto-QC decisions** or the "
+                    "**Triplicate Browser** — a triplicate is never auto-reduced below 2 wells."
+                )
 
                 st.dataframe(
                     flagged_overview,
@@ -3572,7 +3906,6 @@ with tab2:
         st.session_state.selected_efficacy = efficacy
 
         config = EFFICACY_CONFIG[efficacy]
-        st.info(f"**{config['description']}**")
         st.caption(f"Cell line: {config['cell']} | Genes: {', '.join(config['genes'])}")
 
         # Show control structure
@@ -3637,198 +3970,120 @@ with tab2:
                     return grp if grp in group_types else "Treatment"
             return "Treatment"
 
-        # Ensure all samples in sample_order have mapping
+        # Ensure all samples in sample_order have mapping. The Group is now
+        # auto-derived (the manual Group column was removed) and refreshed every
+        # render so it tracks the selected efficacy type; it is metadata only —
+        # it feeds the Excel Summary grouping but never the ΔΔCt/stat maths.
         for sample in st.session_state.sample_order:
-            if sample not in st.session_state.sample_mapping:
-                st.session_state.sample_mapping[sample] = {
-                    "condition": sample,
-                    "group": _suggest_group(sample),
-                    "concentration": "",
-                    "include": True,
-                }
-            if "include" not in st.session_state.sample_mapping[sample]:
-                st.session_state.sample_mapping[sample]["include"] = True
+            entry = st.session_state.sample_mapping.get(sample)
+            if entry is None:
+                entry = {"condition": sample, "group": "Treatment",
+                         "concentration": "", "include": True}
+                st.session_state.sample_mapping[sample] = entry
+            entry.setdefault("include", True)
+            entry.setdefault("concentration", "")
+            entry["group"] = _suggest_group(sample)
 
-        # Header row matching column proportions below
-        hdr0, hdr_ord, hdr1, hdr2, hdr3 = st.columns([0.6, 0.5, 2, 3.5, 2.5])
+        st.caption(
+            "Choose which samples to include and name their conditions. "
+            "Samples sharing a condition name are treated as biological replicates."
+        )
+
+        # Header row (Group column removed — group is auto-derived now)
+        hdr0, hdr_ord, hdr1, hdr2 = st.columns([0.5, 0.4, 2.2, 4])
         hdr0.markdown("**Use**")
         hdr_ord.markdown("**#**")
         hdr1.markdown("**Original**")
-        hdr2.markdown("**Condition Name**")
-        hdr3.markdown("**Group**")
+        hdr2.markdown("**Condition name**")
 
-        # FIXED: Display ALL samples in sample_order (including excluded ones)
+        # Display ALL samples in current order (excluded ones shown dimmed)
         display_samples = st.session_state.sample_order.copy()
 
-        # Sample rows with improved spacing
         for i, sample in enumerate(display_samples):
             # FIX-04: Guard against samples not in mapping (desync protection)
             if sample not in st.session_state.sample_mapping:
                 continue
-            # Container for each row
-            with st.container():
-                col0, col_order, col1, col2, col3 = st.columns(
-                    [0.6, 0.5, 2, 3.5, 2.5]
+            # Per-sample keys (no list-index suffix) so reordering doesn't remount
+            # every row below the change point.
+            col0, col_order, col1, col2 = st.columns([0.5, 0.4, 2.2, 4])
+            with col0:
+                include = st.checkbox(
+                    "Include sample",
+                    value=st.session_state.sample_mapping[sample].get("include", True),
+                    key=f"include_{sample}",
+                    label_visibility="collapsed",
                 )
+                st.session_state.sample_mapping[sample]["include"] = include
+            with col_order:
+                st.markdown(
+                    f"<div style='text-align:center; padding-top:8px; "
+                    f"color:var(--ink-faint);'>{i + 1}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col1:
+                _dim = "" if include else "opacity:0.4;"
+                st.markdown(
+                    f"<div style='padding-top:8px; font-size:0.9rem; {_dim}'>{sample}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col2:
+                cond = st.text_input(
+                    "Condition",
+                    st.session_state.sample_mapping[sample]["condition"],
+                    key=f"cond_{sample}",
+                    label_visibility="collapsed",
+                    placeholder="Enter condition name...",
+                    max_chars=50,
+                )
+                st.session_state.sample_mapping[sample]["condition"] = cond
 
-                # Include checkbox
-                with col0:
-                    include = st.checkbox(
-                        "Include sample",
-                        value=st.session_state.sample_mapping[sample].get(
-                            "include", True
-                        ),
-                        key=f"include_{sample}_{i}",
-                        label_visibility="collapsed",
-                    )
-                    st.session_state.sample_mapping[sample]["include"] = include
+        # ---- Order (always available; reflects live into graphs and exports) ----
+        st.markdown("#### Order")
+        st.caption("Drag included samples to set the display order used in graphs and exports.")
 
-                # Order number
-                with col_order:
-                    st.markdown(
-                        f"<div style='text-align: center; padding-top: 10px;'><b>{i + 1}</b></div>",
-                        unsafe_allow_html=True,
-                    )
+        current_order = st.session_state.sample_order
+        included_order = [
+            s for s in current_order
+            if st.session_state.sample_mapping.get(s, {}).get("include", True)
+        ]
+        excluded_samples_list = [
+            s for s in current_order
+            if not st.session_state.sample_mapping.get(s, {}).get("include", True)
+        ]
 
-                # Original sample name (non-editable)
-                with col1:
-                    st.text_input(
-                        "Original",
-                        sample,
-                        key=f"orig_{sample}_{i}",
-                        disabled=True,
-                        label_visibility="collapsed",
-                    )
-
-                # Condition name (editable)
-                with col2:
-                    cond = st.text_input(
-                        "Condition",
-                        st.session_state.sample_mapping[sample]["condition"],
-                        key=f"cond_{sample}_{i}",
-                        label_visibility="collapsed",
-                        placeholder="Enter condition name...",
-                        max_chars=50,
-                    )
-                    st.session_state.sample_mapping[sample]["condition"] = cond
-
-                # Group selector
-                with col3:
-                    grp_idx = 0
-                    previous_group = st.session_state.sample_mapping[sample].get("group", "Treatment")
-                    try:
-                        grp_idx = group_types.index(previous_group)
-                    except (ValueError, KeyError):
-                        # FIX-08: Warn when group type resets due to efficacy change
-                        st.caption(f"⚠️ '{previous_group}' not available; reset to '{group_types[0]}'")
-                        st.session_state.sample_mapping[sample]["group"] = group_types[0]
-
-                    grp = st.selectbox(
-                        "Group",
-                        group_types,
-                        index=grp_idx,
-                        key=f"grp_{sample}_{i}",
-                        label_visibility="collapsed",
-                    )
-                    st.session_state.sample_mapping[sample]["group"] = grp
-
-                st.markdown("")
-
-        if st.button("Finalize Mapping", type="primary", use_container_width=True, key="finalize_mapping"):
-            st.session_state.mapping_finalized = True
-            st.session_state.analysis_stale = False
-            st.rerun()
-        st.caption("Lock in condition names and groups, then run analysis below.")
-
-        if st.session_state.get("mapping_finalized", False):
-            edit_col1, edit_col2 = st.columns([3, 1])
-            with edit_col2:
-                if st.button("✏️ Edit Mapping", key="edit_mapping", use_container_width=True):
-                    st.session_state.mapping_finalized = False
-                    st.session_state.analysis_stale = True
-                    st.rerun()
-            st.markdown("### 🔀 Drag to Reorder Samples")
-            st.caption("Drag included samples to set the display order for graphs and exports.")
-
-            current_order = st.session_state.sample_order
-            included_order = [
-                s for s in current_order
-                if st.session_state.sample_mapping.get(s, {}).get("include", True)
-            ]
-            excluded_samples_list = [
-                s for s in current_order
-                if not st.session_state.sample_mapping.get(s, {}).get("include", True)
-            ]
-
-            reorder_mode = st.radio(
-                "Reorder method",
-                ["Arrow buttons (fast)", "Drag-and-drop"],
-                horizontal=True,
-                key="reorder_mode",
-                label_visibility="collapsed",
+        if sort_items is None:
+            st.info(
+                "Drag-and-drop needs `streamlit-sortables` "
+                "(`pip install streamlit-sortables`); order falls back to natural sort."
             )
+        elif not included_order:
+            st.info("No included samples to order \u2014 include samples above first.")
+        else:
+            st.markdown(
+                "<style>.sortable-item{padding:6px 14px!important;margin:2px 0!important;"
+                "border-radius:8px!important;font-size:0.85rem!important;max-width:420px!important;}</style>",
+                unsafe_allow_html=True,
+            )
+            order_labels = []
+            label_to_sample = {}
+            for s_ in included_order:
+                cond = st.session_state.sample_mapping.get(s_, {}).get("condition", s_)
+                label = f"{cond}  ({s_})" if cond != s_ else s_
+                if label in label_to_sample:
+                    label = f"{cond}  ({s_}) #{included_order.index(s_) + 1}"
+                order_labels.append(label)
+                label_to_sample[label] = s_
 
-            if reorder_mode == "Arrow buttons (fast)":
-                for i, sample in enumerate(included_order):
-                    cond = st.session_state.sample_mapping.get(sample, {}).get("condition", sample)
-                    cond_short = cond if len(cond) <= 25 else cond[:22] + "..."
-                    sample_short = sample if len(sample) <= 20 else sample[:17] + "..."
-                    lbl = f"{cond_short}  ({sample_short})" if cond != sample else sample_short
-                    btn_cols = st.columns([0.5, 0.5, 5])
-                    with btn_cols[0]:
-                        if i > 0 and st.button("\u2191", key=f"up_{sample}", help="Move up"):
-                            included_order[i], included_order[i - 1] = included_order[i - 1], included_order[i]
-                            st.session_state.sample_order = included_order + excluded_samples_list
-                            st.rerun()
-                    with btn_cols[1]:
-                        if i < len(included_order) - 1 and st.button("\u2193", key=f"dn_{sample}", help="Move down"):
-                            included_order[i], included_order[i + 1] = included_order[i + 1], included_order[i]
-                            st.session_state.sample_order = included_order + excluded_samples_list
-                            st.rerun()
-                    with btn_cols[2]:
-                        st.markdown(f"<span style='font-size:0.9rem;'>{lbl}</span>", unsafe_allow_html=True)
-            elif sort_items is not None:
-                # Build unique labels: "Condition Name  (Original)" format
-                order_labels = []
-                label_to_sample = {}
-                for s in included_order:
-                    cond = st.session_state.sample_mapping.get(s, {}).get("condition", s)
-                    label = f"{cond}  ({s})" if cond != s else s
-                    if label in label_to_sample:
-                        label = f"{cond}  ({s}) #{included_order.index(s) + 1}"
-                    order_labels.append(label)
-                    label_to_sample[label] = s
+            col_drag, _col_spacer = st.columns([2, 3])
+            with col_drag:
+                sorted_labels = sort_items(items=order_labels, direction="vertical")
+            # Guard: the component can return None (headless / first render).
+            sorted_labels = sorted_labels or order_labels
 
-                st.markdown("""
-                <style>
-                .sortable-item {
-                    padding: 6px 14px !important;
-                    margin: 2px 0 !important;
-                    border-radius: 8px !important;
-                    font-size: 0.85rem !important;
-                    max-width: 400px !important;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-
-                if not order_labels:
-                    st.info("No included samples to reorder. Include samples above first.")
-                    sorted_labels = []
-                else:
-                    col_drag, col_spacer = st.columns([2, 3])
-                    with col_drag:
-                        sorted_labels = sort_items(items=order_labels, direction="vertical")
-
-                new_included_order = [label_to_sample[lbl] for lbl in sorted_labels]
-                new_order = new_included_order + excluded_samples_list
-
-                if new_order != st.session_state.sample_order:
-                    st.session_state.sample_order = new_order
-            else:
-                st.warning(
-                    "Drag-and-drop requires `streamlit-sortables`. "
-                    "Install with: `pip install streamlit-sortables`"
-                )
+            new_order = [label_to_sample[lbl] for lbl in sorted_labels] + excluded_samples_list
+            if new_order != st.session_state.sample_order:
+                st.session_state.sample_order = new_order
+                st.rerun()
 
         # Update excluded_samples from include flags
         st.session_state.excluded_samples = set(
@@ -4124,39 +4379,234 @@ with tab2:
             st.warning("No samples available for analysis.")
 
 # ==================== TAB 3: ANALYSIS ====================
-with tab3:
-    # Auto-rerun if exclusion state changed since last analysis
-    if (st.session_state.get('processed_data') and
-        '_exclusion_snapshot' in st.session_state and
-        '_last_ref_sample_key' in st.session_state):
+with tab_ov:
+    maybe_autorun_analysis()
+    st.header("Results overview")
+    st.caption(
+        "Auto-assembled from the analysis — verdict, benchmarked effect, and every "
+        "gene at a glance. Fine-tune individual charts in Graphs; download the "
+        "report in Export."
+    )
 
-        current_snapshot = {
-            'excluded_wells': {str(k): sorted(v) for k, v in st.session_state.get('excluded_wells', {}).items()},
-            'excluded_samples': sorted(st.session_state.get('excluded_samples', set())),
-            'ttest_type': st.session_state.get('ttest_type', 'welch')
+    if not st.session_state.get("processed_data"):
+        st.info("No results yet — map samples and run analysis on the Mapping tab first.")
+    else:
+        st.session_state.setdefault("graph_settings", {})
+        processed = st.session_state.processed_data
+        eff = st.session_state.get("selected_efficacy")
+        cfg = EFFICACY_CONFIG.get(eff, {}) or {}
+        efficacy_config = cfg
+        gene_list = list(processed.keys())
+        ref_condition = st.session_state.get("analysis_ref_condition")
+
+        all_res = pd.concat(processed.values(), ignore_index=True)
+        conditions = list(dict.fromkeys(all_res["Condition"].astype(str).tolist()))
+        _so = st.session_state.get("sample_order", [])
+        _sm = st.session_state.get("sample_mapping", {})
+        if _so and _sm:
+            _ordered, _seen = [], set()
+            for _s in _so:
+                if _sm.get(_s, {}).get("include", True):
+                    _c = str(_sm.get(_s, {}).get("condition", _s))
+                    if _c in conditions and _c not in _seen:
+                        _ordered.append(_c); _seen.add(_c)
+            for _c in conditions:
+                if _c not in _seen:
+                    _ordered.append(_c); _seen.add(_c)
+            conditions = _ordered
+
+        controls = cfg.get("controls", {}) or {}
+
+        def _match(label):
+            if not label:
+                return None
+            ll = str(label).strip().lower()
+            for c in conditions:
+                if str(c).strip().lower() == ll:
+                    return c
+            for c in conditions:
+                cl = str(c).strip().lower()
+                if ll and (ll in cl or cl in ll):
+                    return c
+            return None
+
+        bench_default = _match(controls.get("positive"))
+        control_conditions = {ref_condition} | {
+            _match(controls.get(r)) for r in ("negative", "positive", "baseline")
         }
+        control_conditions.discard(None)
+        treatments = [c for c in conditions if c not in control_conditions] or [
+            c for c in conditions if c != ref_condition
+        ]
 
-        if current_snapshot != st.session_state['_exclusion_snapshot']:
-            AnalysisEngine.run_full_analysis(
-                st.session_state['_last_ref_sample_key'],
-                st.session_state['_last_cmp_sample_key'],
-                st.session_state.get('_last_cmp_sample_key_2'),
-                st.session_state.get('_last_cmp_sample_key_3'),
+        def _col(df):
+            return "Fold_Change" if "Fold_Change" in df.columns else (
+                "Relative_Expression" if "Relative_Expression" in df.columns else None)
+
+        def _fold(gene, cond):
+            df = processed[gene]
+            col = _col(df)
+            if col is None:
+                return None
+            r = df[df["Condition"].astype(str) == str(cond)]
+            if r.empty:
+                return None
+            v = r[col].values[0]
+            return None if pd.isna(v) else float(v)
+
+        def _sig(gene, cond):
+            df = processed[gene]
+            if "significance" not in df.columns:
+                return ""
+            r = df[df["Condition"].astype(str) == str(cond)]
+            return "" if r.empty else str(r["significance"].values[0] or "")
+
+        def _pval(gene, cond):
+            df = processed[gene]
+            if "p_value" not in df.columns:
+                return None
+            r = df[df["Condition"].astype(str) == str(cond)]
+            if r.empty:
+                return None
+            v = r["p_value"].values[0]
+            return None if pd.isna(v) else float(v)
+
+        def _mean_abs_logfc(cond):
+            vals = []
+            for g in gene_list:
+                f = _fold(g, cond)
+                if f and f > 0:
+                    vals.append(abs(np.log2(f)))
+            return sum(vals) / len(vals) if vals else 0.0
+
+        hl_default = max(treatments, key=_mean_abs_logfc) if treatments else None
+
+        # experiment header
+        cell = cfg.get("cell", "—")
+        desc = cfg.get("description", "") or ""
+        eng = desc.split(" - ")[0].split(" – ")[0].strip()
+        st.markdown(
+            "<div style='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap'>"
+            f"<span style='font-size:22px;font-weight:700'>{eff or 'Results'}</span>"
+            f"<span style='color:var(--ink-faint);font-size:15px'>{eng}</span></div>"
+            "<div style='color:var(--ink-faint);font-size:13px;margin-top:4px'>"
+            f"Cell line <b style='color:var(--ink)'>{cell}</b> &nbsp;·&nbsp; "
+            f"Genes <b style='color:var(--ink)'>{len(gene_list)}</b> &nbsp;·&nbsp; "
+            f"Conditions <b style='color:var(--ink)'>{len(conditions)}</b> &nbsp;·&nbsp; "
+            f"Reference <b style='color:var(--ink)'>{ref_condition or '—'}</b></div>",
+            unsafe_allow_html=True,
+        )
+
+        # benchmark + highlight selectors (auto, overridable)
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            bopts = ["(none)"] + conditions
+            bidx = bopts.index(bench_default) if bench_default in bopts else 0
+            benchmark = st.selectbox(
+                "Benchmark (positive control)", bopts, index=bidx,
+                key="overview_benchmark",
+                help="Auto-selected from the efficacy category's positive control; override if needed.",
             )
-            st.info("Analysis auto-updated to reflect changes in QC exclusions or settings.")
+            benchmark = None if benchmark == "(none)" else benchmark
+        with sc2:
+            if treatments:
+                hidx = treatments.index(hl_default) if hl_default in treatments else 0
+                highlight = st.selectbox(
+                    "Highlight active", treatments, index=hidx, key="overview_highlight",
+                    help="Test article summarized in the verdict and %-of-benchmark.",
+                )
+            else:
+                highlight = None
 
-    if st.session_state.get("analysis_stale", False):
-        st.warning("⚠️ Mapping changed since last analysis. Results may be outdated.")
-        if st.button("Re-run Analysis", key="rerun_stale_analysis", type="primary"):
-            ref_key = st.session_state.get("_last_ref_sample_key")
-            cmp_key = st.session_state.get("_last_cmp_sample_key")
-            if ref_key and cmp_key:
-                ok = AnalysisEngine.run_full_analysis(ref_key, cmp_key,
-                    st.session_state.get("_last_cmp_sample_key_2"),
-                    st.session_state.get("_last_cmp_sample_key_3"))
+        # per-gene verdict + matrix
+        expected_map = cfg.get("expected_direction", {}) or {}
+        rows = []
+        passes = graded = sig_count = 0
+        bench_pcts = []
+        for g in gene_list:
+            exp = expected_map.get(g)
+            hl_fold = _fold(g, highlight) if highlight else None
+            hl_sig = _sig(g, highlight) if highlight else ""
+            hl_p = _pval(g, highlight) if highlight else None
+            is_sig = bool(hl_sig) or (hl_p is not None and hl_p < 0.05)
+            if is_sig:
+                sig_count += 1
+            verdict_cell = "—"
+            if exp and highlight and hl_fold is not None:
+                graded += 1
+                obs = "up" if hl_fold > 1 else "down"
+                ok = (obs == exp) and is_sig
                 if ok:
-                    st.session_state.analysis_stale = False
-                    st.rerun()
+                    passes += 1
+                verdict_cell = f"{'↑' if exp == 'up' else '↓'} {'pass' if ok else 'check'}"
+            pct = None
+            if benchmark and highlight:
+                bf = _fold(g, benchmark)
+                if bf is not None and hl_fold is not None and abs(bf - 1) > 1e-6:
+                    pct = (hl_fold - 1) / (bf - 1) * 100
+                    bench_pcts.append(pct)
+            row = {"Gene": g}
+            for cond in conditions:
+                f = _fold(g, cond)
+                row[cond] = "—" if f is None else f"{f:.2f}{_sig(g, cond)}"
+            if expected_map:
+                row["Expected"] = verdict_cell
+            if benchmark and highlight:
+                row[f"% of {benchmark}"] = "—" if pct is None else f"{pct:.0f}%"
+            rows.append(row)
+        matrix = pd.DataFrame(rows)
+
+        # verdict banner
+        if graded:
+            allpass = passes == graded
+            color = "#2f7d5b" if allpass else "#B8860B"
+            avg_bench = (f" · reaches ~{sum(bench_pcts)/len(bench_pcts):.0f}% of {benchmark}"
+                         if bench_pcts else "")
+            st.markdown(
+                "<div style='display:flex;gap:14px;align-items:center;background:var(--surface,#fff);"
+                "border:1px solid var(--line,#e6e1db);border-left:4px solid " + color + ";"
+                "border-radius:12px;padding:14px 18px;margin:14px 0'>"
+                "<div style='font-size:18px;font-weight:700;color:" + color + "'>"
+                + ("✓" if allpass else "!") + "</div><div>"
+                f"<div style='font-weight:700'>{passes}/{graded} markers moved in the expected direction</div>"
+                f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active <b>{highlight}</b>{avg_bench}.</div>"
+                "</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info(
+                f"{sig_count}/{len(gene_list)} genes significant vs control "
+                "(no expected-direction defined for this category)."
+            )
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Markers as expected", f"{passes}/{graded}" if graded else "—")
+        m2.metric("Significant vs control", f"{sig_count}/{len(gene_list)}")
+        m3.metric("Avg % of benchmark",
+                  f"{sum(bench_pcts)/len(bench_pcts):.0f}%" if bench_pcts else "—")
+
+        # gene panel (auto-styled small multiples, consistent with Graphs)
+        st.markdown("##### Gene panel")
+        _cols = st.columns(min(len(gene_list), 3) or 1)
+        for i, g in enumerate(gene_list):
+            with _cols[i % len(_cols)]:
+                _ensure_bar_settings(g, processed[g])
+                try:
+                    fig = build_gene_figure(g, processed[g], efficacy_config)
+                    st.plotly_chart(fig, use_container_width=True, key=f"ov_fig_{g}")
+                except Exception as e:
+                    st.warning(f"{g}: chart unavailable ({e})")
+
+        # fold-change matrix
+        st.markdown("##### Fold-change matrix")
+        st.caption("Fold change vs reference; significance markers are vs the p-value comparison control.")
+        st.dataframe(matrix, use_container_width=True, hide_index=True)
+        st.caption("Download the full Excel / PowerPoint report from the **Export** tab.")
+
+
+with tab3:
+    # Auto-rerun if QC exclusions, stat options, or the sample mapping changed.
+    maybe_autorun_analysis()
 
     render_step_indicator("analysis")
     st.header("Analysis Results")
@@ -4334,682 +4784,89 @@ with tab3:
 
 # ==================== TAB 4: GRAPHS ====================
 with tab4:
+    maybe_autorun_analysis()
     render_step_indicator("graphs")
     st.header("Individual Gene Graphs")
 
-    if st.session_state.get("analysis_stale", False):
-        st.warning("⚠️ Mapping changed since last analysis. Go to Analysis tab to re-run.")
-
-    # Graph tab styles handled by global theme
+    # Graph styling handled by the global theme + per-gene live editor below.
 
     if st.session_state.processed_data:
-        if "graph_settings" not in st.session_state:
-            st.session_state.graph_settings = {
-                "title_size": 20,
-                "font_size": 14,
-                "sig_font_size": 18,
-                "figure_width": 28,
-                "figure_height": 16,
-                "color_scheme": "plotly_white",
-                "show_error": True,
-                "show_significance": True,
-                "show_grid": True,
-                "xlabel": "Condition",
-                "ylabel": "Relative mRNA Expression Level",
-                "bar_colors": {},
-                "orientation": "v",
-                "bar_opacity": 0.85,
-                "bar_gap": 0.45,
-                "marker_line_width": 1,
-                "show_legend": False,
-                "y_log_scale": False,
-                "y_min": None,
-                "y_max": None,
-            }
-
-        if "graphs" not in st.session_state:
-            st.session_state.graphs = {}
+        st.session_state.setdefault("graph_settings", {
+            "color_scheme": "plotly_white", "font_size": 14,
+            "figure_width": 28, "figure_height": 16,
+            "show_error": True, "show_significance": True, "show_legend": False,
+            "bar_opacity": 0.85, "bar_gap": 0.45, "marker_line_width": 1,
+            "y_log_scale": False, "y_min": None, "y_max": None,
+            "plot_bgcolor": "#FFFFFF",
+        })
+        st.session_state.setdefault("graphs", {})
 
         efficacy_config = EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {})
         gene_list = list(st.session_state.processed_data.keys())
 
-        if "selected_gene_idx" not in st.session_state:
-            st.session_state.selected_gene_idx = 0
+        st.session_state.setdefault("selected_gene_idx", 0)
         if st.session_state.selected_gene_idx >= len(gene_list):
             st.session_state.selected_gene_idx = 0
 
-        # Gene pill selector with container
-        st.markdown('<div class="gene-pill-container"><div class="label">Select Gene</div></div>', unsafe_allow_html=True)
+        # Gene selector (outside the fragment — switching gene is a full rerun)
+        st.markdown(
+            '<div class="gene-pill-container"><div class="label">Select gene</div></div>',
+            unsafe_allow_html=True,
+        )
         gene_cols = st.columns(min(len(gene_list), 6)) if gene_list else [st.container()]
         for idx, gene in enumerate(gene_list):
             with gene_cols[idx % len(gene_cols)]:
                 if st.button(
                     f"{'✓ ' if idx == st.session_state.selected_gene_idx else ''}{gene}",
-                    key=f"gene_btn_{gene}",
-                    use_container_width=True,
-                    type="primary"
-                    if idx == st.session_state.selected_gene_idx
-                    else "secondary",
+                    key=f"gene_btn_{gene}", use_container_width=True,
+                    type="primary" if idx == st.session_state.selected_gene_idx else "secondary",
                 ):
                     st.session_state.selected_gene_idx = idx
                     st.rerun()
 
         current_gene = gene_list[st.session_state.selected_gene_idx]
 
-        gene_data = st.session_state.processed_data[current_gene]
+        # Keep every gene's figure fresh for exports (off-screen; replaces the
+        # removed All-Gene Quick View). The live editor re-renders only the
+        # current gene via a fragment, so control tweaks stay snappy.
+        build_all_figures(gene_list, efficacy_config)
 
-        show_sig_key = f"{current_gene}_show_sig"
-        show_err_key = f"{current_gene}_show_err"
-        bar_gap_key = f"{current_gene}_bar_gap"
-
-        if show_sig_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[show_sig_key] = True
-        if show_err_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[show_err_key] = True
-        if bar_gap_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[bar_gap_key] = 0.45
-
-        conditions_list = gene_data["Condition"].tolist()
-        ref_options = ["None"] + conditions_list
-        ref_line_key = f"{current_gene}_ref_line"
-        if ref_line_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[ref_line_key] = "None"
-        if st.session_state.graph_settings.get(ref_line_key, "None") not in ref_options:
-            st.session_state.graph_settings[ref_line_key] = "None"
-
-        # Initialize color preset key
-        color_preset_key = f"{current_gene}_color_preset"
-        if color_preset_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[color_preset_key] = "Classic"
-
-        # Initialize data points toggle key
-        show_dp_key = f"{current_gene}_show_data_points"
-        if show_dp_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[show_dp_key] = False
-
-        # Toolbar row 1: preset, toggles, bar gap, reset
-        tb_row1 = st.columns([1.5, 1.0, 1.0, 1.0, 1.5, 0.7])
-        with tb_row1[0]:
-            preset_names = list(GRAPH_PRESETS.keys()) + ["Custom"]
-            current_preset = st.session_state.graph_settings.get(color_preset_key, "Classic")
-            if current_preset not in preset_names:
-                current_preset = "Custom"
-            selected_preset = st.selectbox(
-                "Color Preset",
-                preset_names,
-                index=preset_names.index(current_preset),
-                key=f"preset_{current_gene}",
-            )
-            st.session_state.graph_settings[color_preset_key] = selected_preset
-        with tb_row1[1]:
-            sig_on = st.toggle(
-                "Sig. */#/\u2020",
-                st.session_state.graph_settings[show_sig_key],
-                key=f"tgl_sig_{current_gene}",
-            )
-            st.session_state.graph_settings[show_sig_key] = sig_on
-        with tb_row1[2]:
-            err_on = st.toggle(
-                "Error Bars",
-                st.session_state.graph_settings[show_err_key],
-                key=f"tgl_err_{current_gene}",
-            )
-            st.session_state.graph_settings[show_err_key] = err_on
-        with tb_row1[3]:
-            dp_on = st.toggle(
-                "Data Points",
-                st.session_state.graph_settings[show_dp_key],
-                key=f"tgl_dp_{current_gene}",
-            )
-            st.session_state.graph_settings[show_dp_key] = dp_on
-        with tb_row1[4]:
-            gap_val = st.select_slider(
-                "Bar Gap",
-                options=[round(x * 0.05, 2) for x in range(2, 21)],  # 0.1 to 1.0 step 0.05
-                value=st.session_state.graph_settings[bar_gap_key],
-                key=f"gap_sl_{current_gene}",
-            )
-            st.session_state.graph_settings[bar_gap_key] = gap_val
-        with tb_row1[5]:
-            if st.button("Reset", key=f"reset_all_{current_gene}", use_container_width=True):
-                if f"{current_gene}_bar_settings" in st.session_state:
-                    del st.session_state[f"{current_gene}_bar_settings"]
-                st.session_state.graph_settings[show_sig_key] = True
-                st.session_state.graph_settings[show_err_key] = True
-                st.session_state.graph_settings[bar_gap_key] = 0.45
-                st.session_state.graph_settings[show_dp_key] = False
-                st.session_state.graph_settings.pop(color_preset_key, None)
-                for per_gene_key in [
-                    f"{current_gene}_figure_width", f"{current_gene}_figure_height",
-                    f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
-                    f"{current_gene}_marker_line_width", f"{current_gene}_tick_size",
-                    f"{current_gene}_ylabel_size", f"{current_gene}_bg_color",
-                    f"{current_gene}_y_min", f"{current_gene}_y_max",
-                    f"{current_gene}_label_mode",
-                ]:
-                    st.session_state.graph_settings.pop(per_gene_key, None)
-                st.rerun()
-
-        # Toolbar row 2: ref line + label mode
-        label_mode_key = f"{current_gene}_label_mode"
-        label_modes = ["Auto-wrap", "Angled 45\u00b0", "Angled 90\u00b0", "Horizontal"]
-        if label_mode_key not in st.session_state.graph_settings:
-            st.session_state.graph_settings[label_mode_key] = "Auto-wrap"
-
-        _EB_LABELS = {"Livak ±SD": "livak_sd", "95% CI": "ci95", "SEM": "sem", "SD": "sd"}
-        _eb_names = list(_EB_LABELS.keys())
-        tb_row2 = st.columns([2, 2, 1.6, 1.0])
-        with tb_row2[0]:
-            selected_ref = st.selectbox(
-                "Reference Line",
-                ref_options,
-                index=ref_options.index(st.session_state.graph_settings.get(ref_line_key, "None"))
-                if st.session_state.graph_settings.get(ref_line_key, "None") in ref_options
-                else 0,
-                key=f"ref_sel_{current_gene}",
-                help="Horizontal dashed line at a condition's expression level",
-            )
-            st.session_state.graph_settings[ref_line_key] = selected_ref
-        with tb_row2[1]:
-            label_mode = st.selectbox(
-                "Label Mode",
-                label_modes,
-                index=label_modes.index(st.session_state.graph_settings.get(label_mode_key, "Auto-wrap")),
-                key=f"lbl_mode_{current_gene}",
-                help="How x-axis labels handle long text",
-            )
-            st.session_state.graph_settings[label_mode_key] = label_mode
-        with tb_row2[2]:
-            _cur_mode = st.session_state.graph_settings.get("error_bar_mode", "livak_sd")
-            _cur_label = next((k for k, v in _EB_LABELS.items() if v == _cur_mode), "Livak ±SD")
-            _eb_choice = st.selectbox(
-                "Error bars", _eb_names, index=_eb_names.index(_cur_label),
-                key="eb_mode_global",
-                help="Livak ±SD (fold-change domain, default) · 95% CI · SEM/SD (Ct domain). "
-                     "Applies to all genes; the caption on each chart states which is shown.",
-            )
-            st.session_state.graph_settings["error_bar_mode"] = _EB_LABELS[_eb_choice]
-        with tb_row2[3]:
-            st.session_state.graph_settings["show_n"] = st.toggle(
-                "Show n=",
-                value=st.session_state.graph_settings.get("show_n", False),
-                key="show_n_global",
-                help="Annotate each bar with its replicate count.",
-            )
-
-        if f"{current_gene}_bar_settings" not in st.session_state:
-            st.session_state[f"{current_gene}_bar_settings"] = {}
-        if "bar_colors_per_sample" not in st.session_state.graph_settings:
-            st.session_state.graph_settings["bar_colors_per_sample"] = {}
-
-        for idx, (_, row) in enumerate(gene_data.iterrows()):
-            condition = row["Condition"]
-            bar_key = f"{current_gene}_{condition}"
-            if bar_key not in st.session_state[f"{current_gene}_bar_settings"]:
-                st.session_state[f"{current_gene}_bar_settings"][bar_key] = {
-                    "color": "#FFFFFF",
-                    "show_sig": True,
-                    "show_sig_1": True,
-                    "show_sig_2": True,
-                    "show_sig_3": True,
-                    "show_err": True,
-                }
-            # Migrate old entries missing per-symbol keys
-            bs = st.session_state[f"{current_gene}_bar_settings"][bar_key]
-            for sk in ("show_sig_1", "show_sig_2", "show_sig_3"):
-                if sk not in bs:
-                    bs[sk] = bs.get("show_sig", True)
-
-        with st.expander("Settings & Colors", expanded=False):
-                s_col1, s_col2, s_col3, s_col4 = st.columns(4)
-
-                with s_col1:
-                    st.caption("**Display**")
-                    gene_display = st.text_input(
-                        "Gene display name",
-                        value=st.session_state.gene_display_names.get(current_gene, current_gene),
-                        key=f"gene_display_{current_gene}",
-                        placeholder=current_gene,
-                    )
-                    gene_display_stripped = (gene_display.strip() if gene_display else "")[:50]
-                    if gene_display_stripped and gene_display_stripped != current_gene:
-                        st.session_state.gene_display_names[current_gene] = gene_display_stripped
-                    elif current_gene in st.session_state.gene_display_names:
-                        del st.session_state.gene_display_names[current_gene]
-
-                    bg_color = st.color_picker(
-                        "Background",
-                        st.session_state.graph_settings.get(f"{current_gene}_bg_color",
-                            st.session_state.graph_settings.get("plot_bgcolor", "#FFFFFF")),
-                        key=f"bg_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_bg_color"] = bg_color
-
-                with s_col2:
-                    st.caption("**Figure Size**")
-                    size_preset_key = f"{current_gene}_size_preset"
-                    size_preset_names = list(FIGURE_SIZE_PRESETS.keys()) + ["Custom"]
-                    if size_preset_key not in st.session_state.graph_settings:
-                        st.session_state.graph_settings[size_preset_key] = "PPT Full"
-                    current_size_preset = st.session_state.graph_settings.get(size_preset_key, "PPT Full")
-                    if current_size_preset not in size_preset_names:
-                        current_size_preset = "Custom"
-                    selected_size = st.selectbox(
-                        "Size Preset",
-                        size_preset_names,
-                        index=size_preset_names.index(current_size_preset),
-                        key=f"size_preset_{current_gene}",
-                    )
-                    prev_size_preset = st.session_state.graph_settings.get(size_preset_key, "PPT Full")
-                    if selected_size != "Custom" and selected_size in FIGURE_SIZE_PRESETS:
-                        preset = FIGURE_SIZE_PRESETS[selected_size]
-                        st.session_state.graph_settings[f"{current_gene}_figure_width"] = preset["width"]
-                        st.session_state.graph_settings[f"{current_gene}_figure_height"] = preset["height"]
-                    st.session_state.graph_settings[size_preset_key] = selected_size
-                    if selected_size != prev_size_preset:
-                        st.rerun()
-                    fig_width_cm = st.slider(
-                        "Width (cm)", 10.0, 40.0,
-                        value=float(st.session_state.graph_settings.get(f"{current_gene}_figure_width",
-                            st.session_state.graph_settings.get("figure_width", 28))),
-                        step=0.5, key=f"fig_w_{current_gene}",
-                    )
-                    fig_height_cm = st.slider(
-                        "Height (cm)", 6.0, 25.0,
-                        value=float(st.session_state.graph_settings.get(f"{current_gene}_figure_height",
-                            st.session_state.graph_settings.get("figure_height", 16))),
-                        step=0.5, key=f"fig_h_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_figure_width"] = fig_width_cm
-                    st.session_state.graph_settings[f"{current_gene}_figure_height"] = fig_height_cm
-                    if selected_size != "Custom" and selected_size in FIGURE_SIZE_PRESETS:
-                        preset = FIGURE_SIZE_PRESETS[selected_size]
-                        if fig_width_cm != preset["width"] or fig_height_cm != preset["height"]:
-                            st.session_state.graph_settings[size_preset_key] = "Custom"
-
-                with s_col3:
-                    st.caption("**Fonts**")
-                    global_font = st.slider(
-                        "Global font", 8, 28,
-                        value=st.session_state.graph_settings.get(f"{current_gene}_font_size",
-                            st.session_state.graph_settings.get("font_size", 14)),
-                        key=f"gf_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_font_size"] = global_font
-                    tick_size = st.slider(
-                        "X-tick labels", 8, 24,
-                        value=st.session_state.graph_settings.get(f"{current_gene}_tick_size", 12),
-                        key=f"ts_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_tick_size"] = tick_size
-                    ylabel_size = st.slider(
-                        "Y-axis label", 8, 24,
-                        value=st.session_state.graph_settings.get(f"{current_gene}_ylabel_size", 14),
-                        key=f"ys_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_ylabel_size"] = ylabel_size
-
-                with s_col4:
-                    st.caption("**Bar Style**")
-                    bar_opacity = st.slider(
-                        "Bar opacity", 0.3, 1.0,
-                        value=float(st.session_state.graph_settings.get(f"{current_gene}_bar_opacity",
-                            st.session_state.graph_settings.get("bar_opacity", 0.85))),
-                        step=0.05, key=f"bo_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_bar_opacity"] = bar_opacity
-                    outline_width = st.slider(
-                        "Outline width", 0, 3,
-                        value=int(st.session_state.graph_settings.get(f"{current_gene}_marker_line_width",
-                            st.session_state.graph_settings.get("marker_line_width", 1))),
-                        key=f"ow_{current_gene}",
-                    )
-                    st.session_state.graph_settings[f"{current_gene}_marker_line_width"] = outline_width
-                    y_min_key = f"{current_gene}_y_min"
-                    y_max_key = f"{current_gene}_y_max"
-                    y_min_input = st.number_input(
-                        "Y-axis min",
-                        value=st.session_state.graph_settings.get(y_min_key),
-                        placeholder="Auto",
-                        key=f"ymin_{current_gene}",
-                        help="Leave empty for auto range",
-                    )
-                    y_max_input = st.number_input(
-                        "Y-axis max",
-                        value=st.session_state.graph_settings.get(y_max_key),
-                        placeholder="Auto",
-                        key=f"ymax_{current_gene}",
-                        help="Leave empty for auto range",
-                    )
-                    if (y_min_input is not None and y_max_input is not None
-                            and y_max_input > 0 and y_min_input >= y_max_input):
-                        st.warning("Y-axis min must be less than max. Using auto range.")
-                        y_min_input = None
-                        y_max_input = None
-                    if y_min_input is not None:
-                        st.session_state.graph_settings[y_min_key] = y_min_input
-                    elif y_min_key in st.session_state.graph_settings:
-                        del st.session_state.graph_settings[y_min_key]
-                    if y_max_input is not None:
-                        st.session_state.graph_settings[y_max_key] = y_max_input
-                    elif y_max_key in st.session_state.graph_settings:
-                        del st.session_state.graph_settings[y_max_key]
-
-                st.markdown("---")
-
-                st.markdown("**Per-Bar Settings**")
-                # Sort gene_data to match graph bar order (sample_order → condition)
-                _bar_display_data = gene_data.copy()
-                _so = st.session_state.get("sample_order", [])
-                _sm = st.session_state.get("sample_mapping", {})
-                if _so and _sm:
-                    _cond_order = []
-                    _seen = set()
-                    for _s in _so:
-                        if _sm.get(_s, {}).get("include", True):
-                            _c = _sm.get(_s, {}).get("condition", _s)
-                            if _c in _bar_display_data["Condition"].values and _c not in _seen:
-                                _cond_order.append(_c)
-                                _seen.add(_c)
-                    for _c in _bar_display_data["Condition"].unique():
-                        if _c not in _seen:
-                            _cond_order.append(_c)
-                    _bar_display_data["Condition"] = pd.Categorical(
-                        _bar_display_data["Condition"], categories=_cond_order, ordered=True
-                    )
-                    _bar_display_data = _bar_display_data.sort_values("Condition").reset_index(drop=True)
-
-                # Header row
-                hdr = st.columns([3, 0.8, 2.5])
-                hdr[0].markdown("<small>**Condition**</small>", unsafe_allow_html=True)
-                hdr[1].markdown("<small>**Color**</small>", unsafe_allow_html=True)
-                with hdr[2]:
-                    _opt_hdr = st.columns(4)
-                    for _hi, _hlbl in enumerate([
-                        "<small>**✱**<br><span style='color:#888'>Sig.1</span></small>",
-                        "<small>**#**<br><span style='color:#888'>Sig.2</span></small>",
-                        "<small>**†**<br><span style='color:#888'>Sig.3</span></small>",
-                        "<small>**±**<br><span style='color:#888'>Err</span></small>",
-                    ]):
-                        _opt_hdr[_hi].markdown(_hlbl, unsafe_allow_html=True)
-
-                option_labels = ["✱", "#", "†", "±"]
-                option_keys = ["show_sig_1", "show_sig_2", "show_sig_3", "show_err"]
-
-                for idx, (_, row) in enumerate(_bar_display_data.iterrows()):
-                    condition = row["Condition"]
-                    group = row.get("Group", "Treatment")
-                    bar_key = f"{current_gene}_{condition}"
-                    bs = st.session_state[f"{current_gene}_bar_settings"][bar_key]
-
-                    rc = st.columns([3, 0.8, 2.5])
-                    lbl = condition if len(condition) <= 22 else condition[:19] + "..."
-                    rc[0].markdown(
-                        f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
-                        unsafe_allow_html=True,
-                    )
-                    # Color picker — show preset tone or custom
-                    _active_pn = st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic")
-                    _cp_key = f"cp_{current_gene}_{condition}"
-                    _desired_key = f"_desired_{_cp_key}"
-                    if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
-                        _preset = GRAPH_PRESETS[_active_pn]
-                        _is_ref = (condition == st.session_state.get("analysis_ref_condition"))
-                        _display_color = _preset["ref"] if _is_ref else _preset["color"]
-                        # Sync widget to preset color only when preset (or ref detection) changes.
-                        # This avoids overwriting user interactions while keeping the picker in
-                        # sync when the user switches presets.
-                        if st.session_state.get(_desired_key) != _display_color:
-                            st.session_state[_cp_key] = _display_color
-                            st.session_state[_desired_key] = _display_color
-                    else:
-                        _display_color = st.session_state.graph_settings.get(
-                            "bar_colors_per_sample", {}
-                        ).get(bar_key, bs.get("color", "#FFFFFF"))
-
-                    new_color = rc[1].color_picker(
-                        "c", _display_color,
-                        key=_cp_key,
-                        label_visibility="collapsed",
-                    )
-
-                    # Update state based on current mode
-                    if _active_pn != "Custom":
-                        if new_color != _display_color:
-                            # User picked a different color → switch to Custom mode
-                            st.session_state.graph_settings[f"{current_gene}_color_preset"] = "Custom"
-                            st.session_state[_desired_key] = new_color
-                            bs["color"] = new_color
-                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
-                        else:
-                            # No change: keep bs and bar_colors in sync with preset
-                            bs["color"] = _display_color
-                            st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = _display_color
-                    else:
-                        # Custom mode: widget value is authoritative
-                        st.session_state[_desired_key] = new_color
-                        bs["color"] = new_color
-                        st.session_state.graph_settings.setdefault("bar_colors_per_sample", {})[bar_key] = new_color
-
-                    with rc[2]:
-                        opt_cols = st.columns(4)
-                        for oi, (ol, ok) in enumerate(zip(option_labels, option_keys)):
-                            bs[ok] = opt_cols[oi].checkbox(
-                                ol, bs.get(ok, True),
-                                key=f"{ok}_{current_gene}_{condition}",
-                                label_visibility="collapsed",
-                            )
-                    # Keep legacy show_sig in sync (all-or-nothing fallback)
-                    bs["show_sig"] = bs["show_sig_1"] or bs["show_sig_2"] or bs["show_sig_3"]
-
-                _bar_settings = st.session_state[f"{current_gene}_bar_settings"]
-
-        current_settings = st.session_state.graph_settings.copy()
-        current_settings["show_significance"] = st.session_state.graph_settings.get(
-            show_sig_key, True
-        )
-        current_settings["show_error"] = st.session_state.graph_settings.get(
-            show_err_key, True
-        )
-        current_settings["bar_gap"] = st.session_state.graph_settings.get(
-            bar_gap_key, 0.45
-        )
-        # Override global defaults with per-gene values
-        gs = st.session_state.graph_settings
-        current_settings["figure_width"] = gs.get(f"{current_gene}_figure_width", gs.get("figure_width", 28))
-        current_settings["figure_height"] = gs.get(f"{current_gene}_figure_height", gs.get("figure_height", 16))
-        current_settings["font_size"] = gs.get(f"{current_gene}_font_size", gs.get("font_size", 14))
-        current_settings["bar_opacity"] = gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.85))
-        current_settings["marker_line_width"] = gs.get(f"{current_gene}_marker_line_width", gs.get("marker_line_width", 1))
-        current_settings["y_min"] = gs.get(f"{current_gene}_y_min")
-        current_settings["y_max"] = gs.get(f"{current_gene}_y_max")
-        current_settings["label_mode"] = gs.get(f"{current_gene}_label_mode", "Auto-wrap")
-        current_settings["error_bar_mode"] = gs.get("error_bar_mode", "livak_sd")
-        current_settings["show_n"] = gs.get("show_n", False)
-
-        display_gene_name = st.session_state.gene_display_names.get(current_gene, current_gene)
-
-        ref_condition = st.session_state.graph_settings.get(f"{current_gene}_ref_line", "None")
-        ref_line_val = None
-        ref_line_lbl = None
-        if ref_condition != "None":
-            ref_rows = gene_data[gene_data["Condition"] == ref_condition]
-            if not ref_rows.empty:
-                _rv = ref_rows["Relative_Expression"].values[0]
-                if pd.notna(_rv):
-                    ref_line_val = _rv
-                    ref_line_lbl = f"{ref_condition}: {_rv:.2f}"
-
-        # Prepare data points overlay if enabled
-        replicate_df = None
-        show_dp = st.session_state.graph_settings.get(f"{current_gene}_show_data_points", False)
-        if show_dp:
-            raw = st.session_state.get("data")
-            hk = st.session_state.get("hk_gene")
-            ref = st.session_state.get("analysis_ref_condition")
-            mapping = st.session_state.get("sample_mapping", {})
-            excl = st.session_state.get("excluded_wells", set())
-            if raw is not None and hk and ref:
-                all_replicates = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
-                replicate_df = all_replicates[all_replicates["Target"] == current_gene]
-
-        fig = GraphGenerator.create_gene_graph(
-            gene_data,
-            current_gene,
-            current_settings,
-            efficacy_config,
-            sample_order=st.session_state.get("sample_order"),
-            per_sample_overrides=None,
-            display_gene_name=display_gene_name,
-            ref_line_value=ref_line_val,
-            ref_line_label=ref_line_lbl,
-            show_data_points=show_dp,
-            replicate_data=replicate_df,
-            color_preset=st.session_state.graph_settings.get(f"{current_gene}_color_preset", "Classic"),
-            ref_condition=st.session_state.get("analysis_ref_condition"),
-        )
-
-        st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
-        st.session_state.graphs[current_gene] = fig
-
-        with st.expander("📊 All Gene Graphs (Quick View)", expanded=False):
-            _qv_genes = [g for g in gene_list if g != current_gene]
-            all_gene_cols = st.columns(min(len(_qv_genes), 2)) if _qv_genes else [st.container()]
-            for idx, gene in enumerate(_qv_genes):
-                gd = st.session_state.processed_data[gene]
-
-                if f"{gene}_bar_settings" not in st.session_state:
-                    st.session_state[f"{gene}_bar_settings"] = {}
-                    for _, row in gd.iterrows():
-                        condition = row["Condition"]
-                        bar_key = f"{gene}_{condition}"
-                        st.session_state[f"{gene}_bar_settings"][bar_key] = {
-                            "color": "#FFFFFF",
-                            "show_sig": True,
-                            "show_err": True,
-                        }
-
-                gs = st.session_state.graph_settings.copy()
-                gs["show_significance"] = gs.get(f"{gene}_show_sig", True)
-                gs["show_error"] = gs.get(f"{gene}_show_err", True)
-                gs["bar_gap"] = gs.get(f"{gene}_bar_gap", 0.45)
-                gs["figure_height"] = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
-                gs["figure_width"] = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
-                gs["font_size"] = gs.get(f"{gene}_font_size", gs.get("font_size", 14))
-                gs["bar_opacity"] = gs.get(f"{gene}_bar_opacity", gs.get("bar_opacity", 0.85))
-                gs["marker_line_width"] = gs.get(f"{gene}_marker_line_width", gs.get("marker_line_width", 1))
-                gs["y_min"] = gs.get(f"{gene}_y_min")
-                gs["y_max"] = gs.get(f"{gene}_y_max")
-                gs["label_mode"] = gs.get(f"{gene}_label_mode", "Auto-wrap")
-                # sig_style removed — direct mode only
-
-                qv_ref_condition = st.session_state.graph_settings.get(f"{gene}_ref_line", "None")
-                qv_ref_val = None
-                qv_ref_lbl = None
-                if qv_ref_condition != "None":
-                    qv_ref_rows = gd[gd["Condition"] == qv_ref_condition]
-                    if not qv_ref_rows.empty:
-                        _qv_rv = qv_ref_rows["Relative_Expression"].values[0]
-                        if pd.notna(_qv_rv):
-                            qv_ref_val = _qv_rv
-                            qv_ref_lbl = f"{qv_ref_condition}: {_qv_rv:.2f}"
-
-                # Data points for quick view
-                qv_show_dp = gs.get(f"{gene}_show_data_points", False)
-                qv_replicate_df = None
-                if qv_show_dp:
-                    raw = st.session_state.get("data")
-                    hk = st.session_state.get("hk_gene")
-                    ref = st.session_state.get("analysis_ref_condition")
-                    mapping = st.session_state.get("sample_mapping", {})
-                    excl = st.session_state.get("excluded_wells", set())
-                    if raw is not None and hk and ref:
-                        all_reps = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
-                        qv_replicate_df = all_reps[all_reps["Target"] == gene]
-
-                f = GraphGenerator.create_gene_graph(
-                    gd,
-                    gene,
-                    gs,
-                    efficacy_config,
-                    sample_order=st.session_state.get("sample_order"),
-                    display_gene_name=st.session_state.gene_display_names.get(gene, gene),
-                    ref_line_value=qv_ref_val,
-                    ref_line_label=qv_ref_lbl,
-                    show_data_points=qv_show_dp,
-                    replicate_data=qv_replicate_df,
-                    color_preset=gs.get(f"{gene}_color_preset", "Classic"),
-                    ref_condition=st.session_state.get("analysis_ref_condition"),
-                )
-
-                with all_gene_cols[idx % len(all_gene_cols)]:
-                    st.markdown(f"**{gene}**")
-                    st.plotly_chart(f, use_container_width=True, key=f"mini_{gene}")
-                    st.session_state.graphs[gene] = f
+        render_gene_editor(current_gene)
     else:
-        st.info(
-            "⏳ No analysis results yet. Go to the 'Mapping' tab and click 'Run Full Analysis'."
-        )
+        st.info("No analysis results yet — map samples and run analysis first.")
 
 # ==================== TAB 5: EXPORT ====================
 with tab5:
     render_step_indicator("export")
     st.header("Export Results")
 
-    # Detect when settings have drifted from the snapshot taken during the last
-    # analysis run. If they have, the significance markers / fold changes in
-    # processed_data no longer reflect what the user currently has selected,
-    # and any Excel/PPT exported now will carry the stale values.
-    if st.session_state.get("processed_data") and "_exclusion_snapshot" in st.session_state:
-        _snap = st.session_state["_exclusion_snapshot"]
-        _cur = {
-            "excluded_wells": {
-                str(k): sorted(v)
-                for k, v in st.session_state.get("excluded_wells", {}).items()
-            },
-            "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
-            "ttest_type": st.session_state.get("ttest_type", "welch"),
-        }
-        if _cur != _snap:
-            st.warning(
-                "⚠️ Settings changed since the last analysis run "
-                "(QC exclusions, excluded samples, or t-test type). The exports "
-                "below still reflect the previous run. Open the **Analysis** tab "
-                "to auto-rerun, or click **Re-run Analysis** there before exporting."
-            )
-        if st.session_state.get("analysis_stale", False):
-            st.warning(
-                "⚠️ Sample mapping or comparison group changed since the last "
-                "analysis. Significance values may be outdated — re-run analysis "
-                "before exporting."
-            )
+    # Auto-rerun analysis if QC exclusions, stat options, or mapping changed,
+    # so exports never carry stale fold changes / significance markers.
+    maybe_autorun_analysis()
 
-        # Cross-check that the stored ref/cmp condition names still exist in the
-        # current mapping. If the user renamed a condition after running
-        # analysis, processed_data labels diverge from the mapping and exports
-        # will carry the old name.
+    # Defensive guard: if a condition was renamed after the last run, the stored
+    # analysis labels may not match the current mapping (normally clean post-rerun).
+    if st.session_state.get("processed_data"):
         _mapped_conditions = {
             (st.session_state.get("sample_mapping", {}) or {}).get(s, {}).get("condition", s)
             for s in (st.session_state.get("sample_mapping", {}) or {})
         }
-        _ref = st.session_state.get("analysis_ref_condition")
         _missing = [
             (_label, _val)
             for _label, _val in (
-                ("Reference", _ref),
+                ("Reference", st.session_state.get("analysis_ref_condition")),
                 ("Compare (*)", st.session_state.get("analysis_cmp_condition")),
                 ("Compare (#)", st.session_state.get("analysis_cmp_condition_2")),
-                ("Compare (†)", st.session_state.get("analysis_cmp_condition_3")),
+                ("Compare (\u2020)", st.session_state.get("analysis_cmp_condition_3")),
             )
             if _val and _mapped_conditions and _val not in _mapped_conditions
         ]
         if _missing:
             _items = ", ".join(f"{lbl}={v!r}" for lbl, v in _missing)
             st.warning(
-                f"⚠️ Some analysis comparison conditions are no longer present "
-                f"in the current sample mapping: {_items}. The exports will "
-                f"label charts with the old condition names. Re-run analysis "
-                f"so labels match the current mapping."
+                f"\u26a0\ufe0f Some analysis comparison conditions are no longer present "
+                f"in the current sample mapping: {_items}. Re-open the Mapping tab and "
+                f"re-run analysis so labels match."
             )
 
     if st.session_state.processed_data:
@@ -5024,9 +4881,12 @@ with tab5:
             "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
-            "concentration": st.session_state.experiment_desc.get("concentration", "1 ppm"),
-            "treatment_time": st.session_state.experiment_desc.get("treatment_time", "24 h"),
             "ttest_type": st.session_state.get("ttest_type", "welch"),
+            # Treatment time comes from the efficacy catalog (per-assay) so the
+            # PPT "Treatment time:" field is accurate (4 h / 6 h / 24 h / 48 h).
+            "treatment_time": EFFICACY_CONFIG.get(
+                st.session_state.selected_efficacy, {}
+            ).get("treatment_time", "24 h"),
         }
 
         def _build_export_extras():
@@ -5056,30 +4916,14 @@ with tab5:
         efficacy = st.session_state.selected_efficacy
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-        # PPT experiment description (collapsed)
-        with st.expander("Experiment Description (for PPT)", expanded=False):
-            conc_val = st.text_input(
-                "Sample concentration",
-                value=st.session_state.experiment_desc.get("concentration", "1 ppm"),
-                key="exp_concentration",
-            )
-            st.session_state.experiment_desc["concentration"] = conc_val
-            time_val = st.text_input(
-                "Treatment time",
-                value=st.session_state.experiment_desc.get("treatment_time", "24 h"),
-                key="exp_treatment_time",
-            )
-            st.session_state.experiment_desc["treatment_time"] = time_val
-
-        # ---- Reports ----
+        # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")
 
         rpt_cols = st.columns(2)
         with rpt_cols[0]:
             # Gated behind a button + spinner: export_to_excel post-processes chart
-            # XML per gene, so running it on every tab rerun (slider moves, expander
-            # toggles) is wasteful. Mirrors the PowerPoint pattern below.
-            if st.button("Generate Excel Report", key="gen_excel", use_container_width=True):
+            # XML per gene, so running it on every rerun would be wasteful.
+            if st.button("Generate Excel report", key="gen_excel", use_container_width=True):
                 with st.spinner("Building Excel report..."):
                     try:
                         _qc, _rep, _excl = _build_export_extras()
@@ -5093,7 +4937,7 @@ with tab5:
                         st.error(f"Excel generation failed: {e}")
             if "_excel_export" in st.session_state:
                 st.download_button(
-                    "Download Excel Report", data=st.session_state["_excel_export"],
+                    "Download Excel report", data=st.session_state["_excel_export"],
                     file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
@@ -5120,138 +4964,6 @@ with tab5:
                     file_name=f"qPCR_Report_{efficacy}_{timestamp}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     use_container_width=True,
-                )
-
-        rpt_cols2 = st.columns(2)
-        with rpt_cols2[0]:
-            if st.session_state.graphs:
-                try:
-                    html_parts = [
-                        "<html><head><title>qPCR Graphs</title></head><body>",
-                        f"<h1>{efficacy} Analysis</h1>",
-                        f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
-                    ]
-                    _disp_map = st.session_state.get("gene_display_names", {})
-                    for gene, fig in st.session_state.graphs.items():
-                        html_parts.append(f"<h2>{_disp_map.get(gene, gene)}</h2>")
-                        html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-                    html_parts.append("</body></html>")
-                    combined_html = "\n".join(html_parts)
-                    st.download_button(
-                        "Download Interactive HTML", data=combined_html,
-                        file_name=f"qPCR_graphs_{efficacy}_{timestamp}.html",
-                        mime="text/html", use_container_width=True,
-                    )
-                except Exception as e:
-                    st.error(f"HTML generation failed: {e}")
-
-        with rpt_cols2[1]:
-            try:
-                config_data = {
-                    "analysis_params": analysis_params,
-                    "sample_mapping": st.session_state.sample_mapping,
-                    "graph_settings": st.session_state.graph_settings,
-                    "excluded_wells": {f"{k[0]}|{k[1]}": list(v) for k, v in st.session_state.excluded_wells.items()} if isinstance(st.session_state.excluded_wells, dict) else list(st.session_state.excluded_wells),
-                }
-                st.download_button(
-                    "Download Analysis Config",
-                    data=json.dumps(config_data, indent=2),
-                    file_name=f"config_{timestamp}.json",
-                    mime="application/json", use_container_width=True,
-                )
-            except Exception as e:
-                st.error(f"Config generation failed: {e}")
-
-        # ---- Provenance (reproducibility record) ----
-        if st.session_state.get("processed_data"):
-            try:
-                st.download_button(
-                    "⬇️ Download Provenance (JSON)",
-                    data=json.dumps(_current_provenance(), indent=2),
-                    file_name=f"qPCR_provenance_{efficacy}_{timestamp}.json",
-                    mime="application/json", use_container_width=True, key="dl_provenance",
-                )
-            except Exception as e:
-                st.error(f"Provenance generation failed: {e}")
-            try:
-                st.download_button(
-                    "⬇️ Download MIQE Checklist (.md)",
-                    data=build_miqe_checklist(_current_provenance()),
-                    file_name=f"qPCR_MIQE_checklist_{efficacy}_{timestamp}.md",
-                    mime="text/markdown", use_container_width=True, key="dl_miqe",
-                )
-            except Exception as e:
-                st.error(f"MIQE checklist generation failed: {e}")
-
-        # ---- One-click full bundle ----
-        st.markdown("---")
-        if st.session_state.graphs:
-            if st.button("📦 Generate Complete Report Bundle (ZIP)", key="gen_bundle",
-                         use_container_width=True,
-                         help="Excel + PowerPoint + interactive HTML + PNG images in one download"):
-                bundle = {}
-                _disp_map = st.session_state.get("gene_display_names", {})
-                with st.spinner("Building complete report bundle..."):
-                    # Provenance + MIQE checklist (reproducibility records)
-                    try:
-                        _prov = _current_provenance()
-                        bundle[f"provenance_{efficacy}_{timestamp}.json"] = json.dumps(_prov, indent=2)
-                        bundle[f"MIQE_checklist_{efficacy}_{timestamp}.md"] = build_miqe_checklist(_prov)
-                    except Exception as e:
-                        st.warning(f"Provenance/MIQE skipped: {e}")
-                    # Excel
-                    try:
-                        _qc, _rep, _excl = _build_export_extras()
-                        bundle[f"qPCR_{efficacy}_{timestamp}.xlsx"] = export_to_excel(
-                            st.session_state.data, st.session_state.processed_data,
-                            analysis_params, st.session_state.sample_mapping,
-                            qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
-                            gene_display_names=_disp_map,
-                        )
-                    except Exception as e:
-                        st.warning(f"Excel skipped: {e}")
-                    # PowerPoint
-                    try:
-                        ppt_bytes = PPTGenerator.generate_presentation(
-                            st.session_state.graphs, st.session_state.processed_data,
-                            analysis_params, graph_settings=st.session_state.get("graph_settings"),
-                            gene_display_names=_disp_map,
-                        )
-                        bundle[f"qPCR_Report_{efficacy}_{timestamp}.pptx"] = ppt_bytes
-                    except Exception as e:
-                        st.warning(f"PowerPoint skipped: {e}")
-                    # Interactive HTML
-                    try:
-                        _html = ["<html><head><meta charset='utf-8'><title>qPCR Graphs</title></head><body>",
-                                 f"<h1>{efficacy} Analysis</h1>",
-                                 f"<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"]
-                        for gene, fig in st.session_state.graphs.items():
-                            _html.append(f"<h2>{_disp_map.get(gene, gene)}</h2>")
-                            _html.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-                        _html.append("</body></html>")
-                        bundle[f"qPCR_graphs_{efficacy}_{timestamp}.html"] = "\n".join(_html)
-                    except Exception as e:
-                        st.warning(f"HTML skipped: {e}")
-                    # PNG images (high-res)
-                    for gene, fig in st.session_state.graphs.items():
-                        try:
-                            _fc = go.Figure(fig)
-                            _om = fig.layout.margin
-                            _pb = max(180, _om.b if _om and _om.b else 180)
-                            _fc.update_layout(width=1200, height=800 + max(0, _pb - 180),
-                                margin=dict(b=_pb), font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
-                            bundle[f"images/{gene}.png"] = ReportGenerator._fig_to_image(
-                                _fc, format="png", scale=3, width=1200, height=800 + max(0, _pb - 180))
-                        except Exception as e:
-                            st.warning(f"Image skipped ({gene}): {e}")
-                if bundle:
-                    st.session_state["_bundle_export"] = build_zip(bundle)
-                    st.success(f"Bundle ready — {len(bundle)} files.")
-            if "_bundle_export" in st.session_state:
-                st.download_button(
-                    "⬇️ Download Complete Report (ZIP)", data=st.session_state["_bundle_export"],
-                    file_name=f"qPCR_full_report_{efficacy}_{timestamp}.zip",
-                    mime="application/zip", use_container_width=True,
                 )
 
         # ---- Gene Images ----

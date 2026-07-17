@@ -19,7 +19,13 @@ class TestPackageImports:
             CM_TO_PX, CM_TO_EMU,
         )
         assert isinstance(EFFICACY_CONFIG, dict)
-        assert len(EFFICACY_CONFIG) == 10
+        assert len(EFFICACY_CONFIG) == 21
+        # Spot-check the updated catalog (효능평가항목_update.xlsx).
+        assert "MMP1" in EFFICACY_CONFIG["광노화"]["genes"]
+        assert EFFICACY_CONFIG["광노화"]["expected_direction"]["MMP1"] == "down"
+        assert EFFICACY_CONFIG["멜라닌 생성"]["expected_direction"]["MITF"] == "down"
+        assert EFFICACY_CONFIG["장벽"]["controls"]["positive"] == "Retinoic acid"
+        assert "expected_direction" not in EFFICACY_CONFIG["립 색상"]  # ambiguous → omitted
         assert AnalysisConstants.CT_UNDETERMINED_THRESHOLD == 40.0
         assert CM_TO_PX > 37
 

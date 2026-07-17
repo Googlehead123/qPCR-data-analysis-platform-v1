@@ -343,6 +343,98 @@ class QualityControl:
         return suggestions
 
     @staticmethod
+    def auto_select_replicates(
+        data: pd.DataFrame,
+        sd_threshold: float = 0.3,
+        excluded_wells=None,
+    ) -> Tuple[dict, list]:
+        """Automatic best-2-of-3 triplicate QC by minimum pairwise SD.
+
+        For each (Target, Sample) group:
+          * SD (ddof=1) of the replicate CTs <= threshold  -> keep all ('ok',
+            not surfaced).
+          * otherwise drop the replicate farthest from the mean, iteratively,
+            until SD <= threshold or only 2 remain. For a triplicate this leaves
+            the two closest CT values — provably the minimum-pairwise-SD pair
+            (dropping the farther extreme == keeping the closer adjacent pair).
+          * if even the best pair still exceeds the threshold, keep those 2 and
+            flag the group 'unresolved'. A whole condition is never dropped.
+
+        Args:
+            data: long-format frame with Well, Sample, Target, CT.
+            sd_threshold: max acceptable replicate CT SD (default 0.3).
+            excluded_wells: optional dict {(gene, sample): set} or flat set of
+                wells already removed — ignored here, not reconsidered.
+
+        Returns:
+            (exclusions, audit)
+              exclusions: {(target, sample): set(dropped_wells)} for groups where
+                  wells were dropped.
+              audit: list of per-group dicts for every trimmed/unresolved group,
+                  each with Target, Sample, n, orig_sd, final_sd, kept_wells,
+                  dropped_wells, status.
+        """
+        exclusions: dict = {}
+        audit: list = []
+        if data is None or getattr(data, "empty", True):
+            return exclusions, audit
+
+        pre_excluded = set()
+        if isinstance(excluded_wells, dict):
+            for s in excluded_wells.values():
+                pre_excluded.update(s)
+        elif excluded_wells:
+            pre_excluded.update(excluded_wells)
+
+        df = data[["Well", "Sample", "Target", "CT"]].copy()
+        if pre_excluded:
+            df = df[~df["Well"].isin(pre_excluded)]
+        # Only real numeric CTs participate in pair selection.
+        df = df[pd.to_numeric(df["CT"], errors="coerce").notna()]
+
+        def _sd(vals):
+            return float(np.std(vals, ddof=1)) if len(vals) >= 2 else float("nan")
+
+        for (target, sample), group in df.groupby(["Target", "Sample"]):
+            wells = list(group["Well"])
+            cts = [float(c) for c in group["CT"]]
+            n = len(cts)
+            if n < 2:
+                continue
+
+            orig_sd = _sd(cts)
+            if not np.isfinite(orig_sd) or orig_sd <= sd_threshold:
+                continue  # 'ok' — nothing to do
+
+            keep_idx = list(range(n))
+            dropped_idx = []
+            while len(keep_idx) > 2:
+                vals = np.array([cts[i] for i in keep_idx])
+                if _sd(vals) <= sd_threshold:
+                    break
+                mean = vals.mean()
+                far = int(np.argmax(np.abs(vals - mean)))
+                dropped_idx.append(keep_idx.pop(far))
+
+            final_sd = _sd([cts[i] for i in keep_idx])
+            status = "trimmed" if final_sd <= sd_threshold else "unresolved"
+            dropped_wells = {wells[i] for i in dropped_idx}
+            if dropped_wells:
+                exclusions[(target, sample)] = dropped_wells
+            audit.append({
+                "Target": target,
+                "Sample": sample,
+                "n": n,
+                "orig_sd": round(orig_sd, 3),
+                "final_sd": round(final_sd, 3) if np.isfinite(final_sd) else None,
+                "kept_wells": [wells[i] for i in keep_idx],
+                "dropped_wells": sorted(dropped_wells),
+                "status": status,
+            })
+
+        return exclusions, audit
+
+    @staticmethod
     def grubbs_test(values: np.ndarray, alpha: float = 0.05) -> Tuple[bool, int]:
         n = len(values)
         if n < 3:
