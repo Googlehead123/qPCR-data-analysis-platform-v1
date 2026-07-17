@@ -4882,6 +4882,11 @@ with tab5:
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
             "ttest_type": st.session_state.get("ttest_type", "welch"),
+            # Treatment time comes from the efficacy catalog (per-assay) so the
+            # PPT "Treatment time:" field is accurate (4 h / 6 h / 24 h / 48 h).
+            "treatment_time": EFFICACY_CONFIG.get(
+                st.session_state.selected_efficacy, {}
+            ).get("treatment_time", "24 h"),
         }
 
         def _build_export_extras():

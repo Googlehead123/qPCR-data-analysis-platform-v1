@@ -87,24 +87,28 @@ EFFICACY_CONFIG = {
     "탄력": {
         "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN"],
         "cell": "HS68 fibroblast",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "TGFβ", "compare_to": "negative"},
         "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up", "FBN1": "up", "FBN": "up"},
     },
     "광노화": {
         "genes": ["MMP1", "MMP-1", "COL1A1", "COL1"],
         "cell": "HS68 fibroblast",
+        "treatment_time": "24 h",
         "controls": {"negative": "UVB only", "positive": "TGFβ", "compare_to": "negative"},
         "expected_direction": {"MMP1": "down", "MMP-1": "down", "COL1A1": "up", "COL1": "up"},
     },
     "보습/수분": {
         "genes": ["HAS3", "AQP3"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "Retinoic acid", "compare_to": "negative"},
         "expected_direction": {"HAS3": "up", "AQP3": "up"},
     },
     "장벽": {
         "genes": ["FLG", "CLDN1", "CLDN", "IVL"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "24 h",
         # Positive control kept as Retinoic acid per Min (file listed Calcium 1.2mM).
         "controls": {"negative": "Non-treated", "positive": "Retinoic acid", "compare_to": "negative"},
         "expected_direction": {"FLG": "up", "CLDN1": "up", "CLDN": "up", "IVL": "up"},
@@ -112,18 +116,21 @@ EFFICACY_CONFIG = {
     "속보습": {
         "genes": ["HAS2", "AQP1"],
         "cell": "HS68 fibroblast",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "compare_to": "negative"},
         "expected_direction": {"HAS2": "up", "AQP1": "up"},
     },
     "멜라닌 생성": {
         "genes": ["MITF", "TYR"],
         "cell": "B16F10 melanocyte",
+        "treatment_time": "24 / 48 h",
         "controls": {"negative": "α-MSH only", "positive": "Arbutin", "compare_to": "negative"},
         "expected_direction": {"MITF": "down", "TYR": "down"},
     },
     "진정": {
         "genes": ["IL1B", "IL-1β", "IL6", "IL-6", "TNF", "TNFα", "TNFA"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "4 h",
         "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone", "compare_to": "negative"},
         "expected_direction": {
             "IL1B": "down", "IL-1β": "down", "IL6": "down", "IL-6": "down",
@@ -133,24 +140,28 @@ EFFICACY_CONFIG = {
     "가려움 개선": {
         "genes": ["TSLP"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "4 h",
         "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone", "compare_to": "negative"},
         "expected_direction": {"TSLP": "down"},
     },
     "냉감": {
         "genes": ["TRPM8", "CIRBP", "CIRP"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "Menthol", "compare_to": "negative"},
         "expected_direction": {"TRPM8": "up", "CIRBP": "up", "CIRP": "up"},
     },
     "열감": {
         "genes": ["TRPV1"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "compare_to": "negative"},
         "expected_direction": {"TRPV1": "up"},
     },
     "여드름": {
         "genes": ["PPARG", "PPARY", "PPARy", "SREBF1", "SREBP1a", "SREBP1c", "SREBPA", "SREBPC"],
         "cell": "SZ95 sebocyte",
+        "treatment_time": "48 h",
         "controls": {"negative": "IGF only", "compare_to": "negative"},
         "expected_direction": {
             "PPARG": "down", "PPARY": "down", "PPARy": "down", "SREBF1": "down",
@@ -160,30 +171,37 @@ EFFICACY_CONFIG = {
     "과각화": {
         "genes": ["MKI67", "Ki67", "KI67"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "24 h",
         "controls": {"negative": "SZ95 supernatant", "compare_to": "negative"},
         "expected_direction": {"MKI67": "down", "Ki67": "down", "KI67": "down"},
     },
     "활력": {
         "genes": ["PCNA"],
         "cell": "HaCaT keratinocyte",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "EGF", "compare_to": "negative"},
         "expected_direction": {"PCNA": "up"},
     },
     "탈모 개선": {
-        "genes": ["VEGFA", "VEGF", "HGF"],
+        # New file markers (VEGFA, HGF) + the original hair panel (COL17A1, FGF7, FLG).
+        "genes": ["VEGFA", "VEGF", "HGF", "COL17A1", "FGF7", "FLG"],
         "cell": "HFDPC",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "Minoxidil", "compare_to": "negative"},
-        "expected_direction": {"VEGFA": "up", "VEGF": "up", "HGF": "up"},
+        # FLG direction in the hair/scalp context is unclear — left unannotated.
+        "expected_direction": {"VEGFA": "up", "VEGF": "up", "HGF": "up", "COL17A1": "up", "FGF7": "up"},
     },
     "모공 탄력": {
         "genes": ["EMILIN1", "MFAP2", "MAGP1"],
         "cell": "HDF (neonatal / aged)",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "Niacinamide", "compare_to": "negative"},
         "expected_direction": {"EMILIN1": "up", "MFAP2": "up", "MAGP1": "up"},
     },
     "열 노화": {
         "genes": ["TRPV1", "COL6A1", "NID1"],
         "cell": "HaCaT / HS68 fibroblast",
+        "treatment_time": "24 h",
         "controls": {"negative": "Heat (41°C)", "positive": "Ascorbic acid", "compare_to": "negative"},
         # NID1 direction unresolved (low confidence) — omitted pending confirmation.
         "expected_direction": {"TRPV1": "down", "COL6A1": "up"},
@@ -191,12 +209,14 @@ EFFICACY_CONFIG = {
     "민감성 기전": {
         "genes": ["TRPV1", "FLG"],
         "cell": "Sensi-TV1",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "positive": "Panthenol", "compare_to": "negative"},
         "expected_direction": {"TRPV1": "down", "FLG": "up"},
     },
     "외이도염": {
         "genes": ["CXCL8", "IL8", "IL-8", "TNF", "TNF-α", "TNFα", "CBD103", "cBD103", "TSLP"],
         "cell": "CPEK",
+        "treatment_time": "6 h",
         "controls": {"negative": "Bacterial LPS", "positive": "Salicylic acid", "compare_to": "negative"},
         # cBD103 direction ambiguous (anti-inflammatory vs antimicrobial-boost) — omitted.
         "expected_direction": {
@@ -207,12 +227,14 @@ EFFICACY_CONFIG = {
     "구강 개선": {
         "genes": ["CLDN1", "KRT10", "K10"],
         "cell": "CGEP",
+        "treatment_time": "24 h",
         "controls": {"negative": "Non-treated", "compare_to": "negative"},
         "expected_direction": {"CLDN1": "up", "KRT10": "up", "K10": "up"},
     },
     "선번 완화": {
         "genes": ["TRPV1", "VEGFA", "VEGF", "IL6", "IL-6", "AQP3"],
         "cell": "CPEK / HaCaT",
+        "treatment_time": "6 h",
         "controls": {"negative": "UVB", "compare_to": "negative"},
         "expected_direction": {
             "TRPV1": "down", "VEGFA": "down", "VEGF": "down",
@@ -222,6 +244,7 @@ EFFICACY_CONFIG = {
     "립 색상": {
         "genes": ["VEGFA", "VEGF", "NOS3", "EDN1", "MC1R", "TYR"],
         "cell": "Lip explant",
+        "treatment_time": "24 h",
         # Whole-item direction ambiguous (UV-protection vs vascularity claim) —
         # no expected_direction until the intended claim is confirmed.
         "controls": {"negative": "UVB", "compare_to": "negative"},
