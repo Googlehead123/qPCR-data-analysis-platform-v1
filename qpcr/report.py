@@ -1,19 +1,23 @@
-"""ReportGenerator & PPTGenerator — PowerPoint report generation.
+"""Report generation — ReportGenerator (chart images) + PPTGenerator (decks).
 
-ReportGenerator: Legacy PPTX with Cosmax branding
-PPTGenerator: Korean-centric template-based PPTX with efficacy config
+Single source of truth (extracted from the monolith). PPTGenerator keeps a small
+Streamlit coupling (session-state reads for lazy figure render + a user-facing
+error) which is acceptable for this app.
 """
-
 import io
+import os
+import logging
 from datetime import datetime
 from typing import Dict
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU, EFFICACY_CONFIG
 from qpcr.export_utils import export_figure_to_bytes
+from qpcr.graph import GraphGenerator
 
 
 class ReportGenerator:
@@ -83,11 +87,13 @@ class ReportGenerator:
 
         slide = prs.slides.add_slide(prs.slide_layouts[6])
 
+        # Set slide background to white
         background = slide.background
         fill = background.fill
         fill.solid()
-        fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # White
 
+        # Add logo placeholder in top-left corner
         logo_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.3), Inches(2), Inches(0.8)
         )
@@ -96,8 +102,9 @@ class ReportGenerator:
         logo_para = logo_frame.paragraphs[0]
         logo_para.text = "[Add Logo Here]"
         logo_para.font.size = Pt(12)
-        logo_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)
+        logo_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)  # Frost Grey
 
+        # Main title
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(2.5), Inches(12.33), Inches(1)
         )
@@ -106,9 +113,10 @@ class ReportGenerator:
         title_para.text = "qPCR Gene Expression Analysis"
         title_para.font.size = Pt(54)
         title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        title_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)  # Black
         title_para.alignment = PP_ALIGN.CENTER
 
+        # Subtitle with efficacy type
         subtitle_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(3.8), Inches(12.33), Inches(0.5)
         )
@@ -117,9 +125,10 @@ class ReportGenerator:
         efficacy = analysis_params.get("Efficacy_Type", "Analysis")
         subtitle_para.text = f"{efficacy} Efficacy Study"
         subtitle_para.font.size = Pt(32)
-        subtitle_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        subtitle_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)  # Black
         subtitle_para.alignment = PP_ALIGN.CENTER
 
+        # Info box with date, HK gene, and reference sample
         info_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(5.5), Inches(12.33), Inches(1)
         )
@@ -130,15 +139,16 @@ class ReportGenerator:
         ref = analysis_params.get("Reference_Sample", "N/A")
         info_para.text = f"Date: {date}  |  HK Gene: {hk}  |  Reference: {ref}"
         info_para.font.size = Pt(14)
-        info_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)
+        info_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)  # Frost Grey
         info_para.alignment = PP_ALIGN.CENTER
 
+        # Add Cosmax Red accent bar at bottom (full width, 0.5" height)
         accent_bar = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE, Inches(0), Inches(7.0), Inches(13.333), Inches(0.5)
         )
         accent_bar.fill.solid()
-        accent_bar.fill.fore_color.rgb = RGBColor(0xEA, 0x1D, 0x22)
-        accent_bar.line.fill.background()
+        accent_bar.fill.fore_color.rgb = RGBColor(0xEA, 0x1D, 0x22)  # Cosmax Red
+        accent_bar.line.fill.background()  # No border
 
     @staticmethod
     def _add_gene_slide(
@@ -156,11 +166,13 @@ class ReportGenerator:
 
         slide = prs.slides.add_slide(layout)
 
+        # Set slide background to white
         background = slide.background
         fill = background.fill
         fill.solid()
-        fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # White
 
+        # Gene title (Black, bold)
         title_box = slide.shapes.add_textbox(
             Inches(0.3), Inches(0.2), Inches(12.73), Inches(0.6)
         )
@@ -169,9 +181,10 @@ class ReportGenerator:
         title_para.text = f"{gene} Expression"
         title_para.font.size = Pt(28)
         title_para.font.bold = True
-        title_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        title_para.font.color.rgb = RGBColor(0x00, 0x00, 0x00)  # Black
         title_para.alignment = PP_ALIGN.LEFT
 
+        # Method text (if provided) - Frost Grey, small font
         graph_top = Inches(0.9)
         if method_text:
             method_box = slide.shapes.add_textbox(
@@ -182,16 +195,20 @@ class ReportGenerator:
             method_para = method_frame.paragraphs[0]
             method_para.text = method_text
             method_para.font.size = Pt(11)
-            method_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)
+            method_para.font.color.rgb = RGBColor(0xC1, 0xC6, 0xC7)  # Frost Grey
             method_para.alignment = PP_ALIGN.LEFT
+            # Adjust graph position if method text is present
             graph_top = Inches(1.2)
 
         fig_copy = go.Figure(fig)
+        # Preserve the figure's bottom margin (may be large for angled labels)
+        orig_margin = fig.layout.margin
+        orig_b = orig_margin.b if orig_margin and orig_margin.b else 140
         fig_copy.update_layout(
             width=1000,
-            height=550,
-            margin=dict(l=60, r=60, t=60, b=80),
-            font=dict(size=14, family=PLOTLY_FONT_FAMILY),
+            height=550 + max(0, orig_b - 80),
+            margin=dict(l=60, r=60, t=60, b=max(80, orig_b)),
+            font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"),
         )
 
         img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -231,12 +248,13 @@ class ReportGenerator:
                 para2.text = f"  {fc_str} {sig}"
                 para2.font.size = Pt(9)
 
+        # Add Cosmax Red accent bar at bottom (full width, 0.5" height)
         accent_bar = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE, Inches(0), Inches(7.0), Inches(13.333), Inches(0.5)
         )
         accent_bar.fill.solid()
-        accent_bar.fill.fore_color.rgb = RGBColor(0xEA, 0x1D, 0x22)
-        accent_bar.line.fill.background()
+        accent_bar.fill.fore_color.rgb = RGBColor(0xEA, 0x1D, 0x22)  # Cosmax Red
+        accent_bar.line.fill.background()  # No border
 
     @staticmethod
     def _add_dual_gene_slide(prs, layout, gene_pairs: list, processed_data: dict):
@@ -268,7 +286,7 @@ class ReportGenerator:
                 width=600,
                 height=450,
                 margin=dict(l=50, r=30, t=40, b=60),
-                font=dict(size=11, family=PLOTLY_FONT_FAMILY),
+                font=dict(size=11, family=PLOTLY_FONT_FAMILY, color="black"),
             )
 
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -319,8 +337,8 @@ class ReportGenerator:
                 width=350,
                 height=280,
                 margin=dict(l=40, r=20, t=35, b=40),
-                font=dict(size=9, family=PLOTLY_FONT_FAMILY),
-                title=dict(text=gene, font=dict(size=12, family=PLOTLY_FONT_FAMILY)),
+                font=dict(size=9, family=PLOTLY_FONT_FAMILY, color="black"),
+                title=dict(text=gene, font=dict(size=12, family=PLOTLY_FONT_FAMILY, color="black")),
             )
 
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
@@ -367,10 +385,18 @@ class ReportGenerator:
             f"Efficacy Type: {analysis_params.get('Efficacy_Type', 'N/A')}",
             f"Housekeeping Gene: {analysis_params.get('Housekeeping_Gene', 'N/A')}",
             f"Reference Condition: {analysis_params.get('Reference_Sample', 'N/A')}",
-            f"Comparison Condition: {analysis_params.get('Compare_To', 'N/A')}",
+            f"Comparison (*): {analysis_params.get('Compare_To', 'N/A')}",
+        ]
+        cmp2 = analysis_params.get("Compare_To_2")
+        if cmp2:
+            params_text.append(f"Comparison (#): {cmp2}")
+        cmp3 = analysis_params.get("Compare_To_3")
+        if cmp3:
+            params_text.append(f"Comparison (\u2020): {cmp3}")
+        params_text.extend([
             f"Genes Analyzed: {len(processed_data)}",
             f"Analysis Date: {analysis_params.get('Date', 'N/A')}",
-        ]
+        ])
 
         for text in params_text:
             para = summary_frame.add_paragraph()
@@ -415,8 +441,9 @@ class ReportGenerator:
                     para2.font.size = Pt(10)
 
 
+# ==================== PPT GENERATOR (NEW) ====================
 class PPTGenerator:
-    NAVY_BLUE = (0, 0, 0)
+    NAVY_BLUE = (0, 0, 0)  # Black (was navy #1B365D)
     WHITE = (255, 255, 255)
 
     @staticmethod
@@ -431,13 +458,15 @@ class PPTGenerator:
         from pptx.enum.text import PP_ALIGN
         from pptx.dml.color import RGBColor
 
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
 
+        # Background
         background = slide.background
         fill = background.fill
         fill.solid()
         fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.WHITE)
 
+        # Title "유전자 발현 분석" (Gene Expression Analysis)
         title_box = slide.shapes.add_textbox(
             Inches(1), Inches(2.5), Inches(11.33), Inches(1)
         )
@@ -449,6 +478,7 @@ class PPTGenerator:
         p.font.name = "Malgun Gothic"
         p.alignment = PP_ALIGN.CENTER
 
+        # Subtitle (Efficacy Type)
         subtitle_box = slide.shapes.add_textbox(
             Inches(1), Inches(3.8), Inches(11.33), Inches(0.5)
         )
@@ -460,6 +490,7 @@ class PPTGenerator:
         p.font.name = "Malgun Gothic"
         p.alignment = PP_ALIGN.CENTER
 
+        # Date and Info
         info_box = slide.shapes.add_textbox(
             Inches(1), Inches(5.0), Inches(11.33), Inches(1)
         )
@@ -471,6 +502,8 @@ class PPTGenerator:
         p.font.name = "Arial"
         p.alignment = PP_ALIGN.CENTER
 
+        # Logo Placeholder (Bottom Right)
+        # X: 11.5, Y: 6.5 approx
         logo_box = slide.shapes.add_textbox(
             Inches(11.5), Inches(6.5), Inches(1.5), Inches(0.5)
         )
@@ -482,7 +515,7 @@ class PPTGenerator:
         p.alignment = PP_ALIGN.RIGHT
 
     @staticmethod
-    def create_gene_slide(prs, gene, fig, gene_data, analysis_params, display_name=None):
+    def create_gene_slide(prs, gene, fig, gene_data, analysis_params, graph_settings=None, display_name=None):
         from pptx.util import Inches, Pt
         from pptx.enum.text import PP_ALIGN
         from pptx.enum.shapes import MSO_SHAPE
@@ -491,11 +524,13 @@ class PPTGenerator:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         display_name = display_name or gene
 
+        # Background
         background = slide.background
         fill = background.fill
         fill.solid()
         fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.WHITE)
 
+        # Title
         title_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.3), Inches(9.0), Inches(0.8)
         )
@@ -506,6 +541,7 @@ class PPTGenerator:
         p.font.bold = True
         p.font.name = "Malgun Gothic"
 
+        # Navy Blue Line
         line = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(1.1), Inches(9.0), Inches(0.05)
         )
@@ -513,8 +549,14 @@ class PPTGenerator:
         line.fill.fore_color.rgb = PPTGenerator._get_color_rgb(PPTGenerator.NAVY_BLUE)
         line.line.fill.background()
 
+        # Graph — use per-gene dimensions from graph_settings if available
+        gs = graph_settings or {}
+        fb_w = max(int(gs.get(f"{gene}_figure_width", gs.get("figure_width", 28)) * CM_TO_PX), 800)
+        fb_h = max(int(gs.get(f"{gene}_figure_height", gs.get("figure_height", 16)) * CM_TO_PX), 500)
         try:
-            img_bytes = ReportGenerator._fig_to_image(fig, format="png", scale=2, width=1200, height=900)
+            orig_m = fig.layout.margin
+            extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
+            img_bytes = ReportGenerator._fig_to_image(fig, format="png", scale=2, width=fb_w, height=fb_h + extra_b)
             image_stream = io.BytesIO(img_bytes)
             slide.shapes.add_picture(
                 image_stream,
@@ -529,15 +571,20 @@ class PPTGenerator:
             )
             err_box.text = f"Graph Error: {str(e)}"
 
+        # Data Table (limit to 5 rows to prevent slide overflow — slide height is 7.5")
         if gene_data is not None and not gene_data.empty:
-            rows = len(gene_data) + 1
-            cols = 4
+            max_table_rows = 5
+            display_data = gene_data.head(max_table_rows) if len(gene_data) > max_table_rows else gene_data
+            overflow_note = f" (+{len(gene_data) - max_table_rows} more in Excel)" if len(gene_data) > max_table_rows else ""
+            rows = len(display_data) + 1
+            cols = 4  # Sample, Condition, Fold Change, P-value
             table_height = Inches(0.3 * rows)
             table_shape = slide.shapes.add_table(
                 rows, cols, Inches(0.5), Inches(5.8), Inches(6.0), table_height
             )
             table = table_shape.table
 
+            # Headers
             headers = ["시료명 (Sample)", "Condition", "Fold Change", "P-value"]
             for i, h in enumerate(headers):
                 cell = table.cell(0, i)
@@ -545,7 +592,8 @@ class PPTGenerator:
                 cell.text_frame.paragraphs[0].font.size = Pt(10)
                 cell.text_frame.paragraphs[0].font.bold = True
 
-            for i, row in enumerate(gene_data.itertuples()):
+            # Data
+            for i, row in enumerate(display_data.itertuples()):
                 r = i + 1
                 sample_val = getattr(row, "Original_Sample", getattr(row, "Sample", ""))
                 cond_val = getattr(row, "Condition", "")
@@ -555,14 +603,23 @@ class PPTGenerator:
                 pval = getattr(row, "p_value", None)
                 sig = getattr(row, "significance", "")
 
-                table.cell(r, 0).text = str(sample_val)
-                table.cell(r, 1).text = str(cond_val)
+                table.cell(r, 0).text = str(sample_val)[:30]
+                table.cell(r, 1).text = str(cond_val)[:30]
                 table.cell(r, 2).text = f"{fc_val:.2f}" if pd.notna(fc_val) else "-"
                 table.cell(r, 3).text = f"{pval:.4f} {sig}" if pd.notna(pval) else "-"
 
                 for j in range(4):
                     table.cell(r, j).text_frame.paragraphs[0].font.size = Pt(9)
 
+            if overflow_note:
+                note_box = slide.shapes.add_textbox(
+                    Inches(0.5), Inches(5.8 + 0.3 * rows), Inches(6.0), Inches(0.3)
+                )
+                note_box.text_frame.paragraphs[0].text = f"Showing {max_table_rows}/{len(gene_data)} conditions{overflow_note}"
+                note_box.text_frame.paragraphs[0].font.size = Pt(8)
+                note_box.text_frame.paragraphs[0].font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+
+        # Metadata Box
         meta_box = slide.shapes.add_textbox(
             Inches(7.0), Inches(1.5), Inches(2.5), Inches(5.0)
         )
@@ -578,13 +635,22 @@ class PPTGenerator:
         add_meta_line("Analysis Parameters", bold=True)
         add_meta_line(f"HK Gene: {analysis_params.get('Housekeeping_Gene', '-')}")
         add_meta_line(f"Ref Sample: {analysis_params.get('Reference_Sample', '-')}")
-        add_meta_line(f"Compare: {analysis_params.get('Compare_To', '-')}")
+        add_meta_line(f"Compare (*): {analysis_params.get('Compare_To', '-')}")
+        compare_2 = analysis_params.get("Compare_To_2")
+        if compare_2:
+            add_meta_line(f"Compare (#): {compare_2}")
+        compare_3 = analysis_params.get("Compare_To_3")
+        if compare_3:
+            add_meta_line(f"Compare (\u2020): {compare_3}")
         add_meta_line("")
         add_meta_line("통계적 유의성 (Significance)", bold=True)
-        add_meta_line("* p < 0.05")
-        add_meta_line("** p < 0.01")
-        add_meta_line("*** p < 0.001")
+        add_meta_line("* p < 0.05   ** p < 0.01   *** p < 0.001")
+        if compare_2:
+            add_meta_line("# p < 0.05   ## p < 0.01   ### p < 0.001")
+        if compare_3:
+            add_meta_line("\u2020 p < 0.05   \u2020\u2020 p < 0.01   \u2020\u2020\u2020 p < 0.001")
 
+        # Logo Placeholder
         logo_box = slide.shapes.add_textbox(
             Inches(11.5), Inches(6.5), Inches(1.5), Inches(0.5)
         )
@@ -617,6 +683,7 @@ class PPTGenerator:
         source = prs.slides[source_index]
         new_slide = prs.slides.add_slide(source.slide_layout)
 
+        # Map source relationship IDs to new ones
         rid_map = {}
         for rid, rel in source.part.rels.items():
             rel_type = str(rel.reltype)
@@ -638,17 +705,29 @@ class PPTGenerator:
                         rel.target_part, rel.reltype
                     )
                 rid_map[rid] = new_rid
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.warning(f"PPT slide copy: skipped relationship {rid}: {e}")
+                # Surface to the user so a broken slide isn't silently shipped.
+                try:
+                    st.warning(
+                        f"⚠️ PPT slide copy skipped a relationship "
+                        f"({rel.reltype}). The exported slide may be missing an "
+                        f"image or link. Details: {e}"
+                    )
+                except Exception:
+                    pass
 
         source_spTree = source._element.spTree
         target_spTree = new_slide._element.spTree
 
+        # Remove layout placeholder shapes from target
         shape_tags = ['}sp', '}pic', '}cxnSp', '}grpSp']
         for child in list(target_spTree):
             if any(child.tag.endswith(t) for t in shape_tags):
                 target_spTree.remove(child)
 
+        # Deep-copy shapes from source, remapping relationship IDs
         for child in source_spTree:
             if any(child.tag.endswith(t) for t in shape_tags):
                 new_child = copy.deepcopy(child)
@@ -672,13 +751,15 @@ class PPTGenerator:
     def _populate_gene_slide(prs, slide, gene, fig, gene_data, analysis_params, graph_settings, display_name=None):
         """Populate a template-duplicated gene slide with gene name and graph image.
 
-        `display_name` overrides `gene` for all user-visible text so a rename
-        from the Graphs tab makes it onto the slide.
+        `display_name` overrides `gene` for ALL user-visible text on the slide
+        (title, "효능 평가" prefix). When the user renamed the gene in the Graphs
+        tab, the rename is honored here so the slide matches the on-screen graph.
         """
         from pptx.util import Inches, Pt, Emu
 
         display_name = display_name or gene
 
+        # Update text boxes on the template slide
         for shape in slide.shapes:
             if not shape.has_text_frame:
                 continue
@@ -709,26 +790,35 @@ class PPTGenerator:
                             run.text = ""
                     break
 
-            # TextBox 2: experiment details (top-right area) — update with params
+            # TextBox 2: experiment details (top-right area) — fill template fields
             elif (shape.left is not None and shape.top is not None
                   and shape.left > 3500000 and shape.top < 500000):
-                tf = shape.text_frame
-                hk = analysis_params.get("Housekeeping_Gene", "-")
-                ref = analysis_params.get("Reference_Sample", "-")
-                cmp = analysis_params.get("Compare_To", "-")
-                efficacy_t = analysis_params.get("Efficacy_Type", "-")
-                for para in tf.paragraphs:
-                    for run in para.runs:
-                        run.text = ""
-                if tf.paragraphs and tf.paragraphs[0].runs:
-                    tf.paragraphs[0].runs[0].text = (
-                        f"{efficacy_t} | HK: {hk} | Ref: {ref} | vs: {cmp}"
-                    )
+                efficacy_t = analysis_params.get("Efficacy_Type", "")
+                eff_cfg = EFFICACY_CONFIG.get(efficacy_t, {})
+                field_values = {
+                    "Date: ": analysis_params.get("Date", "")[:10],
+                    "Cell line: ": eff_cfg.get("cell", ""),
+                    "Sample concentration: ": analysis_params.get("concentration", "1 ppm"),
+                    "Positive control: ": eff_cfg.get("controls", {}).get("positive", ""),
+                    "Inducer: ": eff_cfg.get("controls", {}).get("negative", ""),
+                    "Treatment time: ": analysis_params.get("treatment_time", "24 h"),
+                    "Test method:": " qPCR (DDCt)",
+                }
+                for para in shape.text_frame.paragraphs:
+                    if not para.runs:
+                        continue
+                    label = para.runs[0].text
+                    for field_label, value in field_values.items():
+                        if label.strip().startswith(field_label.strip()):
+                            para.runs[0].text = f"{field_label}{value}"
+                            for extra_run in para.runs[1:]:
+                                extra_run.text = ""
+                            break
 
         # Add graph image
         gs = graph_settings or {}
-        w_cm = gs.get("figure_width", 28)
-        h_cm = gs.get("figure_height", 16)
+        w_cm = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
+        h_cm = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
 
         fig_copy = go.Figure(fig)
         fig_copy.update_layout(
@@ -742,6 +832,7 @@ class PPTGenerator:
 
             w_emu = int(w_cm * CM_TO_EMU)
             h_emu = int(h_cm * CM_TO_EMU)
+            # Available area: ~1.0" to ~6.6" vertically, ~12" wide
             max_w_emu = int(11.5 * 914400)
             max_h_emu = int(5.2 * 914400)
 
@@ -756,7 +847,7 @@ class PPTGenerator:
 
             slide_w = int(prs.slide_width)
             left = max(0, int((slide_w - w_emu) / 2))
-            top = int(1.0 * 914400)
+            top = int(1.0 * 914400)  # 1.0" below header
 
             slide.shapes.add_picture(
                 img_stream, left, top, width=Emu(w_emu), height=Emu(h_emu)
@@ -781,20 +872,45 @@ class PPTGenerator:
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         template_path = os.path.join(
-            os.path.dirname(script_dir), "251215 효능평가 결과 TEMPLATE.pptx"
+            script_dir, "251215 효능평가 결과 TEMPLATE.pptx"
         )
         use_template = os.path.isfile(template_path)
 
         gs = graph_settings or {}
         gene_display_names = gene_display_names or {}
         graphs = graphs or {}
-        # processed_data is the source of truth: stale entries in `graphs`
-        # from earlier analyses don't create phantom slides.
+
+        # Source of truth is processed_data (the analysis output). Stale entries
+        # in `graphs` from earlier runs are ignored; missing figures are
+        # rendered lazily below so PPT works even if the user never opened
+        # the Graphs tab.
         gene_list = [
             g for g in (processed_data.keys() if processed_data else [])
             if processed_data.get(g) is not None and not processed_data[g].empty
         ]
         n_genes = len(gene_list)
+
+        def _get_fig(gene):
+            """Return a Plotly figure for `gene`, rendering on demand if missing."""
+            fig = graphs.get(gene)
+            if fig is not None:
+                return fig
+            try:
+                gene_data_local = processed_data.get(gene)
+                if gene_data_local is None or gene_data_local.empty:
+                    return None
+                disp = gene_display_names.get(gene, gene)
+                return GraphGenerator.create_gene_graph(
+                    gene_data_local,
+                    gene,
+                    gs or {},
+                    EFFICACY_CONFIG.get(analysis_params.get("Efficacy_Type", ""), {}),
+                    sample_order=st.session_state.get("sample_order"),
+                    display_gene_name=disp,
+                    ref_condition=st.session_state.get("analysis_ref_condition"),
+                )
+            except Exception:
+                return None
 
         if use_template and n_genes > 0:
             prs = Presentation(template_path)
@@ -827,7 +943,7 @@ class PPTGenerator:
             # Step 5: Populate each gene slide with gene name and graph
             for i, gene in enumerate(gene_list):
                 slide = prs.slides[1 + i]
-                fig = graphs.get(gene)
+                fig = _get_fig(gene)
                 gene_data = processed_data.get(gene)
                 PPTGenerator._populate_gene_slide(
                     prs, slide, gene, fig, gene_data, analysis_params, gs,
@@ -841,10 +957,10 @@ class PPTGenerator:
             PPTGenerator.create_title_slide(prs, analysis_params)
 
             for gene in gene_list:
-                fig = graphs.get(gene)
+                fig = _get_fig(gene)
                 gene_data = processed_data.get(gene)
                 PPTGenerator.create_gene_slide(
-                    prs, gene, fig, gene_data, analysis_params,
+                    prs, gene, fig, gene_data, analysis_params, graph_settings=gs,
                     display_name=gene_display_names.get(gene, gene),
                 )
 
