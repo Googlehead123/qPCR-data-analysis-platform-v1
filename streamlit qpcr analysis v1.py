@@ -4182,6 +4182,25 @@ with tab2:
         seen = set()
         condition_list = [c for c in condition_list if not (c in seen or seen.add(c))]
 
+        # Smart default: pre-select the ΔΔCt reference + primary p-value comparison
+        # from the efficacy category's control structure (the negative / induced
+        # control) so the common case is a confirm, not a manual pick. Overridable.
+        def _match_ctrl(label, conds):
+            if not label:
+                return None
+            ll = str(label).strip().lower()
+            for c in conds:
+                if str(c).strip().lower() == ll:
+                    return c
+            for c in conds:
+                cl = str(c).strip().lower()
+                if ll and (ll in cl or cl in ll):
+                    return c
+            return None
+        _neg_ctrl = (config.get("controls", {}) or {}).get("negative")
+        _neg_match = _match_ctrl(_neg_ctrl, condition_list)
+        _ref_default_idx = condition_list.index(_neg_match) if _neg_match in condition_list else 0
+
         if condition_list:
             # Enhanced layout with clear separation
             st.markdown("#### 📊 Analysis Configuration")
@@ -4201,9 +4220,10 @@ with tab2:
                 ref_condition = st.selectbox(
                     "🎯 ΔΔCt Reference Condition",
                     condition_list,
-                    index=0,
+                    index=_ref_default_idx,
                     key="ref_choice_ddct",
-                    help="Baseline for relative expression calculation",
+                    help="Baseline for relative expression calculation "
+                         "(auto-set from the efficacy control; change if needed)",
                 )
                 ref_sample_key = sample_to_condition[ref_condition]
                 st.caption(f"→ Sample: **{ref_sample_key}**")
@@ -4212,7 +4232,7 @@ with tab2:
                 cmp_condition = st.selectbox(
                     "📈 P-value Reference 1 (*)",
                     condition_list,
-                    index=0,
+                    index=_ref_default_idx,
                     key="cmp_choice_pval",
                     help="Primary control group for statistical testing (asterisk symbols)",
                 )
@@ -4356,8 +4376,37 @@ with tab2:
             st.session_state['_last_cmp_sample_key_2'] = cmp_sample_key_2 if use_second_comparison else None
             st.session_state['_last_cmp_sample_key_3'] = cmp_sample_key_3 if use_third_comparison else None
 
-            # Run button
-            if st.button("Run Full Analysis", type="primary", use_container_width=True):
+            # ---- Pre-run readiness check (guardrails) ----
+            _issues = []
+            _hk = st.session_state.get("hk_gene")
+            if not _hk:
+                _issues.append("Housekeeping gene not selected — pick one on the **Upload** tab.")
+            elif st.session_state.get("data") is not None:
+                _dat = st.session_state.data
+                _all_samples = set(_dat["Sample"].astype(str).unique())
+                _hk_samples = set(
+                    _dat[_dat["Target"].astype(str).str.upper() == str(_hk).upper()]["Sample"].astype(str).unique()
+                )
+                _missing_hk = _all_samples - _hk_samples
+                if _missing_hk:
+                    _issues.append(
+                        f"Housekeeping gene '{_hk}' is missing in {len(_missing_hk)} sample(s)."
+                    )
+            if len(condition_list) < 2:
+                _issues.append("Need at least 2 conditions (a reference plus at least one treatment).")
+
+            if _issues:
+                st.warning("**Not ready to analyze:**\n" + "\n".join(f"- {i}" for i in _issues))
+            else:
+                st.success(
+                    f"✓ Ready — fold changes vs **{ref_condition}**, "
+                    f"p-values vs **{cmp_condition}**."
+                )
+
+            def _run_analysis():
+                # graph_settings is normally created on upload; ensure it exists
+                # (run_full_analysis prunes stale keys from it).
+                st.session_state.setdefault("graph_settings", {})
                 ok = AnalysisEngine.run_full_analysis(
                     ref_sample_key,
                     cmp_sample_key,
@@ -4365,13 +4414,44 @@ with tab2:
                     cmp_sample_key_3 if use_third_comparison else None,
                 )
                 if ok:
-                    success_msg = f"Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values (*) vs: **{cmp_condition}**"
-                    if use_second_comparison and cmp_sample_key_2:
-                        success_msg += f"\n- P-values (#) vs: **{cmp_condition_2}**"
-                    if use_third_comparison and cmp_sample_key_3:
-                        success_msg += f"\n- P-values (†) vs: **{cmp_condition_3}**"
                     st.session_state.analysis_stale = False
-                    st.success(success_msg)
+                    # Pre-build every gene's figure so the Overview + exports are
+                    # ready immediately (no need to open the Graphs tab first).
+                    try:
+                        build_all_figures(
+                            list(st.session_state.processed_data.keys()),
+                            EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {}),
+                        )
+                    except Exception:
+                        pass
+                return ok
+
+            run_cols = st.columns(2)
+            _do_run = run_cols[0].button(
+                "Run analysis", type="primary", use_container_width=True,
+                disabled=bool(_issues), key="btn_run_analysis",
+            )
+            _do_oneclick = run_cols[1].button(
+                "⚡ Analyze & build report", use_container_width=True,
+                disabled=bool(_issues), key="btn_run_and_report",
+                help="Run analysis, assemble the Overview, and prepare the Excel + "
+                     "PowerPoint downloads in one step.",
+            )
+
+            if _do_run or _do_oneclick:
+                if _run_analysis():
+                    if _do_oneclick:
+                        st.session_state["_auto_build_report"] = True
+                        st.success(
+                            f"Analysis complete — fold changes vs **{ref_condition}**. "
+                            "Report is building → open the **Export** tab to download the "
+                            "Excel + PowerPoint."
+                        )
+                    else:
+                        st.success(
+                            f"Analysis complete — fold changes vs **{ref_condition}**. "
+                            "→ Open the **Overview** tab to see the results."
+                        )
                     st.rerun()
                 else:
                     st.error("Analysis failed. Check messages above.")
@@ -4918,6 +4998,32 @@ with tab5:
 
         # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")
+
+        # One-click "Analyze & build report" (Mapping tab) pre-builds both files so
+        # this tab lands ready to download.
+        if st.session_state.pop("_auto_build_report", False):
+            with st.spinner("Building Excel + PowerPoint report..."):
+                try:
+                    _qc, _rep, _excl = _build_export_extras()
+                    st.session_state["_excel_export"] = export_to_excel(
+                        st.session_state.data, st.session_state.processed_data,
+                        analysis_params, st.session_state.sample_mapping,
+                        qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
+                        gene_display_names=st.session_state.get("gene_display_names", {}),
+                    )
+                except Exception as e:
+                    st.error(f"Excel generation failed: {e}")
+                try:
+                    _ppt = PPTGenerator.generate_presentation(
+                        st.session_state.graphs, st.session_state.processed_data,
+                        analysis_params, graph_settings=st.session_state.get("graph_settings"),
+                        gene_display_names=st.session_state.get("gene_display_names", {}),
+                    )
+                    if _ppt:
+                        st.session_state["_ppt_export"] = _ppt
+                except Exception as e:
+                    st.error(f"PPT generation failed: {e}")
+            st.success("Report ready — download the Excel and PowerPoint below.")
 
         rpt_cols = st.columns(2)
         with rpt_cols[0]:
