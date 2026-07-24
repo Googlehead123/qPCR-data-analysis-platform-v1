@@ -76,7 +76,14 @@ def _create_mock_streamlit():
     mock_st.download_button = MagicMock(return_value=False)
     mock_st.metric = MagicMock()
     mock_st.rerun = MagicMock()
-    mock_st.cache_data = lambda f: f
+    # cache_data / cache_resource must support BOTH the bare (@st.cache_data) and
+    # the parametrized (@st.cache_data(show_spinner=False, max_entries=16)) forms,
+    # mirroring the real Streamlit API so decorated functions stay callable under
+    # test regardless of which form the app uses.
+    def _mock_cache(func=None, **_kwargs):
+        return func if func is not None else (lambda f: f)
+    mock_st.cache_data = _mock_cache
+    mock_st.cache_resource = _mock_cache
     mock_st.toggle = MagicMock(return_value=True)
     mock_st.data_editor = MagicMock(return_value=None)
     mock_st.caption = MagicMock()

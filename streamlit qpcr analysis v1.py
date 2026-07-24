@@ -243,6 +243,47 @@ def format_interpretation_text(interp_list, lang="en"):
     return "\n\n".join(gi.get(key, "") for gi in (interp_list or []))
 
 
+@st.cache_data(show_spinner=False, max_entries=16)
+def _cached_replicate_fold_changes(
+    raw_data: pd.DataFrame,
+    hk_gene: str,
+    ref_sample: str,
+    sample_mapping: dict,
+    excluded_wells,
+) -> pd.DataFrame:
+    """Content-hash-memoized per-replicate fold changes (data-point overlay).
+
+    ``AnalysisEngine.compute_replicate_fold_changes`` is pure in its arguments
+    (it reads nothing from ``st.session_state``), so Streamlit's cache is exact:
+    identical inputs always yield identical output, and it recomputes only when
+    the raw data, housekeeping gene, reference sample, sample mapping, or QC
+    exclusions actually change. This was the one compute path that ran on EVERY
+    rerun — and once per gene inside ``build_all_figures`` — so a panel of N genes
+    now pays for the full replicate table once instead of N times per rerun.
+    """
+    return _CoreAnalysisEngine.compute_replicate_fold_changes(
+        raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+    )
+
+
+def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells):
+    """Cache-fronted access to per-replicate fold changes with a live fallback.
+
+    Normal inputs (str/bool mapping values, ``dict[(Target, Sample) -> set]``
+    exclusions) are all hashable, so this hits the cache. Should an argument ever
+    be unhashable, we degrade to a direct recompute rather than let caching break
+    analysis — the fallback preserves the exact pre-cache behaviour.
+    """
+    try:
+        return _cached_replicate_fold_changes(
+            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+        )
+    except Exception:
+        return _CoreAnalysisEngine.compute_replicate_fold_changes(
+            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+        )
+
+
 def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     """Advisory per-gene statistical-test recommendation (ref vs the primary
     comparison condition), assessed on log-scale per-replicate values
@@ -251,7 +292,7 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     if raw is None or not hk or not ref or not processed_data:
         return recs
     try:
-        reps = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excluded)
+        reps = get_replicate_fold_changes(raw, hk, ref, mapping, excluded)
     except Exception:
         return recs
 
@@ -399,7 +440,7 @@ def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
         mapping = st.session_state.get("sample_mapping", {})
         excl = st.session_state.get("excluded_wells", set())
         if raw is not None and hk and ref:
-            reps = AnalysisEngine.compute_replicate_fold_changes(raw, hk, ref, mapping, excl)
+            reps = get_replicate_fold_changes(raw, hk, ref, mapping, excl)
             replicate_df = reps[reps["Target"] == gene]
     return GraphGenerator.create_gene_graph(
         gene_data, gene, cs, efficacy_config,
@@ -2468,12 +2509,12 @@ def export_to_excel(
             ref_sample = params.get("Reference_Sample")
             if hk_gene and ref_sample:
                 try:
-                    replicate_fc = AnalysisEngine.compute_replicate_fold_changes(
-                        raw_data=raw_data,
-                        hk_gene=hk_gene,
-                        ref_sample=ref_sample,
-                        sample_mapping=mapping,
-                        excluded_wells=excluded_wells,
+                    replicate_fc = get_replicate_fold_changes(
+                        raw_data,
+                        hk_gene,
+                        ref_sample,
+                        mapping,
+                        excluded_wells,
                     )
                     if not replicate_fc.empty:
                         replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)

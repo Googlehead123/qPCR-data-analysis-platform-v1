@@ -63,3 +63,27 @@ def test_monolith_matches_package_fc_errors(
             mono[col].to_numpy(dtype=float), pkg[col].to_numpy(dtype=float),
             rtol=1e-9, atol=1e-9, err_msg=f"{col} diverged between monolith and package",
         )
+
+
+def test_cache_fronted_replicate_fold_changes_matches_direct(
+    mock_streamlit, sample_qpcr_raw_data, sample_mapping
+):
+    """The data-point overlay reads per-replicate fold changes through the
+    cache-fronted `get_replicate_fold_changes`; it must return exactly what the
+    underlying `compute_replicate_fold_changes` produces. (Under test the
+    st.cache_data mock is identity, so this pins the wrapper's wiring — correct
+    target function and argument order — not the runtime memoization itself.)
+    Regression guard for the CPU-throttle fix that introduced the cache."""
+    from pandas.testing import assert_frame_equal
+
+    spec = import_module("streamlit qpcr analysis v1")
+    args = (sample_qpcr_raw_data, "GAPDH", "Non-treated", sample_mapping, {})
+
+    direct = spec.AnalysisEngine.compute_replicate_fold_changes(*args)
+    fronted = spec.get_replicate_fold_changes(*args)
+
+    assert not fronted.empty, "fixture should yield replicate fold changes"
+    assert "Replicate_FC" in fronted.columns
+    assert_frame_equal(
+        direct.reset_index(drop=True), fronted.reset_index(drop=True)
+    )
