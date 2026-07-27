@@ -284,6 +284,87 @@ def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping, ex
         )
 
 
+# ==================== QC MEMOIZATION ====================
+# st.tabs renders EVERY tab body on EVERY rerun — Streamlit does not lazily skip
+# the tabs you aren't looking at. So the QC dashboard's summary, replicate table
+# and up to three plate heatmaps used to recompute on every widget interaction
+# anywhere in the app. All three helpers are pure (qpcr/quality_control.py reads
+# no session_state), so memoizing them is exact.
+
+
+def _qc_threshold_key() -> tuple:
+    """The QC thresholds that the helpers read, as a cache-key tuple.
+
+    These live as MUTABLE CLASS ATTRIBUTES on ``QualityControl`` and the QC tab's
+    sliders reassign them at runtime; the helper methods read them directly
+    instead of taking them as arguments. They must therefore be part of every QC
+    cache key, or moving a threshold slider would keep serving the old counts.
+    """
+    return (
+        float(QualityControl.CT_HIGH_THRESHOLD),
+        float(QualityControl.CT_LOW_THRESHOLD),
+        float(QualityControl.CV_THRESHOLD),
+        float(QualityControl.HK_VARIATION_THRESHOLD),
+    )
+
+
+def _excluded_key(excluded_wells) -> tuple:
+    """Normalise an exclusion set to a deterministic, hashable cache key."""
+    if not excluded_wells:
+        return ()
+    return tuple(sorted(str(w) for w in excluded_wells))
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_qc_summary_stats(data: pd.DataFrame, excluded_key: tuple, thresholds: tuple) -> dict:
+    return QualityControl.get_qc_summary_stats(data, set(excluded_key))
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_replicate_stats(data: pd.DataFrame, thresholds: tuple) -> pd.DataFrame:
+    return QualityControl.get_replicate_stats(data)
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def _cached_plate_heatmap(data: pd.DataFrame, value_col: str, excluded_key: tuple,
+                          thresholds: tuple) -> go.Figure:
+    return QualityControl.create_plate_heatmap(
+        data, value_col=value_col, excluded_wells=set(excluded_key)
+    )
+
+
+def get_qc_summary_stats(data, excluded_wells=None) -> dict:
+    """Cache-fronted QC summary with a live fallback (see the caching note above)."""
+    try:
+        return _cached_qc_summary_stats(data, _excluded_key(excluded_wells), _qc_threshold_key())
+    except Exception:
+        return QualityControl.get_qc_summary_stats(data, excluded_wells)
+
+
+def get_replicate_stats(data) -> pd.DataFrame:
+    """Cache-fronted replicate statistics with a live fallback."""
+    try:
+        return _cached_replicate_stats(data, _qc_threshold_key())
+    except Exception:
+        return QualityControl.get_replicate_stats(data)
+
+
+def get_plate_heatmap(data, value_col: str = "CT", excluded_wells=None) -> go.Figure:
+    """Cache-fronted plate heatmap with a live fallback.
+
+    ``st.cache_data`` hands every caller its own copy, so the call sites that
+    then apply ``update_layout(title=...)`` cannot corrupt the cached figure.
+    """
+    try:
+        return _cached_plate_heatmap(
+            data, value_col, _excluded_key(excluded_wells), _qc_threshold_key()
+        )
+    except Exception:
+        return QualityControl.create_plate_heatmap(
+            data, value_col=value_col, excluded_wells=excluded_wells
+        )
+
+
 def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     """Advisory per-gene statistical-test recommendation (ref vs the primary
     comparison condition), assessed on log-scale per-replicate values
@@ -453,24 +534,232 @@ def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
     )
 
 
+# ==================== FIGURE REBUILD GATE ====================
+# build_all_figures runs on every rerun of the Graphs tab and rebuilds a Plotly
+# figure for EVERY gene, so an N-gene panel paid for N figures each time a single
+# widget moved. The figures are a pure function of their inputs, so we fingerprint
+# those inputs and skip genes whose fingerprint is unchanged.
+#
+# Correctness rests entirely on the fingerprint being COMPLETE. If it misses an
+# input, the user changes that input and the chart silently doesn't update — so
+# anything unfingerprintable yields None, which forces the old unconditional
+# rebuild rather than risking a stale chart.
+
+
+def _normalize(obj):
+    """Render a nested structure deterministically JSON-serializable.
+
+    Sets are sorted: their iteration order is not stable across rebuilds, and an
+    unstable key would miss the cache on every rerun (defeating the gate).
+    """
+    if isinstance(obj, dict):
+        return {
+            str(k): _normalize(v)
+            for k, v in sorted(obj.items(), key=lambda kv: str(kv[0]))
+        }
+    if isinstance(obj, (set, frozenset)):
+        return sorted(str(x) for x in obj)
+    if isinstance(obj, (list, tuple)):
+        return [_normalize(x) for x in obj]
+    if isinstance(obj, (str, bool, int, float)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def _digest(payload) -> str | None:
+    try:
+        return hashlib.md5(
+            json.dumps(_normalize(payload), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return None
+
+
+def _df_fingerprint(df) -> str | None:
+    """Content fingerprint of a DataFrame, or ``None`` if it can't be hashed."""
+    if df is None:
+        return "none"
+    try:
+        row_hashes = pd.util.hash_pandas_object(df, index=True).values
+        # hash_pandas_object covers values but not column names — add them.
+        return "{}x{}:{}:{}".format(
+            df.shape[0], df.shape[1],
+            hashlib.md5(row_hashes.tobytes()).hexdigest(),
+            "|".join(map(str, df.columns)),
+        )
+    except Exception:
+        return None
+
+
+def _settings_for_gene(cs: dict, gene: str, other_genes) -> dict:
+    """Strip OTHER genes' per-gene keys out of a resolved settings dict.
+
+    ``resolve_gene_settings`` starts from ``graph_settings.copy()``, which holds
+    every gene's per-gene keys, so keeping them all would make any one gene's
+    tweak invalidate every gene's figure. graph.py reads several ``f"{gene}_..."``
+    keys straight out of settings (bar_gap, bg_color, tick_size, ylabel_size), so
+    this keeps the current gene's own prefixed keys and drops only the others'.
+    Own-prefix is checked first, so gene names that prefix one another are safe.
+    """
+    own = f"{gene}_"
+    out = {}
+    for k, v in cs.items():
+        if (
+            isinstance(k, str)
+            and not k.startswith(own)
+            and any(isinstance(g, str) and k.startswith(f"{g}_") for g in other_genes)
+        ):
+            continue
+        out[k] = v
+    # bar_colors_per_sample is keyed f"{gene}_{condition}" across ALL genes.
+    colors = cs.get("bar_colors_per_sample")
+    if isinstance(colors, dict):
+        out["bar_colors_per_sample"] = {
+            k: v for k, v in colors.items() if isinstance(k, str) and k.startswith(own)
+        }
+    return out
+
+
+def _shared_figure_context(efficacy_config: dict, any_data_points: bool):
+    """Figure inputs shared by all genes, collected once per rerun.
+
+    Includes the values ``create_gene_graph`` reads directly from session_state
+    (sample_mapping, error_bar_mode, the comparison-condition names) rather than
+    from its arguments — those are invisible in its signature but do change output.
+    """
+    ctx = {
+        "efficacy": efficacy_config,
+        "sample_order": st.session_state.get("sample_order"),
+        "sample_mapping": st.session_state.get("sample_mapping", {}),
+        "error_bar_mode": st.session_state.get("error_bar_mode"),
+        "ref_condition": st.session_state.get("analysis_ref_condition"),
+        "cmp_conditions": [
+            st.session_state.get("analysis_cmp_condition", ""),
+            st.session_state.get("analysis_cmp_condition_2", ""),
+            st.session_state.get("analysis_cmp_condition_3", ""),
+        ],
+    }
+    if any_data_points:
+        # The replicate overlay derives from the raw table + HK gene + reference
+        # + QC exclusions, so those feed the fingerprint when any gene shows it.
+        raw_fp = _df_fingerprint(st.session_state.get("data"))
+        if raw_fp is None:
+            return None
+        ctx["replicates"] = {
+            "raw": raw_fp,
+            "hk": st.session_state.get("hk_gene"),
+            "excluded": st.session_state.get("excluded_wells"),
+        }
+    return ctx
+
+
+def _gene_figure_signature(gene, gene_data, shared, other_genes) -> str | None:
+    """Fingerprint every input that feeds this gene's figure, or ``None``."""
+    data_fp = _df_fingerprint(gene_data)
+    if data_fp is None:
+        return None
+    gs = st.session_state.graph_settings
+    return _digest({
+        "gene": gene,
+        "data": data_fp,
+        "settings": _settings_for_gene(resolve_gene_settings(gene), gene, other_genes),
+        "bar_settings": st.session_state.get(f"{gene}_bar_settings", {}),
+        "display_name": st.session_state.gene_display_names.get(gene, gene),
+        "ref_line": gs.get(f"{gene}_ref_line", "None"),
+        "show_data_points": bool(gs.get(f"{gene}_show_data_points", False)),
+        "color_preset": gs.get(f"{gene}_color_preset", "Classic"),
+        "shared": shared,
+    })
+
+
+def _memoized_gene_figure(gene, gene_data, efficacy_config, shared, other_genes,
+                          figures: dict, signatures: dict):
+    """Fetch or rebuild one gene's figure. Returns ``(figure, error)``."""
+    sig = None if shared is None else _gene_figure_signature(gene, gene_data, shared, other_genes)
+    if sig is not None and gene in figures and signatures.get(gene) == sig:
+        return figures[gene], None
+    try:
+        fig = build_gene_figure(gene, gene_data, efficacy_config)
+    except Exception as exc:  # noqa: BLE001
+        # Never memoize a failure — drop the signature so the next pass retries.
+        signatures.pop(gene, None)
+        return None, exc
+    figures[gene] = fig
+    signatures[gene] = sig
+    return fig, None
+
+
+def gene_figure_for_display(gene, gene_data, efficacy_config):
+    """Memoized figure for the live editor's chart.
+
+    The editor is a fragment, so on a fragment-scoped rerun `figures_for_genes`
+    does not run and this must be able to rebuild on its own — but when nothing
+    changed it returns the very same figure the Graphs/Overview pass already
+    built, instead of constructing a third copy on every rerun.
+    """
+    figures = st.session_state.setdefault("graphs", {})
+    signatures = st.session_state.setdefault("_graph_signatures", {})
+    gene_list = list(st.session_state.processed_data.keys())
+    gs = st.session_state.graph_settings
+    any_dp = any(gs.get(f"{g}_show_data_points", False) for g in gene_list)
+    shared = _shared_figure_context(efficacy_config, any_dp)
+    others = [g for g in gene_list if g != gene]
+    fig, err = _memoized_gene_figure(
+        gene, gene_data, efficacy_config, shared, others, figures, signatures
+    )
+    if err is not None:
+        raise err
+    return fig
+
+
+def figures_for_genes(gene_list, efficacy_config: dict):
+    """Return ``(figures, errors)`` for ``gene_list``, rebuilding only what changed.
+
+    Backs both the Graphs tab (which needs every gene's figure for the exports)
+    and the Overview tab's small multiples. They share one memo because a figure
+    is a pure function of ``(gene, session_state, efficacy_config)`` — neither
+    ``gene_list`` nor the calling tab affects the result — and both tabs derive
+    their gene list and efficacy config from the same session state. Sharing
+    removes what used to be a second full N-figure pass on every rerun.
+
+    ``errors`` maps gene -> exception for genes that failed this pass, so a
+    caller can surface the failure; a failure is never memoized.
+    """
+    figures = st.session_state.setdefault("graphs", {})
+    signatures = st.session_state.setdefault("_graph_signatures", {})
+    gene_list = list(gene_list)
+    gs = st.session_state.graph_settings
+    any_dp = any(gs.get(f"{g}_show_data_points", False) for g in gene_list)
+    shared = _shared_figure_context(efficacy_config, any_dp)
+    errors = {}
+
+    for gene in gene_list:
+        gd = st.session_state.processed_data.get(gene)
+        if gd is None or getattr(gd, "empty", True):
+            continue
+        # Must precede the signature: this seeds the bar settings it reads.
+        _ensure_bar_settings(gene, gd)
+        others = [g for g in gene_list if g != gene]
+        # A single gene failing to render must not break the tab or exports.
+        _fig, err = _memoized_gene_figure(
+            gene, gd, efficacy_config, shared, others, figures, signatures
+        )
+        if err is not None:
+            errors[gene] = err
+    return figures, errors
+
+
 def build_all_figures(gene_list, efficacy_config: dict) -> None:
     """Populate st.session_state.graphs for EVERY gene, off-screen (no render).
 
     Replaces the old 'All Gene Graphs (Quick View)' side effect so that exports
     (Excel/PPT/images/bundle) always reflect full per-gene styling — even for
     genes the user never opened — without rendering N charts on screen.
+
+    Genes whose inputs are unchanged since the last run keep their existing
+    figure instead of being rebuilt (see the fingerprint note above).
     """
-    graphs = st.session_state.setdefault("graphs", {})
-    for gene in gene_list:
-        gd = st.session_state.processed_data.get(gene)
-        if gd is None or gd.empty:
-            continue
-        _ensure_bar_settings(gene, gd)
-        try:
-            graphs[gene] = build_gene_figure(gene, gd, efficacy_config)
-        except Exception:
-            # A single gene failing to render must not break the tab or exports.
-            pass
+    figures_for_genes(gene_list, efficacy_config)
 
 
 def _render_per_bar_table(current_gene, gene_data):
@@ -565,6 +854,58 @@ def _render_per_bar_table(current_gene, gene_data):
                     label_visibility="collapsed",
                 )
         bs["show_sig"] = bs["show_sig_1"] or bs["show_sig_2"] or bs["show_sig_3"]
+
+
+@st.fragment
+def render_plate_heatmaps(data, excluded_wells) -> None:
+    """Plate heatmaps plus their two filter selectboxes.
+
+    A fragment: the gene/sample filters are display-only, so changing one should
+    redraw this block rather than re-execute the whole script (Streamlit renders
+    every one of the seven top-level tabs on each full rerun, so an app-scope
+    rerun from a filter click was paying for all of them).
+
+    Exclusions arrive as an argument rather than being read live: Streamlit
+    replays a fragment with its last arguments, and anything that can change the
+    exclusions lives outside this fragment and triggers a full rerun anyway.
+    """
+    plate_fig = get_plate_heatmap(data, value_col="CT", excluded_wells=excluded_wells)
+    st.plotly_chart(plate_fig, use_container_width=True)
+    st.caption(
+        "Red = High CT (low expression) | Green = Low CT (high expression) | X = Excluded"
+    )
+
+    # Per-gene heatmap
+    all_genes = sorted(data["Target"].dropna().unique().tolist())
+    if all_genes:
+        selected_gene = st.selectbox(
+            "Filter heatmap by gene",
+            options=["(All)"] + all_genes,
+            key="heatmap_gene_select",
+        )
+        if selected_gene != "(All)":
+            gene_fig = get_plate_heatmap(
+                data[data["Target"] == selected_gene],
+                value_col="CT", excluded_wells=excluded_wells,
+            )
+            gene_fig.update_layout(title=f"Plate Heatmap — {selected_gene}")
+            st.plotly_chart(gene_fig, use_container_width=True)
+
+    # Per-sample heatmap
+    all_samples = sorted(data["Sample"].dropna().unique().tolist(), key=natural_sort_key)
+    if all_samples:
+        selected_sample = st.selectbox(
+            "Filter heatmap by sample",
+            options=["(All)"] + all_samples,
+            key="heatmap_sample_select",
+        )
+        if selected_sample != "(All)":
+            sample_fig = get_plate_heatmap(
+                data[data["Sample"] == selected_sample],
+                value_col="CT", excluded_wells=excluded_wells,
+            )
+            sample_fig.update_layout(title=f"Plate Heatmap — {selected_sample}")
+            st.plotly_chart(sample_fig, use_container_width=True)
 
 
 @st.fragment
@@ -742,9 +1083,10 @@ def render_gene_editor(current_gene):
             gs["show_n"] = st.toggle("Show n=", value=gs.get("show_n", False),
                 key="show_n_global", help="Annotate each bar with its replicate count")
 
-    fig = build_gene_figure(current_gene, gene_data, efficacy_config)
+    # Memoized: reuses the figure the Graphs/Overview pass already built when
+    # nothing changed, and rebuilds here on a fragment-scoped rerun when it did.
+    fig = gene_figure_for_display(current_gene, gene_data, efficacy_config)
     st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
-    st.session_state.graphs[current_gene] = fig
 
 
 # ==================== PAGE CONFIG ====================
@@ -1384,8 +1726,13 @@ class AnalysisEngine(_CoreAnalysisEngine):
                 # or rename can carry over into PPT/Excel exports of the new run.
                 _new_genes = set(gene_dict.keys())
                 _graphs = st.session_state.get("graphs", {})
+                _graph_sigs = st.session_state.get("_graph_signatures", {})
                 for _stale_gene in [g for g in _graphs if g not in _new_genes]:
                     _graphs.pop(_stale_gene, None)
+                # Keep the rebuild-gate fingerprints in step with the figures they
+                # describe, so a removed gene leaves nothing behind.
+                for _stale_gene in [g for g in _graph_sigs if g not in _new_genes]:
+                    _graph_sigs.pop(_stale_gene, None)
                 _disp_map = st.session_state.get("gene_display_names", {})
                 for _stale_gene in [g for g in _disp_map if g not in _new_genes]:
                     _disp_map.pop(_stale_gene, None)
@@ -3211,7 +3558,7 @@ with tab_qc:
         st.caption("Browse all CT values, review triplicates, and exclude outliers before analysis.")
 
         # Get comprehensive QC stats using helper to get all excluded wells
-        qc_stats = QualityControl.get_qc_summary_stats(data, get_all_excluded_wells())
+        qc_stats = get_qc_summary_stats(data, get_all_excluded_wells())
 
         # Summary metrics — 2 rows of 3 for better readability
         row1_cols = st.columns(3)
@@ -3667,49 +4014,11 @@ with tab_qc:
             heatmap_col1, heatmap_col2 = st.columns([2, 1])
 
             with heatmap_col1:
-                plate_fig = QualityControl.create_plate_heatmap(
-                    data, value_col="CT", excluded_wells=get_all_excluded_wells()
-                )
-                st.plotly_chart(plate_fig, use_container_width=True)
-                st.caption(
-                    "Red = High CT (low expression) | Green = Low CT (high expression) | X = Excluded"
-                )
-
-                # Per-gene heatmap
-                all_genes = sorted(data["Target"].dropna().unique().tolist())
-                if all_genes:
-                    selected_gene = st.selectbox(
-                        "Filter heatmap by gene",
-                        options=["(All)"] + all_genes,
-                        key="heatmap_gene_select",
-                    )
-                    if selected_gene != "(All)":
-                        gene_data = data[data["Target"] == selected_gene]
-                        gene_fig = QualityControl.create_plate_heatmap(
-                            gene_data, value_col="CT", excluded_wells=get_all_excluded_wells()
-                        )
-                        gene_fig.update_layout(title=f"Plate Heatmap — {selected_gene}")
-                        st.plotly_chart(gene_fig, use_container_width=True)
-
-                # Per-sample heatmap
-                all_samples = sorted(data["Sample"].dropna().unique().tolist(), key=natural_sort_key)
-                if all_samples:
-                    selected_sample = st.selectbox(
-                        "Filter heatmap by sample",
-                        options=["(All)"] + all_samples,
-                        key="heatmap_sample_select",
-                    )
-                    if selected_sample != "(All)":
-                        sample_data = data[data["Sample"] == selected_sample]
-                        sample_fig = QualityControl.create_plate_heatmap(
-                            sample_data, value_col="CT", excluded_wells=get_all_excluded_wells()
-                        )
-                        sample_fig.update_layout(title=f"Plate Heatmap — {selected_sample}")
-                        st.plotly_chart(sample_fig, use_container_width=True)
+                render_plate_heatmaps(data, get_all_excluded_wells())
 
             with heatmap_col2:
                 st.markdown("**Replicate Statistics**")
-                rep_stats = QualityControl.get_replicate_stats(data)
+                rep_stats = get_replicate_stats(data)
                 if not rep_stats.empty:
                     def highlight_status(row):
                         if row["Status"] == "High CV":
@@ -4629,14 +4938,15 @@ with tab_ov:
         # gene panel (auto-styled small multiples, consistent with Graphs)
         st.markdown("##### Gene panel")
         _cols = st.columns(min(len(gene_list), 3) or 1)
+        # Shares the Graphs tab's memo — these figures are identical, so this
+        # panel costs nothing on a rerun where no chart input changed.
+        _ov_figs, _ov_errs = figures_for_genes(gene_list, efficacy_config)
         for i, g in enumerate(gene_list):
             with _cols[i % len(_cols)]:
-                _ensure_bar_settings(g, processed[g])
-                try:
-                    fig = build_gene_figure(g, processed[g], efficacy_config)
-                    st.plotly_chart(fig, use_container_width=True, key=f"ov_fig_{g}")
-                except Exception as e:
-                    st.warning(f"{g}: chart unavailable ({e})")
+                if g in _ov_errs:
+                    st.warning(f"{g}: chart unavailable ({_ov_errs[g]})")
+                elif g in _ov_figs:
+                    st.plotly_chart(_ov_figs[g], use_container_width=True, key=f"ov_fig_{g}")
 
         # fold-change matrix
         st.markdown("##### Fold-change matrix")
@@ -4948,8 +5258,8 @@ with tab5:
                 if excl_flat:
                     qc_data = qc_data[~qc_data["Well"].isin(excl_flat)]
 
-                replicate_stats_df = QualityControl.get_replicate_stats(qc_data)
-                qc_summary = QualityControl.get_qc_summary_stats(st.session_state.data, excl_flat or None)
+                replicate_stats_df = get_replicate_stats(qc_data)
+                qc_summary = get_qc_summary_stats(st.session_state.data, excl_flat or None)
                 qc_stats = qc_summary if qc_summary else None
 
             return qc_stats, replicate_stats_df, excl

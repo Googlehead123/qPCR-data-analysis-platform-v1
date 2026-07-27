@@ -25,11 +25,13 @@ hardened behaviour:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import shutil
 import threading
 import zipfile
+from collections import OrderedDict
 
 # Preference order: real Chrome first (most reliable headless), then Chromium.
 _CHROME_EXE_NAMES = (
@@ -54,6 +56,75 @@ _CHROME_COMMON_PATHS = (
 
 _export_lock = threading.Lock()
 _downloaded_chrome_path: str | None = None  # cache for plotly_get_chrome result
+
+# ---------------------------------------------------------------------------
+# Rendered-image memo cache
+# ---------------------------------------------------------------------------
+# Every render launches headless Chrome (~1-3 s of pinned CPU). Exports re-render
+# the SAME figures repeatedly: a PPT run, an Excel run and a ZIP bundle each walk
+# st.session_state.graphs, and Streamlit re-executes the script on every rerun.
+# Rendering is deterministic — identical figure JSON + identical parameters always
+# yield identical bytes — so memoizing on that pair is exact, never stale.
+#
+# Bounded twice (entry count AND total bytes) because Streamlit Cloud caps RAM at
+# ~2.7 GB; eviction is least-recently-used.
+_RENDER_CACHE_MAX_ENTRIES = 32
+_RENDER_CACHE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB
+_render_cache: "OrderedDict[str, bytes]" = OrderedDict()
+_render_cache_bytes = 0
+_render_cache_lock = threading.Lock()
+
+
+def _render_cache_key(fig, kwargs: dict) -> str | None:
+    """Content key for a render, or ``None`` if the figure can't be serialized.
+
+    ``None`` disables caching for that call rather than risking a wrong hit.
+    """
+    try:
+        payload = fig.to_json()
+    except Exception:  # noqa: BLE001 — exotic figure: skip the cache, still render
+        return None
+    if payload is None:
+        return None
+    h = hashlib.md5(payload.encode("utf-8"))
+    for k in sorted(kwargs):
+        h.update(f"|{k}={kwargs[k]}".encode("utf-8"))
+    return h.hexdigest()
+
+
+def _render_cache_get(key: str | None) -> bytes | None:
+    if key is None:
+        return None
+    with _render_cache_lock:
+        hit = _render_cache.get(key)
+        if hit is not None:
+            _render_cache.move_to_end(key)  # mark most-recently-used
+        return hit
+
+
+def _render_cache_put(key: str | None, value: bytes) -> None:
+    if key is None or not isinstance(value, (bytes, bytearray)):
+        return
+    global _render_cache_bytes
+    with _render_cache_lock:
+        if key in _render_cache:
+            _render_cache_bytes -= len(_render_cache.pop(key))
+        _render_cache[key] = bytes(value)
+        _render_cache_bytes += len(value)
+        while _render_cache and (
+            len(_render_cache) > _RENDER_CACHE_MAX_ENTRIES
+            or _render_cache_bytes > _RENDER_CACHE_MAX_BYTES
+        ):
+            _, evicted = _render_cache.popitem(last=False)
+            _render_cache_bytes -= len(evicted)
+
+
+def clear_render_cache() -> None:
+    """Drop every memoized render (used by tests; safe to call at any time)."""
+    global _render_cache_bytes
+    with _render_cache_lock:
+        _render_cache.clear()
+        _render_cache_bytes = 0
 
 
 def _find_system_browser() -> str | None:
@@ -171,11 +242,20 @@ def export_figure_to_bytes(fig, fmt: str = "png", scale: int = 2,
     if height is not None:
         kwargs["height"] = height
 
+    # Identical figure + identical parameters => identical bytes. Serving that
+    # from memory skips a headless-Chrome launch entirely.
+    cache_key = _render_cache_key(fig, kwargs)
+    cached = _render_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     with _export_lock:
         _ensure_browser_path()
 
     try:
-        return fig.to_image(**kwargs)
+        out = fig.to_image(**kwargs)
+        _render_cache_put(cache_key, out)
+        return out
     except Exception as first_err:  # noqa: BLE001 — need broad catch to classify
         if not _looks_like_browser_error(first_err):
             raise
@@ -184,7 +264,9 @@ def export_figure_to_bytes(fig, fmt: str = "png", scale: int = 2,
             with _export_lock:
                 chrome = _download_fallback_chrome()
                 os.environ["BROWSER_PATH"] = chrome
-            return fig.to_image(**kwargs)
+            out = fig.to_image(**kwargs)
+            _render_cache_put(cache_key, out)
+            return out
         except Exception as second_err:  # noqa: BLE001
             resolved = os.environ.get("BROWSER_PATH", "(none found)")
             raise RuntimeError(
