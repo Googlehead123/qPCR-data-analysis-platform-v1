@@ -14,10 +14,17 @@ from qpcr import export_utils
 
 @pytest.fixture(autouse=True)
 def _clean_browser_env(monkeypatch):
-    """Isolate BROWSER_PATH and the download cache for each test."""
+    """Isolate BROWSER_PATH, the download cache, and the render memo per test.
+
+    Every test here renders the same ``_fig()``, so without clearing the render
+    cache one test's successful render would be served to the next (a correct
+    cache hit, but it defeats the error-path assertions).
+    """
     monkeypatch.delenv("BROWSER_PATH", raising=False)
     monkeypatch.setattr(export_utils, "_downloaded_chrome_path", None)
+    export_utils.clear_render_cache()
     yield
+    export_utils.clear_render_cache()
 
 
 def _fig():
@@ -128,6 +135,102 @@ def test_both_attempts_fail_raises_actionable_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="headless Chrome/Chromium"):
         export_utils.export_figure_to_bytes(fig, fmt="png")
+
+
+# ---- render memo cache ---------------------------------------------------
+
+def test_identical_figure_renders_once(monkeypatch):
+    """A repeat export of the same figure must not relaunch Chrome."""
+    calls = {"n": 0}
+
+    def fake_to_image(**kwargs):
+        calls["n"] += 1
+        return b"PNG-" + str(calls["n"]).encode()
+
+    monkeypatch.setattr(export_utils, "_ensure_browser_path", lambda: None)
+    fig = _fig()
+    monkeypatch.setattr(fig, "to_image", fake_to_image)
+
+    first = export_utils.export_figure_to_bytes(fig, fmt="png", scale=2)
+    second = export_utils.export_figure_to_bytes(fig, fmt="png", scale=2)
+    assert first == second == b"PNG-1"
+    assert calls["n"] == 1  # second call served from memo
+
+
+def test_render_params_are_part_of_the_key(monkeypatch):
+    """Same figure at a different scale/size must render fresh, not reuse bytes."""
+    calls = {"n": 0}
+
+    def fake_to_image(**kwargs):
+        calls["n"] += 1
+        return b"PNG-" + str(calls["n"]).encode()
+
+    monkeypatch.setattr(export_utils, "_ensure_browser_path", lambda: None)
+    fig = _fig()
+    monkeypatch.setattr(fig, "to_image", fake_to_image)
+
+    export_utils.export_figure_to_bytes(fig, fmt="png", scale=2)
+    export_utils.export_figure_to_bytes(fig, fmt="png", scale=3)      # scale differs
+    export_utils.export_figure_to_bytes(fig, fmt="svg", scale=2)      # format differs
+    export_utils.export_figure_to_bytes(fig, fmt="png", scale=2, width=800)
+    assert calls["n"] == 4
+
+
+def test_changed_figure_content_invalidates(monkeypatch):
+    """Editing the figure changes its JSON, so the memo must miss."""
+    calls = {"n": 0}
+
+    def fake_to_image(**kwargs):
+        calls["n"] += 1
+        return b"PNG-" + str(calls["n"]).encode()
+
+    monkeypatch.setattr(export_utils, "_ensure_browser_path", lambda: None)
+    fig = _fig()
+    monkeypatch.setattr(fig, "to_image", fake_to_image)
+
+    export_utils.export_figure_to_bytes(fig, fmt="png")
+    fig.update_layout(title="now different")
+    export_utils.export_figure_to_bytes(fig, fmt="png")
+    assert calls["n"] == 2
+
+
+def test_failed_render_is_not_cached(monkeypatch):
+    """An error must never be memoized as a result."""
+    monkeypatch.setattr(export_utils, "_ensure_browser_path", lambda: None)
+    fig = _fig()
+    monkeypatch.setattr(fig, "to_image",
+                        lambda **k: (_ for _ in ()).throw(ValueError("bad data shape")))
+    with pytest.raises(ValueError):
+        export_utils.export_figure_to_bytes(fig, fmt="png")
+
+    monkeypatch.setattr(fig, "to_image", lambda **k: b"OK")
+    assert export_utils.export_figure_to_bytes(fig, fmt="png") == b"OK"
+
+
+def test_cache_evicts_beyond_entry_cap(monkeypatch):
+    """The memo is bounded — it must not grow without limit."""
+    monkeypatch.setattr(export_utils, "_ensure_browser_path", lambda: None)
+    monkeypatch.setattr(export_utils, "_RENDER_CACHE_MAX_ENTRIES", 4)
+    for i in range(10):
+        fig = _fig()
+        fig.update_layout(title=f"fig-{i}")
+        monkeypatch.setattr(fig, "to_image", lambda **k: b"X" * 10)
+        export_utils.export_figure_to_bytes(fig, fmt="png")
+    assert len(export_utils._render_cache) <= 4
+
+
+def test_unserializable_figure_still_renders(monkeypatch):
+    """If to_json fails the render must proceed uncached, not blow up."""
+    monkeypatch.setattr(export_utils, "_ensure_browser_path", lambda: None)
+
+    class _Weird:
+        def to_json(self):
+            raise TypeError("not serializable")
+
+        def to_image(self, **kwargs):
+            return b"RAW"
+
+    assert export_utils.export_figure_to_bytes(_Weird(), fmt="png") == b"RAW"
 
 
 # ---- build_zip ----------------------------------------------------------
