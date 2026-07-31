@@ -86,11 +86,27 @@ CM_TO_EMU = 360000
 #             substring pass — but a name is never changed to match the xlsx,
 #             because that is the half of the string the data is keyed on.
 #             Dose-less entries (Minoxidil, Ascorbic acid) have none on file.
-#             `장벽` positive is a deliberate override; see its comment.
-#             Inducer doses are still pending: the xlsx spells three of them
-#             differently from the condition names used here ("UVB only",
-#             "α-MSH only", "Poly(I:C)+IL-4", "Bacterial LPS"), and adopting
-#             the xlsx text would rename the matching key. Awaiting Min.
+#             `장벽` positive and `탄력` positive are deliberate overrides that
+#             disagree with the ledger on purpose; see their comments.
+#   controls.negative_display: OPTIONAL, display-only. What the PPT "Inducer:"
+#             field prints when the ledger's wording cannot be used as the
+#             matching key. `negative` stays the key ("UVB only"), this carries
+#             the reportable text ("UVB 40 mj/cm2"). Absent or empty falls back
+#             to `negative`, so entries without it behave exactly as before.
+#             Nothing but the PPT writer may read this — never match on it.
+#             Why the asymmetry with `positive`, which carries its dose inline:
+#             a dose appended to a positive label still matches its bare
+#             condition name on the substring pass, so no separate field was
+#             needed. Inducers are not so lucky — "Poly(I:C)+IL-4" is NOT a
+#             substring of "Poly(I:C) 10 μg/ml+IL-4 10 ng/ml" (the doses
+#             interrupt it), and "Bacterial LPS" -> "녹농균 LPS" is a rename.
+#             Deliberately absent: 과각화 (the ledger cell is a medium, not a
+#             concentration), 열 노화 ("Heat (41C)" already equals the key), and
+#             여드름 — its cell reads "IGF 50 ng/ml or Dexamethasone 10uM", an
+#             either/or resolved per experiment, so no single static string is
+#             correct and printing one would be the same class of quiet-wrong
+#             value as the old "1 ppm" concentration default. Left blank
+#             pending a per-run input.
 #   expected_direction: per-marker up/down for a positive test-article result,
 #             keyed by every spelling variant so the verdict matches the data's
 #             gene name. Omitted for markers/items whose direction is ambiguous
@@ -101,14 +117,23 @@ EFFICACY_CONFIG = {
         "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN"],
         "cell": "HS68 fibroblast",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "TGFβ", "compare_to": "negative"},
+        # Positive control confirmed by Min (2026-07-31): TGF-beta at 10 ng/ml.
+        # The ledger row disagrees twice and is wrong on both counts — do NOT
+        # "correct" this back from the xlsx:
+        #   1. it lists 10 μg/ml, a 1000x error. Min confirmed 10 ng/ml is the
+        #      actual final concentration in every experiment (and it matches
+        #      광노화's TGFβ 10 ng/ml).
+        #   2. it lists two further actives (Retinoic acid 5 μM, Niacinamide
+        #      10 μg/ml) that are not used as the 탄력 benchmark.
+        "controls": {"negative": "Non-treated", "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
         "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up", "FBN1": "up", "FBN": "up"},
     },
     "광노화": {
         "genes": ["MMP1", "MMP-1", "COL1A1", "COL1"],
         "cell": "HS68 fibroblast",
         "treatment_time": "24 h",
-        "controls": {"negative": "UVB only", "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
+        "controls": {"negative": "UVB only", "negative_display": "UVB 40 mj/cm2",
+                     "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
         "expected_direction": {"MMP1": "down", "MMP-1": "down", "COL1A1": "up", "COL1": "up"},
     },
     "보습/수분": {
@@ -137,14 +162,17 @@ EFFICACY_CONFIG = {
         "genes": ["MITF", "TYR"],
         "cell": "B16F10 melanocyte",
         "treatment_time": "24 / 48 h",
-        "controls": {"negative": "α-MSH only", "positive": "Arbutin 100 ppm", "compare_to": "negative"},
+        "controls": {"negative": "α-MSH only", "negative_display": "α-MSH 0.1 μM",
+                     "positive": "Arbutin 100 ppm", "compare_to": "negative"},
         "expected_direction": {"MITF": "down", "TYR": "down"},
     },
     "진정": {
         "genes": ["IL1B", "IL-1β", "IL6", "IL-6", "TNF", "TNFα", "TNFA"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "4 h",
-        "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone 1μM", "compare_to": "negative"},
+        "controls": {"negative": "Poly(I:C)+IL-4",
+                     "negative_display": "Poly(I:C) 10 μg/ml + IL-4 10 ng/ml",
+                     "positive": "Dexamethasone 1μM", "compare_to": "negative"},
         "expected_direction": {
             "IL1B": "down", "IL-1β": "down", "IL6": "down", "IL-6": "down",
             "TNF": "down", "TNFα": "down", "TNFA": "down",
@@ -154,7 +182,9 @@ EFFICACY_CONFIG = {
         "genes": ["TSLP"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "4 h",
-        "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone 1μM", "compare_to": "negative"},
+        "controls": {"negative": "Poly(I:C)+IL-4",
+                     "negative_display": "Poly(I:C) 10 μg/ml + IL-4 10 ng/ml",
+                     "positive": "Dexamethasone 1μM", "compare_to": "negative"},
         "expected_direction": {"TSLP": "down"},
     },
     "냉감": {
@@ -230,7 +260,8 @@ EFFICACY_CONFIG = {
         "genes": ["CXCL8", "IL8", "IL-8", "TNF", "TNF-α", "TNFα", "CBD103", "cBD103", "TSLP"],
         "cell": "CPEK",
         "treatment_time": "6 h",
-        "controls": {"negative": "Bacterial LPS", "positive": "Salicylic acid 1 mM", "compare_to": "negative"},
+        "controls": {"negative": "Bacterial LPS", "negative_display": "녹농균 LPS 1 μg/ml",
+                     "positive": "Salicylic acid 1 mM", "compare_to": "negative"},
         # cBD103 direction ambiguous (anti-inflammatory vs antimicrobial-boost) — omitted.
         "expected_direction": {
             "CXCL8": "down", "IL8": "down", "IL-8": "down",
@@ -248,7 +279,10 @@ EFFICACY_CONFIG = {
         "genes": ["TRPV1", "VEGFA", "VEGF", "IL6", "IL-6", "AQP3"],
         "cell": "CPEK / HaCaT",
         "treatment_time": "6 h",
-        "controls": {"negative": "UVB", "compare_to": "negative"},
+        # Same "UVB" matching key as 립 색상 but a different dose — the display
+        # values are deliberately per-efficacy. Do not hoist to a shared constant.
+        "controls": {"negative": "UVB", "negative_display": "UVB 15 mJ/cm2",
+                     "compare_to": "negative"},
         "expected_direction": {
             "TRPV1": "down", "VEGFA": "down", "VEGF": "down",
             "IL6": "down", "IL-6": "down", "AQP3": "up",
@@ -260,7 +294,9 @@ EFFICACY_CONFIG = {
         "treatment_time": "24 h",
         # Whole-item direction ambiguous (UV-protection vs vascularity claim) —
         # no expected_direction until the intended claim is confirmed.
-        "controls": {"negative": "UVB", "compare_to": "negative"},
+        # 100 mJ/cm2 here vs 15 mJ/cm2 for 선번 완화, same "UVB" matching key.
+        "controls": {"negative": "UVB", "negative_display": "UVB 100 mJ/cm2",
+                     "compare_to": "negative"},
     },
 }
 
