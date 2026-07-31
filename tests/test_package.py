@@ -276,6 +276,23 @@ class TestControlLabelsCarryDoses:
         assert EFFICACY_CONFIG["탈모 개선"]["controls"]["positive"] == "Minoxidil"
         assert EFFICACY_CONFIG["열 노화"]["controls"]["positive"] == "Ascorbic acid"
 
+    def test_elasticity_positive_control_overrides_the_ledger(self):
+        """탄력 = TGFβ 10 ng/ml, confirmed by Min 2026-07-31.
+
+        The ledger row is wrong twice: it says 10 μg/ml (a 1000x error — the real
+        final concentration is 10 ng/ml in every experiment, matching 광노화) and
+        it lists two further actives (Retinoic acid 5 μM, Niacinamide 10 μg/ml)
+        that are not the 탄력 benchmark. Pinned here so a future re-transcription
+        cannot quietly restore the ledger's numbers.
+        """
+        from qpcr import EFFICACY_CONFIG
+
+        assert EFFICACY_CONFIG["탄력"]["controls"]["positive"] == "TGFβ 10 ng/ml"
+        assert (
+            EFFICACY_CONFIG["탄력"]["controls"]["positive"]
+            == EFFICACY_CONFIG["광노화"]["controls"]["positive"]
+        ), "both TGFβ benchmarks are 10 ng/ml; the ledger's μg/ml for 탄력 is an error"
+
 
 class TestPackageParity:
     """Verify package classes produce identical results to monolith."""

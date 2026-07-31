@@ -86,7 +86,8 @@ CM_TO_EMU = 360000
 #             substring pass — but a name is never changed to match the xlsx,
 #             because that is the half of the string the data is keyed on.
 #             Dose-less entries (Minoxidil, Ascorbic acid) have none on file.
-#             `장벽` positive is a deliberate override; see its comment.
+#             `장벽` positive and `탄력` positive are deliberate overrides that
+#             disagree with the ledger on purpose; see their comments.
 #   controls.negative_display: OPTIONAL, display-only. What the PPT "Inducer:"
 #             field prints when the ledger's wording cannot be used as the
 #             matching key. `negative` stays the key ("UVB only"), this carries
@@ -116,7 +117,15 @@ EFFICACY_CONFIG = {
         "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN"],
         "cell": "HS68 fibroblast",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "TGFβ", "compare_to": "negative"},
+        # Positive control confirmed by Min (2026-07-31): TGF-beta at 10 ng/ml.
+        # The ledger row disagrees twice and is wrong on both counts — do NOT
+        # "correct" this back from the xlsx:
+        #   1. it lists 10 μg/ml, a 1000x error. Min confirmed 10 ng/ml is the
+        #      actual final concentration in every experiment (and it matches
+        #      광노화's TGFβ 10 ng/ml).
+        #   2. it lists two further actives (Retinoic acid 5 μM, Niacinamide
+        #      10 μg/ml) that are not used as the 탄력 benchmark.
+        "controls": {"negative": "Non-treated", "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
         "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up", "FBN1": "up", "FBN": "up"},
     },
     "광노화": {
