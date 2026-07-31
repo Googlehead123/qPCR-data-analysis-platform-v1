@@ -67,6 +67,110 @@ class TestPackageImports:
                 import_module(dead)
 
 
+class TestControlLabelsCarryDoses:
+    """Control labels must gain doses without losing their matching key.
+
+    `controls.positive` / `controls.negative` are dual-purpose: they are printed
+    on the PPT ("Positive control:" / "Inducer:") AND compared against real
+    condition names from the uploaded data by the mapping tab's `_suggest_group`
+    and the summary's `_match` (exact, then substring). A dose may therefore be
+    *appended* — "Arbutin" -> "Arbutin 100 ppm" still matches a condition named
+    "Arbutin" on the substring pass — but the substance name itself must never be
+    rewritten to match the xlsx ledger, or the key the data is matched on moves.
+    """
+
+    # The bare substance names the app has always matched on. Values here are
+    # prefixes, not the full labels: a dose may follow, nothing may replace.
+    HISTORICAL_NAMES = {
+        "탄력": ("Non-treated", "TGFβ"),
+        "광노화": ("UVB only", "TGFβ"),
+        "보습/수분": ("Non-treated", "Retinoic acid"),
+        "장벽": ("Non-treated", "Retinoic acid"),
+        "속보습": ("Non-treated", None),
+        "멜라닌 생성": ("α-MSH only", "Arbutin"),
+        "진정": ("Poly(I:C)+IL-4", "Dexamethasone"),
+        "가려움 개선": ("Poly(I:C)+IL-4", "Dexamethasone"),
+        "냉감": ("Non-treated", "Menthol"),
+        "열감": ("Non-treated", None),
+        "여드름": ("IGF only", None),
+        "과각화": ("SZ95 supernatant", None),
+        "활력": ("Non-treated", "EGF"),
+        "탈모 개선": ("Non-treated", "Minoxidil"),
+        "모공 탄력": ("Non-treated", "Niacinamide"),
+        "열 노화": ("Heat (41°C)", "Ascorbic acid"),
+        "민감성 기전": ("Non-treated", "Panthenol"),
+        "외이도염": ("Bacterial LPS", "Salicylic acid"),
+    }
+
+    def test_names_are_prefixes_never_replaced(self):
+        from qpcr import EFFICACY_CONFIG
+
+        for efficacy, (neg, pos) in self.HISTORICAL_NAMES.items():
+            controls = EFFICACY_CONFIG[efficacy]["controls"]
+            for role, expected in (("negative", neg), ("positive", pos)):
+                if expected is None:
+                    assert role not in controls, (
+                        f"{efficacy}.{role} gained a control; add it to this map"
+                    )
+                    continue
+                actual = controls[role]
+                assert actual.startswith(expected), (
+                    f"{efficacy}.{role} was renamed {expected!r} -> {actual!r}. "
+                    "Doses append; names do not change (they are matching keys)."
+                )
+
+    def test_a_bare_condition_name_still_matches_a_dosed_label(self):
+        """Mirrors the exact-then-substring rule the app's matchers use.
+
+        Not a call into those closures (they are defined inside the tab bodies),
+        but the same predicate applied to the catalog: if this fails, a user
+        whose sample is named after the substance stops being recognised as the
+        positive control and silently lands in the Treatment group.
+        """
+        from qpcr import EFFICACY_CONFIG
+
+        def matches(label, condition):
+            ll, cl = label.strip().lower(), condition.strip().lower()
+            return cl == ll or ll in cl or cl in ll
+
+        for efficacy, (neg, pos) in self.HISTORICAL_NAMES.items():
+            controls = EFFICACY_CONFIG[efficacy]["controls"]
+            for role, bare in (("negative", neg), ("positive", pos)):
+                if bare is None:
+                    continue
+                assert matches(controls[role], bare), (
+                    f"{efficacy}.{role}={controls[role]!r} no longer matches a "
+                    f"condition named {bare!r}"
+                )
+
+    def test_doses_present_where_the_ledger_has_them(self):
+        """The point of the change: benchmarks reach the slide with a dose."""
+        from qpcr import EFFICACY_CONFIG
+
+        expected = {
+            "광노화": "TGFβ 10 ng/ml",
+            "보습/수분": "Retinoic acid 1μM",
+            "멜라닌 생성": "Arbutin 100 ppm",
+            "진정": "Dexamethasone 1μM",
+            "가려움 개선": "Dexamethasone 1μM",
+            "냉감": "Menthol 100 ppm",
+            "모공 탄력": "Niacinamide 0.1%",
+            "외이도염": "Salicylic acid 1 mM",
+            "민감성 기전": "Panthenol 500 ppm",
+            "활력": "EGF 25 ng/ml",
+        }
+        for efficacy, label in expected.items():
+            assert EFFICACY_CONFIG[efficacy]["controls"]["positive"] == label
+
+        # Min's override survives, and it is deliberately dose-less: the ledger
+        # row for 장벽 is a different substance entirely (Calcium 1.2mM), so
+        # there is no dose on file for Retinoic acid here to borrow.
+        assert EFFICACY_CONFIG["장벽"]["controls"]["positive"] == "Retinoic acid"
+        # No dose on file for these two.
+        assert EFFICACY_CONFIG["탈모 개선"]["controls"]["positive"] == "Minoxidil"
+        assert EFFICACY_CONFIG["열 노화"]["controls"]["positive"] == "Ascorbic acid"
+
+
 class TestPackageParity:
     """Verify package classes produce identical results to monolith."""
 

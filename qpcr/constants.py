@@ -78,6 +78,19 @@ CM_TO_EMU = 360000
 #   controls: negative = the inducer / induced-untreated baseline (shown as the
 #             PPT "Inducer:" field); positive = benchmark active (omitted when
 #             the file lists none); compare_to = "negative".
+#             These strings are BOTH report text and matching keys: the mapping
+#             tab's `_suggest_group` and the summary's `_match` compare them
+#             against real condition names from the uploaded data, exact first
+#             then substring. So a benchmark carries its dose ("Arbutin
+#             100 ppm") — a condition named "Arbutin" still matches on the
+#             substring pass — but a name is never changed to match the xlsx,
+#             because that is the half of the string the data is keyed on.
+#             Dose-less entries (Minoxidil, Ascorbic acid) have none on file.
+#             `장벽` positive is a deliberate override; see its comment.
+#             Inducer doses are still pending: the xlsx spells three of them
+#             differently from the condition names used here ("UVB only",
+#             "α-MSH only", "Poly(I:C)+IL-4", "Bacterial LPS"), and adopting
+#             the xlsx text would rename the matching key. Awaiting Min.
 #   expected_direction: per-marker up/down for a positive test-article result,
 #             keyed by every spelling variant so the verdict matches the data's
 #             gene name. Omitted for markers/items whose direction is ambiguous
@@ -95,14 +108,14 @@ EFFICACY_CONFIG = {
         "genes": ["MMP1", "MMP-1", "COL1A1", "COL1"],
         "cell": "HS68 fibroblast",
         "treatment_time": "24 h",
-        "controls": {"negative": "UVB only", "positive": "TGFβ", "compare_to": "negative"},
+        "controls": {"negative": "UVB only", "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
         "expected_direction": {"MMP1": "down", "MMP-1": "down", "COL1A1": "up", "COL1": "up"},
     },
     "보습/수분": {
         "genes": ["HAS3", "AQP3"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "Retinoic acid", "compare_to": "negative"},
+        "controls": {"negative": "Non-treated", "positive": "Retinoic acid 1μM", "compare_to": "negative"},
         "expected_direction": {"HAS3": "up", "AQP3": "up"},
     },
     "장벽": {
@@ -124,14 +137,14 @@ EFFICACY_CONFIG = {
         "genes": ["MITF", "TYR"],
         "cell": "B16F10 melanocyte",
         "treatment_time": "24 / 48 h",
-        "controls": {"negative": "α-MSH only", "positive": "Arbutin", "compare_to": "negative"},
+        "controls": {"negative": "α-MSH only", "positive": "Arbutin 100 ppm", "compare_to": "negative"},
         "expected_direction": {"MITF": "down", "TYR": "down"},
     },
     "진정": {
         "genes": ["IL1B", "IL-1β", "IL6", "IL-6", "TNF", "TNFα", "TNFA"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "4 h",
-        "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone", "compare_to": "negative"},
+        "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone 1μM", "compare_to": "negative"},
         "expected_direction": {
             "IL1B": "down", "IL-1β": "down", "IL6": "down", "IL-6": "down",
             "TNF": "down", "TNFα": "down", "TNFA": "down",
@@ -141,14 +154,14 @@ EFFICACY_CONFIG = {
         "genes": ["TSLP"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "4 h",
-        "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone", "compare_to": "negative"},
+        "controls": {"negative": "Poly(I:C)+IL-4", "positive": "Dexamethasone 1μM", "compare_to": "negative"},
         "expected_direction": {"TSLP": "down"},
     },
     "냉감": {
         "genes": ["TRPM8", "CIRBP", "CIRP"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "Menthol", "compare_to": "negative"},
+        "controls": {"negative": "Non-treated", "positive": "Menthol 100 ppm", "compare_to": "negative"},
         "expected_direction": {"TRPM8": "up", "CIRBP": "up", "CIRP": "up"},
     },
     "열감": {
@@ -179,7 +192,7 @@ EFFICACY_CONFIG = {
         "genes": ["PCNA"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "EGF", "compare_to": "negative"},
+        "controls": {"negative": "Non-treated", "positive": "EGF 25 ng/ml", "compare_to": "negative"},
         "expected_direction": {"PCNA": "up"},
     },
     "탈모 개선": {
@@ -195,7 +208,7 @@ EFFICACY_CONFIG = {
         "genes": ["EMILIN1", "MFAP2", "MAGP1"],
         "cell": "HDF (neonatal / aged)",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "Niacinamide", "compare_to": "negative"},
+        "controls": {"negative": "Non-treated", "positive": "Niacinamide 0.1%", "compare_to": "negative"},
         "expected_direction": {"EMILIN1": "up", "MFAP2": "up", "MAGP1": "up"},
     },
     "열 노화": {
@@ -210,14 +223,14 @@ EFFICACY_CONFIG = {
         "genes": ["TRPV1", "FLG"],
         "cell": "Sensi-TV1",
         "treatment_time": "24 h",
-        "controls": {"negative": "Non-treated", "positive": "Panthenol", "compare_to": "negative"},
+        "controls": {"negative": "Non-treated", "positive": "Panthenol 500 ppm", "compare_to": "negative"},
         "expected_direction": {"TRPV1": "down", "FLG": "up"},
     },
     "외이도염": {
         "genes": ["CXCL8", "IL8", "IL-8", "TNF", "TNF-α", "TNFα", "CBD103", "cBD103", "TSLP"],
         "cell": "CPEK",
         "treatment_time": "6 h",
-        "controls": {"negative": "Bacterial LPS", "positive": "Salicylic acid", "compare_to": "negative"},
+        "controls": {"negative": "Bacterial LPS", "positive": "Salicylic acid 1 mM", "compare_to": "negative"},
         # cBD103 direction ambiguous (anti-inflammatory vs antimicrobial-boost) — omitted.
         "expected_direction": {
             "CXCL8": "down", "IL8": "down", "IL-8": "down",
