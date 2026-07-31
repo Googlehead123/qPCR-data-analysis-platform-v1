@@ -735,6 +735,51 @@ class TestTemplateDetailFields:
                 f"expected a blank concentration, got {fields['Sample concentration:']!r}"
             )
 
+    def test_inducer_prints_the_display_value_when_the_catalog_has_one(self, mock_streamlit):
+        """Where the ledger wording can't be the matching key, the slide still
+        shows the dose: 광노화 matches on "UVB only" but must print
+        "UVB 40 mj/cm2"."""
+        from importlib import import_module
+        from qpcr.constants import EFFICACY_CONFIG
+
+        spec = import_module("streamlit qpcr analysis v1")
+        controls = EFFICACY_CONFIG["광노화"]["controls"]
+
+        prs, slide = self._slide_with_detail_box()
+        self._populate(spec, prs, slide, {
+            "Efficacy_Type": "광노화", "Date": "2026-07-31", "concentration": "1 ppm",
+        })
+
+        fields = self._detail_text(slide)
+        assert fields["Inducer:"] == controls["negative_display"] == "UVB 40 mj/cm2"
+        # And the matching key itself is NOT what got printed.
+        assert fields["Inducer:"] != controls["negative"]
+
+    def test_inducer_falls_back_to_the_matching_key_without_a_display_value(
+        self, mock_streamlit
+    ):
+        """Categories with no display override behave exactly as before.
+
+        장벽 has no `negative_display`, so the slide shows "Non-treated" — the
+        backward-compatible path, and the reason adding this field to 7 of 21
+        categories did not need the other 14 touched.
+        """
+        from importlib import import_module
+        from qpcr.constants import EFFICACY_CONFIG
+
+        spec = import_module("streamlit qpcr analysis v1")
+        controls = EFFICACY_CONFIG["장벽"]["controls"]
+        assert "negative_display" not in controls, "fixture assumes no override here"
+
+        prs, slide = self._slide_with_detail_box()
+        self._populate(spec, prs, slide, {
+            "Efficacy_Type": "장벽", "Date": "2026-07-31", "concentration": "1 ppm",
+        })
+
+        fields = self._detail_text(slide)
+        assert fields["Inducer:"] == controls["negative"] == "Non-treated"
+        assert fields["Positive control:"] == "Retinoic acid"
+
     def test_controls_come_from_the_efficacy_catalog(self, mock_streamlit):
         """Positive control and inducer are catalog-owned, not operator-typed.
 
@@ -755,5 +800,9 @@ class TestTemplateDetailFields:
 
         fields = self._detail_text(slide)
         assert fields["Positive control:"] == controls["positive"]
-        assert fields["Inducer:"] == controls["negative"]
+        # Inducer resolves through negative_display when set (see the two tests
+        # above for both branches); 광노화 has one.
+        assert fields["Inducer:"] == (
+            controls.get("negative_display") or controls["negative"]
+        )
         assert fields["Cell line:"] == EFFICACY_CONFIG["광노화"]["cell"]

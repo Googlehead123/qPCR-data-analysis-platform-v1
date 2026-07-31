@@ -2535,6 +2535,12 @@ class PPTGenerator:
                   and shape.left > 3500000 and shape.top < 500000):
                 efficacy_t = analysis_params.get("Efficacy_Type", "")
                 eff_cfg = EFFICACY_CONFIG.get(efficacy_t, {})
+                _ctl = eff_cfg.get("controls", {})
+                # Report text only. `negative` is also the key the mapping tab
+                # matches real condition names against, so where the ledger's
+                # wording cannot serve as that key, the printable version lives
+                # in `negative_display`. Falls back to `negative` when unset.
+                _inducer = _ctl.get("negative_display") or _ctl.get("negative", "")
                 field_values = {
                     "Date: ": analysis_params.get("Date", "")[:10],
                     "Cell line: ": eff_cfg.get("cell", ""),
@@ -2543,8 +2549,8 @@ class PPTGenerator:
                     # every slide for months after the input feeding it was removed.
                     # Blank is honest; a plausible number is not.
                     "Sample concentration: ": analysis_params.get("concentration", ""),
-                    "Positive control: ": eff_cfg.get("controls", {}).get("positive", ""),
-                    "Inducer: ": eff_cfg.get("controls", {}).get("negative", ""),
+                    "Positive control: ": _ctl.get("positive", ""),
+                    "Inducer: ": _inducer,
                     "Treatment time: ": analysis_params.get("treatment_time", "24 h"),
                     "Test method:": " qPCR (DDCt)",
                 }
