@@ -39,19 +39,32 @@ class TestPackageImports:
 
     def test_import_classes(self):
         from qpcr import (
-            QPCRParser, QualityControl, AnalysisEngine,
-            GraphGenerator, ReportGenerator, PPTGenerator,
+            QPCRParser, QualityControl, AnalysisEngine, GraphGenerator,
         )
         assert hasattr(QPCRParser, 'parse')
         assert hasattr(QualityControl, 'grubbs_test')
         assert hasattr(AnalysisEngine, 'calculate_ddct')
         assert hasattr(GraphGenerator, 'create_gene_graph')
-        assert hasattr(ReportGenerator, 'create_presentation')
-        assert hasattr(PPTGenerator, 'generate_presentation')
 
-    def test_import_export(self):
-        from qpcr import export_to_excel
-        assert callable(export_to_excel)
+    def test_report_and_export_live_in_the_monolith(self):
+        """Reporting/export are owned by the app module, not the package.
+
+        `qpcr/report.py` and `qpcr/export.py` were deleted: the app never
+        imported them, so any fix applied there silently never shipped. This
+        pins the surface at its single real location.
+        """
+        from importlib import import_module
+        spec = import_module("streamlit qpcr analysis v1")
+
+        assert hasattr(spec.ReportGenerator, 'create_presentation')
+        assert hasattr(spec.PPTGenerator, 'generate_presentation')
+        assert callable(spec.export_to_excel)
+
+        # And they must NOT come back as package modules.
+        import pytest
+        for dead in ("qpcr.report", "qpcr.export"):
+            with pytest.raises(ImportError):
+                import_module(dead)
 
 
 class TestPackageParity:
