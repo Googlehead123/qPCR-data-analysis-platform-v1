@@ -69,8 +69,14 @@ NEW FEATURES
 
    How to use:
    - Go to the Export tab
-   - Expand "Experiment Description" to set sample concentration and treatment time
-   - Click "Generate PPT" -- fields are populated automatically
+   - Type the sample concentration in the "Sample concentration" box
+     (the only operator-supplied field; left blank the slide field is blank too,
+     and a warning is shown -- it is never guessed)
+   - Click "Generate PPT" -- every other field is filled from the selected
+     efficacy category: cell line, positive control, inducer and treatment time
+     all come from the efficacy catalog
+   Note: the old "Experiment Description" expander was removed; concentration is
+   now a plain input and treatment time is no longer typed by hand.
 
 6. EXCEL GENE CHART SHEETS
    Each gene now gets a dedicated chart sheet ("{Gene}_Chart") with:
@@ -185,8 +191,13 @@ UI 스타일          | 이모지 다수 사용                    | 깔끔한 �
 
    사용 방법:
    - Export 탭 이동
-   - "Experiment Description" 펼쳐서 시료 농도, 처리 시간 입력
-   - "Generate PPT" 클릭 -- 모든 필드 자동 입력됨
+   - "Sample concentration" 칸에 시료 농도 입력
+     (사용자가 직접 넣는 유일한 필드. 비워두면 슬라이드도 빈칸으로 나가고
+      경고가 표시된다 -- 임의의 기본값을 넣지 않는다)
+   - "Generate PPT" 클릭 -- 나머지 필드는 선택한 효능 카테고리에서 자동 입력된다
+     (cell line, positive control, inducer, treatment time 모두 효능 카탈로그 값)
+   참고: 기존 "Experiment Description" 펼침 영역은 삭제됐다. 농도는 일반 입력칸이 됐고
+   처리 시간은 더 이상 손으로 입력하지 않는다.
 
 6. Excel 유전자별 차트 시트
    각 유전자별 전용 차트 시트 ("{Gene}_Chart") 생성:
