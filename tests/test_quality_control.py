@@ -456,8 +456,16 @@ class TestFindHighSdOutliers:
 
 
 class TestExcelExportFixes:
+    """Excel export regressions.
+
+    These exercise the export the app actually runs — the one defined inline in
+    `streamlit qpcr analysis v1.py`. The former `qpcr/export.py` copy was deleted
+    (it was never imported by the app, so fixes applied there never shipped).
+    """
+
     def test_export_with_qc_stats_populates_qc_sheet(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
-        from qpcr.export import export_to_excel
+        from importlib import import_module
+        export_to_excel = import_module("streamlit qpcr analysis v1").export_to_excel
         from qpcr.analysis import AnalysisEngine
         from qpcr.quality_control import QualityControl
         import openpyxl
@@ -485,7 +493,8 @@ class TestExcelExportFixes:
         assert ws.cell(2, 2).value == 18  # total_wells
 
     def test_export_with_excluded_wells_adds_replicate_fc_sheet(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
-        from qpcr.export import export_to_excel
+        from importlib import import_module
+        export_to_excel = import_module("streamlit qpcr analysis v1").export_to_excel
         from qpcr.analysis import AnalysisEngine
         import openpyxl
         import io
@@ -512,7 +521,8 @@ class TestExcelExportFixes:
         """User rename in Graphs tab must propagate to per-gene sheet name,
         the in-sheet Target column, the FC_Matrix index, and Summary.
         Raw name is preserved in Target_Raw for cross-referencing."""
-        from qpcr.export import export_to_excel
+        from importlib import import_module
+        export_to_excel = import_module("streamlit qpcr analysis v1").export_to_excel
         from qpcr.analysis import AnalysisEngine
         import openpyxl
         import io
@@ -576,7 +586,8 @@ class TestExcelExportFixes:
         """When the user never renamed a gene, exports should look exactly
         as they did before this feature — no Target_Raw column, raw name in
         sheet name."""
-        from qpcr.export import export_to_excel
+        from importlib import import_module
+        export_to_excel = import_module("streamlit qpcr analysis v1").export_to_excel
         from qpcr.analysis import AnalysisEngine
         import openpyxl
         import io

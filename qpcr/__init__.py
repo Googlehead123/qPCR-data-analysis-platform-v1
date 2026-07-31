@@ -1,13 +1,16 @@
 """qPCR Data Analysis Package.
 
 Modular extraction of the qPCR Analysis Suite. Provides:
-- QPCRParser: Raw CSV parsing (QuantStudio formats)
+- QPCRParser: Raw CSV parsing (QuantStudio 3 / StepOnePlus exports)
 - QualityControl: QC checks, outlier detection, triplicate stats
 - AnalysisEngine: DDCt calculations and statistical tests
 - GraphGenerator: Plotly bar chart visualizations
-- ReportGenerator: Legacy PowerPoint generation
-- PPTGenerator: Modern Korean-centric PowerPoint generation
-- export_to_excel: Multi-sheet Excel export
+
+Reporting and export (ReportGenerator / PPTGenerator / export_to_excel) are
+deliberately NOT here. They live in `streamlit qpcr analysis v1.py`, which is the
+only copy the app runs. Package duplicates of them existed until 2026-07-31 and
+were deleted: nothing imported them, so fixes applied there never shipped while
+their tests still passed. Add reporting changes to the app module.
 """
 
 from qpcr.constants import (
@@ -39,8 +42,6 @@ from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.analysis import AnalysisEngine
 from qpcr.graph import GraphGenerator
-from qpcr.report import ReportGenerator, PPTGenerator
-from qpcr.export import export_to_excel
 
 __all__ = [
     "EFFICACY_CONFIG",
@@ -68,7 +69,4 @@ __all__ = [
     "QualityControl",
     "AnalysisEngine",
     "GraphGenerator",
-    "ReportGenerator",
-    "PPTGenerator",
-    "export_to_excel",
 ]

@@ -2535,12 +2535,22 @@ class PPTGenerator:
                   and shape.left > 3500000 and shape.top < 500000):
                 efficacy_t = analysis_params.get("Efficacy_Type", "")
                 eff_cfg = EFFICACY_CONFIG.get(efficacy_t, {})
+                _ctl = eff_cfg.get("controls", {})
+                # Report text only. `negative` is also the key the mapping tab
+                # matches real condition names against, so where the ledger's
+                # wording cannot serve as that key, the printable version lives
+                # in `negative_display`. Falls back to `negative` when unset.
+                _inducer = _ctl.get("negative_display") or _ctl.get("negative", "")
                 field_values = {
                     "Date: ": analysis_params.get("Date", "")[:10],
                     "Cell line: ": eff_cfg.get("cell", ""),
-                    "Sample concentration: ": analysis_params.get("concentration", "1 ppm"),
-                    "Positive control: ": eff_cfg.get("controls", {}).get("positive", ""),
-                    "Inducer: ": eff_cfg.get("controls", {}).get("negative", ""),
+                    # No fallback value: concentration is operator-supplied and
+                    # unknowable from the data. A default here printed "1 ppm" onto
+                    # every slide for months after the input feeding it was removed.
+                    # Blank is honest; a plausible number is not.
+                    "Sample concentration: ": analysis_params.get("concentration", ""),
+                    "Positive control: ": _ctl.get("positive", ""),
+                    "Inducer: ": _inducer,
                     "Treatment time: ": analysis_params.get("treatment_time", "24 h"),
                     "Test method:": " qPCR (DDCt)",
                 }
@@ -4324,14 +4334,18 @@ with tab2:
         # auto-derived (the manual Group column was removed) and refreshed every
         # render so it tracks the selected efficacy type; it is metadata only —
         # it feeds the Excel Summary grouping but never the ΔΔCt/stat maths.
+        # A per-sample "concentration" field used to be seeded here. No widget ever
+        # wrote it and nothing read it, so it only ever reached the Excel
+        # Sample_Mapping sheet as an always-empty column. Concentration is a
+        # run-level operator input and now lives in analysis_params (Export tab),
+        # which is also what the Analysis_Parameters sheet reports.
         for sample in st.session_state.sample_order:
             entry = st.session_state.sample_mapping.get(sample)
             if entry is None:
-                entry = {"condition": sample, "group": "Treatment",
-                         "concentration": "", "include": True}
+                entry = {"condition": sample, "group": "Treatment", "include": True}
                 st.session_state.sample_mapping[sample] = entry
+            entry.pop("concentration", None)
             entry.setdefault("include", True)
-            entry.setdefault("concentration", "")
             entry["group"] = _suggest_group(sample)
 
         st.caption(
@@ -5266,6 +5280,35 @@ with tab5:
 
         efficacy = st.session_state.selected_efficacy
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+        # ---- Experiment description (the one field the tool cannot derive) ----
+        # Sample concentration is a property of the tested article, so it can come
+        # only from the operator: it is not in the instrument export and not in the
+        # efficacy catalog. Treatment time, by contrast, IS per-assay catalog data
+        # and is filled in automatically above.
+        #
+        # Deliberately NOT defaulted to a plausible-looking value. A hardcoded
+        # "1 ppm" fallback used to sit in the PPT writer and silently printed onto
+        # every client slide once the input that fed it was removed. An empty field
+        # that visibly renders blank (and warns here) is safer than a confident
+        # wrong number.
+        # `key` alone: the widget's value IS st.session_state["exp_concentration"],
+        # so it persists across reruns. Passing `value=` as well would collide with
+        # the key-backed state and trip Streamlit's duplicate-default warning.
+        _conc = st.text_input(
+            "Sample concentration",
+            key="exp_concentration",
+            placeholder="e.g. 1 ppm, 0.1%, 10 μM",
+            help="Printed on the PowerPoint slides. Left blank, the slide field is "
+                 "left blank too — it is never guessed.",
+        )
+        _conc = (_conc or "").strip()
+        analysis_params["concentration"] = _conc
+        if not _conc:
+            st.warning(
+                "Sample concentration is empty — the PowerPoint 'Sample concentration' "
+                "field will be blank. Fill it in before sending the report out."
+            )
 
         # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")

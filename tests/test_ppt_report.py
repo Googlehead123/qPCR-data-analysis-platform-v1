@@ -623,3 +623,186 @@ class TestPPTGeneratorDisplayName:
             if shape.has_text_frame
         ]
         assert any("COL1A1 Expression" in t for t in title_texts)
+
+
+class TestTemplateDetailFields:
+    """Pins the template detail box on the RIGHT source for every field.
+
+    `_populate_gene_slide` finds this box by geometry (top-right of the slide),
+    then rewrites each paragraph whose first run starts with a known label.
+    Two of those labels come from operator input rather than from the data, and
+    "Sample concentration" was silently wrong for months: the widget feeding
+    `analysis_params["concentration"]` was removed while the writer kept a
+    `"1 ppm"` fallback, so every slide printed a plausible, unverifiable dose.
+    These tests fail if either half of that regression comes back.
+    """
+
+    DETAIL_LABELS = [
+        "Date: ",
+        "Cell line: ",
+        "Sample concentration: ",
+        "Positive control: ",
+        "Inducer: ",
+        "Treatment time: ",
+        "Test method:",
+    ]
+
+    def _slide_with_detail_box(self):
+        """A slide carrying a stand-in for the template's top-right detail box.
+
+        Geometry must satisfy the writer's `left > 3500000 and top < 500000`
+        test, and the text must avoid the earlier `효능 평가` / `Results`
+        branches, or the box is claimed by one of those instead.
+        """
+        from pptx import Presentation
+        from pptx.util import Emu
+
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+        box = slide.shapes.add_textbox(Emu(7000000), Emu(200000), Emu(4000000), Emu(2000000))
+        tf = box.text_frame
+        for i, label in enumerate(self.DETAIL_LABELS):
+            para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            para.add_run().text = label
+        return prs, slide
+
+    def _detail_text(self, slide):
+        """The detail box's text, as {label: value} for the labels we wrote."""
+        from pptx.util import Emu
+
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            if shape.left > 3500000 and shape.top < 500000:
+                lines = [p.runs[0].text for p in shape.text_frame.paragraphs if p.runs]
+                out = {}
+                for line in lines:
+                    for label in self.DETAIL_LABELS:
+                        if line.startswith(label):
+                            out[label.strip()] = line[len(label):]
+                            break
+                return out
+        raise AssertionError("detail box not found on slide")
+
+    def _populate(self, spec, prs, slide, analysis_params):
+        import plotly.graph_objects as go
+
+        fig = go.Figure(data=[go.Bar(x=["A"], y=[1])])
+        with patch.object(go.Figure, "to_image", return_value=MOCK_PNG_BYTES):
+            spec.PPTGenerator._populate_gene_slide(
+                prs, slide, "MMP1", fig, pd.DataFrame(), analysis_params, {},
+            )
+
+    def test_operator_supplied_concentration_reaches_the_slide(self, mock_streamlit):
+        """Whatever the operator typed must be what the slide says."""
+        from importlib import import_module
+
+        spec = import_module("streamlit qpcr analysis v1")
+        prs, slide = self._slide_with_detail_box()
+
+        self._populate(spec, prs, slide, {
+            "Efficacy_Type": "광노화",
+            "Date": "2026-07-31 12:00:00",
+            "concentration": "0.05%",
+        })
+
+        fields = self._detail_text(slide)
+        assert fields["Sample concentration:"] == "0.05%"
+        assert fields["Date:"] == "2026-07-31"
+
+    def test_missing_concentration_is_blank_not_guessed(self, mock_streamlit):
+        """No input → an empty field, never a default dose.
+
+        A blank is visible to whoever reviews the deck; "1 ppm" is not. This is
+        the assertion that keeps the old fallback from being reintroduced as a
+        convenience.
+        """
+        from importlib import import_module
+
+        spec = import_module("streamlit qpcr analysis v1")
+
+        for params in (
+            {"Efficacy_Type": "광노화", "Date": "2026-07-31"},          # key absent
+            {"Efficacy_Type": "광노화", "Date": "2026-07-31", "concentration": ""},
+        ):
+            prs, slide = self._slide_with_detail_box()
+            self._populate(spec, prs, slide, params)
+            fields = self._detail_text(slide)
+            assert fields["Sample concentration:"] == "", (
+                f"expected a blank concentration, got {fields['Sample concentration:']!r}"
+            )
+
+    def test_inducer_prints_the_display_value_when_the_catalog_has_one(self, mock_streamlit):
+        """Where the ledger wording can't be the matching key, the slide still
+        shows the dose: 광노화 matches on "UVB only" but must print
+        "UVB 40 mj/cm2"."""
+        from importlib import import_module
+        from qpcr.constants import EFFICACY_CONFIG
+
+        spec = import_module("streamlit qpcr analysis v1")
+        controls = EFFICACY_CONFIG["광노화"]["controls"]
+
+        prs, slide = self._slide_with_detail_box()
+        self._populate(spec, prs, slide, {
+            "Efficacy_Type": "광노화", "Date": "2026-07-31", "concentration": "1 ppm",
+        })
+
+        fields = self._detail_text(slide)
+        assert fields["Inducer:"] == controls["negative_display"] == "UVB 40 mj/cm2"
+        # And the matching key itself is NOT what got printed.
+        assert fields["Inducer:"] != controls["negative"]
+
+    def test_inducer_falls_back_to_the_matching_key_without_a_display_value(
+        self, mock_streamlit
+    ):
+        """Categories with no display override behave exactly as before.
+
+        장벽 has no `negative_display`, so the slide shows "Non-treated" — the
+        backward-compatible path, and the reason adding this field to 7 of 21
+        categories did not need the other 14 touched.
+        """
+        from importlib import import_module
+        from qpcr.constants import EFFICACY_CONFIG
+
+        spec = import_module("streamlit qpcr analysis v1")
+        controls = EFFICACY_CONFIG["장벽"]["controls"]
+        assert "negative_display" not in controls, "fixture assumes no override here"
+
+        prs, slide = self._slide_with_detail_box()
+        self._populate(spec, prs, slide, {
+            "Efficacy_Type": "장벽", "Date": "2026-07-31", "concentration": "1 ppm",
+        })
+
+        fields = self._detail_text(slide)
+        assert fields["Inducer:"] == controls["negative"] == "Non-treated"
+        assert fields["Positive control:"] == "Retinoic acid"
+
+    def test_controls_come_from_the_efficacy_catalog(self, mock_streamlit):
+        """Positive control and inducer are catalog-owned, not operator-typed.
+
+        Unlike concentration these ARE knowable from the chosen efficacy type,
+        so they must be filled from `EFFICACY_CONFIG` — including any dose
+        recorded there.
+        """
+        from importlib import import_module
+        from qpcr.constants import EFFICACY_CONFIG
+
+        spec = import_module("streamlit qpcr analysis v1")
+        controls = EFFICACY_CONFIG["광노화"]["controls"]
+
+        prs, slide = self._slide_with_detail_box()
+        self._populate(spec, prs, slide, {
+            "Efficacy_Type": "광노화", "Date": "2026-07-31", "concentration": "1 ppm",
+        })
+
+        fields = self._detail_text(slide)
+        assert fields["Positive control:"] == controls["positive"]
+        # Inducer resolves through negative_display when set (see the two tests
+        # above for both branches); 광노화 has one.
+        assert fields["Inducer:"] == (
+            controls.get("negative_display") or controls["negative"]
+        )
+        assert fields["Cell line:"] == EFFICACY_CONFIG["광노화"]["cell"]

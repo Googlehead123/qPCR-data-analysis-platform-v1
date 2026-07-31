@@ -1,9 +1,22 @@
-"""Guards against monolith / qpcr-package divergence for computations that the
-Streamlit app actually runs from the monolith copy.
+"""Pins the ΔΔCt/fold-change contract the Streamlit app actually runs.
 
-The app executes the INLINE classes in `streamlit qpcr analysis v1.py`, not the
-`qpcr/` package. Bug fixes applied only to the package silently never ship. This
-suite pins the parity that matters at runtime.
+Ownership as of 2026-07-31 (the dual-copy hazard this file was written for is
+gone):
+
+* Parsing, QC, graphing and the ΔΔCt maths live ONLY in `qpcr/`. The app's
+  `AnalysisEngine` *subclasses* `qpcr.analysis.AnalysisEngine` and adds just
+  `run_full_analysis`, so `calculate_ddct` here and in the package are the same
+  function object. `test_monolith_matches_package_fc_errors` therefore no longer
+  detects divergence — it is kept as a cheap assertion that the subclass has not
+  started shadowing the inherited maths.
+* Reporting and export live ONLY in `streamlit qpcr analysis v1.py`. Their
+  `qpcr/report.py` / `qpcr/export.py` duplicates were deleted; nothing imported
+  them, so fixes applied there never shipped while their tests still passed.
+
+What still earns its keep here is the behavioural contract, not the parity: the
+fold-change error columns must exist and be asymmetric (Livak 2^-x is nonlinear,
+so a symmetric SD bar is wrong), and the cache-fronted replicate fold-change
+wrapper must be wired to the right function with the right argument order.
 """
 
 from importlib import import_module
