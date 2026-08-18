@@ -2,19 +2,25 @@ name: CI
 
 on:
   push:
-    branches-ignore: []
   pull_request:
 
 jobs:
   test:
-    name: pytest (Python 3.12)
+    name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is what production runs (runtime.txt); 3.12 is the local dev version.
+        # Both are tested because #16 was a Cloud-only break that a 3.12-only job
+        # would have passed straight through.
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies
