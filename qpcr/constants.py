@@ -50,19 +50,18 @@ _DEFAULT_CJK_FONTS = [
 ]
 _FALLBACK_FONTS = ["Arial", "sans-serif"]
 
-
-def _detect_available_fonts():
-    """Check which CJK fonts are actually installed on this system."""
-    try:
-        from matplotlib import font_manager
-        system_fonts = {f.name for f in font_manager.fontManager.ttflist}
-        available_cjk = [f for f in _DEFAULT_CJK_FONTS if f in system_fonts]
-        return available_cjk + _FALLBACK_FONTS
-    except ImportError:
-        return _DEFAULT_CJK_FONTS + _FALLBACK_FONTS
-
-
-PLOTLY_FONT_FAMILY = ", ".join(_detect_available_fonts())
+# This is a CSS font-family list handed to Plotly, so a name that is not
+# installed is simply skipped by the browser — there is nothing to gain by
+# filtering the list first, and the filter actively hurt. It asked matplotlib
+# which families exist, and matplotlib does not index .ttc collections, which is
+# exactly how the fonts-noto-cjk package in packages.txt ships Noto Sans CJK. So
+# on both a dev box and Streamlit Cloud the CJK entries were always dropped and
+# every chart asked for "Arial, sans-serif": Korean still rendered, but only
+# because Chrome falls back per-character, never because a Korean font was
+# chosen. Emitting the full preference list lets a real Korean face (Malgun
+# Gothic on Windows, Apple SD Gothic Neo on macOS, Noto Sans CJK KR on Linux)
+# win when it is present, and costs a matplotlib import at startup less.
+PLOTLY_FONT_FAMILY = ", ".join(_DEFAULT_CJK_FONTS + _FALLBACK_FONTS)
 
 CM_TO_PX = 37.7953
 CM_TO_EMU = 360000

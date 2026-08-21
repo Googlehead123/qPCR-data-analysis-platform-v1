@@ -22,7 +22,10 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
 
-from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS, EFFICACY_CONFIG
+from qpcr.constants import (
+    GRAPH_PRESETS, FIGURE_SIZE_PRESETS, EFFICACY_CONFIG,
+    PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
+)
 from qpcr.export_utils import export_figure_to_bytes, build_zip
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
@@ -1500,34 +1503,11 @@ COSMAX_LAB_WHITE = "#F3F0ED"  # Secondary background (off-white)
 COSMAX_FROST_GREY = "#C1C6C7"  # Secondary elements, table headers
 COSMAX_CREAM = "#D4CEC1"  # Secondary data series, neutral accents
 
-# Font family with CJK (Korean) support for Plotly image export (kaleido)
-# Cross-platform fallback: Linux → Windows → macOS → generic
-_DEFAULT_CJK_FONTS = [
-    "Noto Sans CJK KR", "NanumGothic", "Malgun Gothic",
-    "Apple SD Gothic Neo", "AppleGothic",
-]
-_FALLBACK_FONTS = ["Arial", "sans-serif"]
-
-# FIX-12: Validate CJK font availability at startup with graceful fallback
-def _detect_available_fonts():
-    """Check which CJK fonts are actually installed on this system."""
-    try:
-        from matplotlib import font_manager
-        system_fonts = {f.name for f in font_manager.fontManager.ttflist}
-        available_cjk = [f for f in _DEFAULT_CJK_FONTS if f in system_fonts]
-        if not available_cjk:
-            # No CJK fonts found — warn once via Streamlit toast
-            # (deferred to first render since st isn't ready at import time)
-            pass
-        return available_cjk + _FALLBACK_FONTS
-    except ImportError:
-        # matplotlib not available — use full fallback list
-        return _DEFAULT_CJK_FONTS + _FALLBACK_FONTS
-
-PLOTLY_FONT_FAMILY = ", ".join(_detect_available_fonts())
-
-CM_TO_PX = 37.7953
-CM_TO_EMU = 360000
+# PLOTLY_FONT_FAMILY, CM_TO_PX and CM_TO_EMU are imported from qpcr.constants at
+# the top of this file. They used to be re-declared here with byte-identical
+# values, which is the dual-copy hazard tasks/lessons.md warns about: qpcr/graph.py
+# read the package's copy while the report/PPT writers below read this one, so a
+# change to either only reached half the output.
 
 
 # ==================== SESSION STATE INIT ====================
