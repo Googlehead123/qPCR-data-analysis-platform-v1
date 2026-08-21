@@ -343,15 +343,23 @@ class GraphGenerator:
             fixedrange=False,
         )
 
-        if settings.get("y_log_scale"):
+        is_log = bool(settings.get("y_log_scale"))
+        if is_log:
             y_axis_config["type"] = "log"
             y_axis_config.pop("range", None)
 
         if settings.get("y_min") is not None or settings.get("y_max") is not None:
-            y_range = []
-            y_range.append(settings.get("y_min", 0))
-            y_range.append(settings.get("y_max", y_max_auto))
-            y_axis_config["range"] = y_range
+            y_lo = settings.get("y_min", 0)
+            y_hi = settings.get("y_max", y_max_auto)
+            if is_log:
+                # Plotly reads a log axis's range as EXPONENTS, so passing the raw
+                # bounds through turned a 1-100 request into 10^1-10^100 and drew a
+                # blank chart. Convert, and fall back to auto when the bounds are
+                # not expressible on a log axis rather than showing a wrong one.
+                if y_lo is not None and y_lo > 0 and y_hi is not None and y_hi > y_lo:
+                    y_axis_config["range"] = [np.log10(y_lo), np.log10(y_hi)]
+            else:
+                y_axis_config["range"] = [y_lo, y_hi]
 
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get("bar_gap", 0.15))
         gene_margins = settings.get(
