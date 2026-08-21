@@ -475,6 +475,111 @@ def _ensure_bar_settings(gene, gene_data) -> None:
             bs.setdefault(sk, bs.get("show_sig", True))
 
 
+# ==================== SETTINGS-BACKED WIDGETS ====================
+# A keyed Streamlit widget IGNORES a recomputed ``value=``/``index=``: verified
+# against streamlit 1.53, ``compute_and_register_element_id`` derives the element
+# id from the ``key`` alone (sliders additionally from min/max/step, select_slider
+# from options), so once the widget has state, a changed default never re-seeds
+# it. Anything that writes graph_settings and expects the widget to follow is
+# therefore a silent no-op — that is what made "Size preset" and "Reset this
+# gene" do nothing, and what let the colour-preset selectbox overwrite a
+# hand-picked bar colour on the next interaction.
+#
+# The only way to move such a widget from code is to assign its key BEFORE it is
+# instantiated. Doing that unconditionally would clobber the user's own choice,
+# so we remember the last value we pushed: a push happens only when the settings
+# value changed since then, which is exactly the case where something other than
+# the widget changed it.
+
+
+def _settings_backed_selectbox(label, options, *, settings_key, widget_key,
+                               default, **kwargs):
+    """Selectbox whose value lives in ``graph_settings`` and can be set by code.
+
+    Keeps ``graph_settings[settings_key]`` and the widget in sync in BOTH
+    directions, and re-seeds the widget when ``options`` no longer contains the
+    stored value (e.g. a condition was renamed after the last analysis run).
+    """
+    gs = st.session_state.graph_settings
+    options = list(options)
+    if not options:
+        return None
+    want = gs.get(settings_key, default)
+    if want not in options:
+        want = default if default in options else options[0]
+    sentinel = f"_sync_{widget_key}"
+    if (st.session_state.get(sentinel) != want
+            or st.session_state.get(widget_key) not in options):
+        st.session_state[widget_key] = want
+        st.session_state[sentinel] = want
+    chosen = st.selectbox(label, options, key=widget_key, **kwargs)
+    gs[settings_key] = chosen
+    st.session_state[sentinel] = chosen
+    return chosen
+
+
+def _seed_widget(widget_key, value):
+    """Give a keyed widget its initial value without fighting its stored state."""
+    st.session_state.setdefault(widget_key, value)
+
+
+# Widget keys owned by the per-gene editor, as f-string suffixes of the gene.
+_GENE_WIDGET_KEYS = (
+    "preset_{g}", "bo_{g}", "gap_sl_{g}", "ow_{g}", "bg_{g}",
+    "fig_w_{g}", "fig_h_{g}", "gene_display_{g}", "lbl_mode_{g}", "ref_sel_{g}",
+    "gf_{g}", "ts_{g}", "ys_{g}", "ymin_{g}", "ymax_{g}", "ylog_{g}",
+    "tgl_sig_{g}", "tgl_err_{g}", "tgl_dp_{g}",
+)
+# Per-condition widget keys are f"{prefix}{gene}_{condition}", so they are
+# matched by prefix rather than enumerated.
+_GENE_WIDGET_PREFIXES = (
+    "cp_{g}_", "_desired_cp_{g}_", "show_sig_1_{g}_", "show_sig_2_{g}_",
+    "show_sig_3_{g}_", "show_err_{g}_",
+)
+_GENE_SETTING_SUFFIXES = (
+    "show_sig", "show_err", "bar_gap", "show_data_points", "color_preset",
+    "figure_width", "figure_height", "font_size", "bar_opacity",
+    "marker_line_width", "tick_size", "ylabel_size", "bg_color", "y_min",
+    "y_max", "label_mode", "y_log", "ref_line", "size_preset",
+)
+
+
+def _reset_gene_style(gene: str) -> None:
+    """Restore one gene's chart styling to the defaults.
+
+    Clears the ``graph_settings`` entries AND the widget keys that feed them.
+    Clearing only ``graph_settings`` is what made this button do nothing: every
+    keyed widget kept its own state and re-populated ``graph_settings`` on the
+    next run (see the note above ``_settings_backed_selectbox``).
+
+    Must run BEFORE any of the gene's widgets are instantiated in the current
+    run — Streamlit refuses to modify a widget's key after instantiation — so
+    the button only raises a flag and this is called at the top of the editor.
+    """
+    gs = st.session_state.graph_settings
+    st.session_state.pop(f"{gene}_bar_settings", None)
+    for suffix in _GENE_SETTING_SUFFIXES:
+        gs.pop(f"{gene}_{suffix}", None)
+    per_bar = gs.get("bar_colors_per_sample")
+    if isinstance(per_bar, dict):
+        for bar_key in [k for k in per_bar
+                        if isinstance(k, str) and k.startswith(f"{gene}_")]:
+            per_bar.pop(bar_key, None)
+    st.session_state.get("gene_display_names", {}).pop(gene, None)
+
+    fixed = {k.format(g=gene) for k in _GENE_WIDGET_KEYS}
+    fixed |= {f"_sync_{k.format(g=gene)}" for k in _GENE_WIDGET_KEYS}
+    prefixes = tuple(p.format(g=gene) for p in _GENE_WIDGET_PREFIXES)
+    for key in list(st.session_state.keys()):
+        if key in fixed or key.startswith(prefixes):
+            st.session_state.pop(key, None)
+
+    # Drop the memoized figure so the chart is rebuilt from the defaults.
+    sigs = st.session_state.get("_graph_signatures")
+    if isinstance(sigs, dict):
+        sigs.pop(gene, None)
+
+
 def resolve_gene_settings(gene: str) -> dict:
     """Fold a gene's per-gene overrides onto the global graph_settings.
 
@@ -917,6 +1022,11 @@ def render_gene_editor(current_gene):
     gene_data = st.session_state.processed_data[current_gene]
     gs = st.session_state.graph_settings
 
+    # "Reset this gene" only raises a flag; the clearing must land here, before a
+    # single one of this gene's widgets is instantiated.
+    if st.session_state.pop(f"_reset_style_{current_gene}", False):
+        _reset_gene_style(current_gene)
+
     gs.setdefault(f"{current_gene}_show_sig", True)
     gs.setdefault(f"{current_gene}_show_err", True)
     gs.setdefault(f"{current_gene}_bar_gap", 0.45)
@@ -938,12 +1048,13 @@ def render_gene_editor(current_gene):
         c1, c2, c3 = st.columns(3)
         with c1:
             preset_names = list(GRAPH_PRESETS.keys()) + ["Custom"]
-            cur = gs.get(f"{current_gene}_color_preset", "Classic")
-            if cur not in preset_names:
-                cur = "Custom"
-            gs[f"{current_gene}_color_preset"] = st.selectbox(
-                "Color preset", preset_names, index=preset_names.index(cur),
-                key=f"preset_{current_gene}")
+            # Settings-backed: picking a colour by hand in the Colors tab sets the
+            # preset to "Custom", and this has to show that instead of snapping the
+            # bars back to the old preset on the next interaction.
+            _settings_backed_selectbox(
+                "Color preset", preset_names,
+                settings_key=f"{current_gene}_color_preset",
+                widget_key=f"preset_{current_gene}", default="Classic")
             gs[f"{current_gene}_bar_opacity"] = st.slider(
                 "Bar opacity", 0.3, 1.0,
                 value=float(gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.85))),
@@ -961,50 +1072,45 @@ def render_gene_editor(current_gene):
                 "Background",
                 gs.get(f"{current_gene}_bg_color", gs.get("plot_bgcolor", "#FFFFFF")),
                 key=f"bg_{current_gene}")
-            size_names = list(FIGURE_SIZE_PRESETS.keys()) + ["Custom"]
-            spk = f"{current_gene}_size_preset"
-            gs.setdefault(spk, "PPT Full")
-            cur_sp = gs.get(spk, "PPT Full")
-            if cur_sp not in size_names:
-                cur_sp = "Custom"
-            sel_sp = st.selectbox("Size preset", size_names, index=size_names.index(cur_sp),
-                key=f"size_preset_{current_gene}")
-            prev_sp = gs.get(spk, "PPT Full")
-            if sel_sp != "Custom" and sel_sp in FIGURE_SIZE_PRESETS:
-                gs[f"{current_gene}_figure_width"] = FIGURE_SIZE_PRESETS[sel_sp]["width"]
-                gs[f"{current_gene}_figure_height"] = FIGURE_SIZE_PRESETS[sel_sp]["height"]
-            gs[spk] = sel_sp
-            if sel_sp != prev_sp:
-                st.rerun(scope="fragment")
+        # Size presets are an ACTION, not a persisted selection: they snap the two
+        # sliders below. Buttons rather than a selectbox because the sliders are the
+        # single source of truth for the dimensions — a selectbox would have to be
+        # forced back to "Custom" the instant a slider moved, and a keyed widget
+        # cannot be reassigned once it has been instantiated in the same run. The
+        # buttons are declared BEFORE the sliders so a click lands in the slider
+        # state that the very same run then reads (no rerun needed).
+        _w_key, _h_key = f"fig_w_{current_gene}", f"fig_h_{current_gene}"
+        _seed_widget(_w_key, float(gs.get(f"{current_gene}_figure_width",
+                                          gs.get("figure_width", 28))))
+        _seed_widget(_h_key, float(gs.get(f"{current_gene}_figure_height",
+                                          gs.get("figure_height", 16))))
+        st.caption("Size preset")
+        _sp_cols = st.columns(len(FIGURE_SIZE_PRESETS))
+        for _spi, (_sp_name, _sp_dim) in enumerate(FIGURE_SIZE_PRESETS.items()):
+            if _sp_cols[_spi].button(
+                _sp_name, key=f"sp_{_sp_name}_{current_gene}",
+                use_container_width=True,
+                help=f"{_sp_dim['width']} × {_sp_dim['height']} cm",
+            ):
+                st.session_state[_w_key] = float(_sp_dim["width"])
+                st.session_state[_h_key] = float(_sp_dim["height"])
         sc1, sc2 = st.columns(2)
         with sc1:
-            fw = st.slider("Width (cm)", 10.0, 40.0,
-                value=float(gs.get(f"{current_gene}_figure_width", gs.get("figure_width", 28))),
-                step=0.5, key=f"fig_w_{current_gene}")
+            fw = st.slider("Width (cm)", 10.0, 40.0, step=0.5, key=_w_key)
         with sc2:
-            fh = st.slider("Height (cm)", 6.0, 25.0,
-                value=float(gs.get(f"{current_gene}_figure_height", gs.get("figure_height", 16))),
-                step=0.5, key=f"fig_h_{current_gene}")
+            fh = st.slider("Height (cm)", 6.0, 25.0, step=0.5, key=_h_key)
         gs[f"{current_gene}_figure_width"] = fw
         gs[f"{current_gene}_figure_height"] = fh
-        if sel_sp != "Custom" and sel_sp in FIGURE_SIZE_PRESETS:
-            p = FIGURE_SIZE_PRESETS[sel_sp]
-            if fw != p["width"] or fh != p["height"]:
-                gs[spk] = "Custom"
         if st.button("Reset this gene", key=f"reset_all_{current_gene}"):
-            st.session_state.pop(f"{current_gene}_bar_settings", None)
-            for k in [f"{current_gene}_show_sig", f"{current_gene}_show_err",
-                      f"{current_gene}_bar_gap", f"{current_gene}_show_data_points",
-                      f"{current_gene}_color_preset", f"{current_gene}_size_preset",
-                      f"{current_gene}_figure_width", f"{current_gene}_figure_height",
-                      f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
-                      f"{current_gene}_marker_line_width", f"{current_gene}_tick_size",
-                      f"{current_gene}_ylabel_size", f"{current_gene}_bg_color",
-                      f"{current_gene}_y_min", f"{current_gene}_y_max",
-                      f"{current_gene}_label_mode", f"{current_gene}_y_log",
-                      f"{current_gene}_ref_line"]:
-                gs.pop(k, None)
-            st.rerun(scope="fragment")
+            # Flag only: the clearing has to happen before this gene's widgets are
+            # instantiated, which is the top of this fragment on the next pass.
+            #
+            # A full rerun, not scope="fragment": Streamlit rejects a
+            # fragment-scoped rerun whenever the fragment body happens to be
+            # running as part of a full script run, and a reset also has to reach
+            # build_all_figures so the export figures pick up the defaults.
+            st.session_state[f"_reset_style_{current_gene}"] = True
+            st.rerun()
 
     with t_labels:
         c1, c2 = st.columns(2)
@@ -1017,13 +1123,18 @@ def render_gene_editor(current_gene):
                 st.session_state.gene_display_names[current_gene] = gds
             elif current_gene in st.session_state.gene_display_names:
                 del st.session_state.gene_display_names[current_gene]
-            gs[f"{current_gene}_label_mode"] = st.selectbox("X-label mode", label_modes,
-                index=label_modes.index(gs.get(f"{current_gene}_label_mode", "Auto-wrap")),
-                key=f"lbl_mode_{current_gene}",
+            _settings_backed_selectbox(
+                "X-label mode", label_modes,
+                settings_key=f"{current_gene}_label_mode",
+                widget_key=f"lbl_mode_{current_gene}", default="Auto-wrap",
                 help="How x-axis labels handle long text")
-            gs[f"{current_gene}_ref_line"] = st.selectbox("Reference line", ref_options,
-                index=ref_options.index(gs.get(f"{current_gene}_ref_line", "None")),
-                key=f"ref_sel_{current_gene}",
+            # Settings-backed because ref_options changes when conditions are
+            # renamed or re-mapped: the widget's stored condition name can vanish
+            # from the option list, and a keyed selectbox will not re-seed itself.
+            _settings_backed_selectbox(
+                "Reference line", ref_options,
+                settings_key=f"{current_gene}_ref_line",
+                widget_key=f"ref_sel_{current_gene}", default="None",
                 help="Horizontal dashed line at a condition's expression level")
         with c2:
             gs[f"{current_gene}_font_size"] = st.slider("Global font", 8, 28,
@@ -1049,8 +1160,16 @@ def render_gene_editor(current_gene):
             gs[f"{current_gene}_y_log"] = st.toggle("Log y-axis",
                 value=gs.get(f"{current_gene}_y_log", False), key=f"ylog_{current_gene}",
                 help="Log-scale the expression axis")
-        if ymin is not None and ymax is not None and ymax > 0 and ymin >= ymax:
+        # `ymax > 0` used to be part of this guard, which let ymin=0/ymax=0 through
+        # and handed Plotly the degenerate range [0, 0] (a blank plot).
+        if ymin is not None and ymax is not None and ymin >= ymax:
             st.warning("Y-axis min must be less than max. Using auto range.")
+            ymin = ymax = None
+        if ymax is not None and ymax <= 0:
+            st.warning("Y-axis max must be greater than 0. Using auto range.")
+            ymin = ymax = None
+        if gs.get(f"{current_gene}_y_log") and ymin is not None and ymin <= 0:
+            st.warning("A log axis cannot start at or below 0. Using auto range.")
             ymin = ymax = None
         if ymin is not None:
             gs[f"{current_gene}_y_min"] = ymin
