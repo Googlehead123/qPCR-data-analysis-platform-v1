@@ -543,6 +543,23 @@ _GENE_SETTING_SUFFIXES = (
     "y_max", "label_mode", "y_log", "ref_line", "size_preset",
 )
 
+# Per-gene style keys that the editor materialises on first render. Deliberately
+# NOT seeded for every gene up front: several of them (figure_width, font_size,
+# y_log, ...) fall back to a GLOBAL graph_settings entry when absent, so seeding
+# them would shadow that global and make it dead state.
+_GENE_STYLE_DEFAULTS = {
+    "show_sig": True, "show_err": True, "bar_gap": 0.45,
+    "color_preset": "Classic", "show_data_points": False,
+    "label_mode": "Auto-wrap",
+}
+
+
+def _ensure_gene_style_defaults(gene: str) -> None:
+    """Materialise the per-gene style keys that have no global fallback."""
+    gs = st.session_state.graph_settings
+    for suffix, value in _GENE_STYLE_DEFAULTS.items():
+        gs.setdefault(f"{gene}_{suffix}", value)
+
 
 def _reset_gene_style(gene: str) -> None:
     """Restore one gene's chart styling to the defaults.
@@ -743,11 +760,15 @@ def _settings_for_gene(cs: dict, gene: str, other_genes) -> dict:
             continue
         out[k] = v
     # bar_colors_per_sample is keyed f"{gene}_{condition}" across ALL genes.
+    # Always emit the key. It used to be omitted entirely while the dict did not
+    # exist yet and present-but-empty once some other gene created it, so the
+    # fingerprint of a gene with no colour overrides of its own changed by itself
+    # and every such gene was rebuilt one extra time.
     colors = cs.get("bar_colors_per_sample")
-    if isinstance(colors, dict):
-        out["bar_colors_per_sample"] = {
-            k: v for k, v in colors.items() if isinstance(k, str) and k.startswith(own)
-        }
+    out["bar_colors_per_sample"] = {
+        k: v for k, v in colors.items()
+        if isinstance(k, str) and k.startswith(own)
+    } if isinstance(colors, dict) else {}
     return out
 
 
@@ -794,7 +815,16 @@ def _gene_figure_signature(gene, gene_data, shared, other_genes) -> str | None:
         "gene": gene,
         "data": data_fp,
         "settings": _settings_for_gene(resolve_gene_settings(gene), gene, other_genes),
-        "bar_settings": st.session_state.get(f"{gene}_bar_settings", {}),
+        # Only the show_* flags: graph.py reads show_err and show_sig_1/2/3 (with
+        # show_sig as the fallback) out of bar_settings and takes the bar COLOURS
+        # from the preset or bar_colors_per_sample instead. Hashing the whole dict
+        # meant the editor writing back a bar's displayed colour moved the
+        # fingerprint of a figure that colour had no part in.
+        "bar_settings": {
+            bar_key: {k: v for k, v in (bar or {}).items()
+                      if isinstance(k, str) and k.startswith("show_")}
+            for bar_key, bar in (st.session_state.get(f"{gene}_bar_settings") or {}).items()
+        },
         "display_name": st.session_state.gene_display_names.get(gene, gene),
         "ref_line": gs.get(f"{gene}_ref_line", "None"),
         "show_data_points": bool(gs.get(f"{gene}_show_data_points", False)),
@@ -1053,12 +1083,7 @@ def render_gene_editor(current_gene):
     if st.session_state.pop(f"_reset_style_{current_gene}", False):
         _reset_gene_style(current_gene)
 
-    gs.setdefault(f"{current_gene}_show_sig", True)
-    gs.setdefault(f"{current_gene}_show_err", True)
-    gs.setdefault(f"{current_gene}_bar_gap", 0.45)
-    gs.setdefault(f"{current_gene}_color_preset", "Classic")
-    gs.setdefault(f"{current_gene}_show_data_points", False)
-    gs.setdefault(f"{current_gene}_label_mode", "Auto-wrap")
+    _ensure_gene_style_defaults(current_gene)
     ref_options = ["None"] + gene_data["Condition"].tolist()
     if gs.get(f"{current_gene}_ref_line", "None") not in ref_options:
         gs[f"{current_gene}_ref_line"] = "None"
