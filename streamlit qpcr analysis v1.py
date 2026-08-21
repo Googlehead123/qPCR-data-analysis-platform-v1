@@ -1001,7 +1001,7 @@ def render_plate_heatmaps(data, excluded_wells) -> None:
     exclusions lives outside this fragment and triggers a full rerun anyway.
     """
     plate_fig = get_plate_heatmap(data, value_col="CT", excluded_wells=excluded_wells)
-    st.plotly_chart(plate_fig, use_container_width=True)
+    st.plotly_chart(plate_fig, width='stretch')
     st.caption(
         "Red = High CT (low expression) | Green = Low CT (high expression) | X = Excluded"
     )
@@ -1020,7 +1020,7 @@ def render_plate_heatmaps(data, excluded_wells) -> None:
                 value_col="CT", excluded_wells=excluded_wells,
             )
             gene_fig.update_layout(title=f"Plate Heatmap — {selected_gene}")
-            st.plotly_chart(gene_fig, use_container_width=True)
+            st.plotly_chart(gene_fig, width='stretch')
 
     # Per-sample heatmap
     all_samples = sorted(data["Sample"].dropna().unique().tolist(), key=natural_sort_key)
@@ -1036,7 +1036,7 @@ def render_plate_heatmaps(data, excluded_wells) -> None:
                 value_col="CT", excluded_wells=excluded_wells,
             )
             sample_fig.update_layout(title=f"Plate Heatmap — {selected_sample}")
-            st.plotly_chart(sample_fig, use_container_width=True)
+            st.plotly_chart(sample_fig, width='stretch')
 
 
 @st.fragment
@@ -1115,7 +1115,7 @@ def render_gene_editor(current_gene):
         for _spi, (_sp_name, _sp_dim) in enumerate(FIGURE_SIZE_PRESETS.items()):
             if _sp_cols[_spi].button(
                 _sp_name, key=f"sp_{_sp_name}_{current_gene}",
-                use_container_width=True,
+                width='stretch',
                 help=f"{_sp_dim['width']} × {_sp_dim['height']} cm",
             ):
                 st.session_state[_w_key] = float(_sp_dim["width"])
@@ -1231,7 +1231,7 @@ def render_gene_editor(current_gene):
     # Memoized: reuses the figure the Graphs/Overview pass already built when
     # nothing changed, and rebuilds here on a fragment-scoped rerun when it did.
     fig = gene_figure_for_display(current_gene, gene_data, efficacy_config)
-    st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
+    st.plotly_chart(fig, width='stretch', key=f"main_fig_{current_gene}")
 
 
 # ==================== PAGE CONFIG ====================
@@ -3834,7 +3834,7 @@ with tab_qc:
                     )
                     QualityControl.HK_VARIATION_THRESHOLD = new_hk_var
 
-                if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
+                if st.button("🔄 Re-run QC with New Settings", type="primary", width='stretch', key="qc_rerun_settings"):
                     st.rerun()
 
             # ---- Automatic replicate QC (best-2-of-3) ----
@@ -3909,7 +3909,7 @@ with tab_qc:
                     edited_audit = st.data_editor(
                         pd.DataFrame(audit_rows),
                         disabled=["Gene", "Sample", "Status", "SD before", "SD after", "Dropped well(s)"],
-                        hide_index=True, use_container_width=True, key="auto_qc_audit_editor",
+                        hide_index=True, width='stretch', key="auto_qc_audit_editor",
                     )
                     if st.button("Apply overrides", key="apply_auto_qc_overrides", type="primary"):
                         st.session_state.excluded_wells_history.append(
@@ -4018,7 +4018,7 @@ with tab_qc:
                 # Global quick actions
                 action_cols = st.columns(3)
                 with action_cols[0]:
-                    if st.button("Include All Visible", key="qc_incl_all_visible", use_container_width=True):
+                    if st.button("Include All Visible", key="qc_incl_all_visible", width='stretch'):
                         st.session_state.excluded_wells_history.append(
                             {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                         )
@@ -4026,7 +4026,7 @@ with tab_qc:
                             include_well(r["Well"], r["Target"], r["Sample"])
                         st.rerun()
                 with action_cols[1]:
-                    if st.button("Exclude All Visible", key="qc_excl_all_visible", use_container_width=True):
+                    if st.button("Exclude All Visible", key="qc_excl_all_visible", width='stretch'):
                         st.session_state.excluded_wells_history.append(
                             {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
                         )
@@ -4035,7 +4035,7 @@ with tab_qc:
                         st.rerun()
                 with action_cols[2]:
                     can_undo = len(st.session_state.excluded_wells_history) > 0
-                    if st.button("Undo Last Change", key="qc_undo_browser", use_container_width=True, disabled=not can_undo):
+                    if st.button("Undo Last Change", key="qc_undo_browser", width='stretch', disabled=not can_undo):
                         if st.session_state.excluded_wells_history:
                             st.session_state.excluded_wells = st.session_state.excluded_wells_history.pop()
                             st.rerun()
@@ -4189,7 +4189,7 @@ with tab_qc:
                         return [""] * len(row)
 
                     styled_stats = rep_stats.style.apply(highlight_status, axis=1)
-                    st.dataframe(styled_stats, height=400, use_container_width=True)
+                    st.dataframe(styled_stats, height=400, width='stretch')
 
             # ---- Section 2: Flagged Wells (SD-based, matches Triplicate Browser) ----
             st.markdown("### Flagged Wells")
@@ -4233,7 +4233,7 @@ with tab_qc:
                 st.dataframe(
                     flagged_overview,
                     hide_index=True,
-                    use_container_width=True,
+                    width='stretch',
                     column_config={
                         "CT": st.column_config.NumberColumn("CT", format="%.2f"),
                     },
@@ -4345,7 +4345,7 @@ with tab_qc:
                         ]
                         st.dataframe(
                             gene_rows[display_cols].reset_index(drop=True),
-                            use_container_width=True,
+                            width='stretch',
                             hide_index=True,
                         )
             else:
@@ -4372,7 +4372,7 @@ with tab_qc:
             can_undo = len(st.session_state.excluded_wells_history) > 0
             if st.button(
                 "↩️ Undo Last",
-                use_container_width=True,
+                width='stretch',
                 disabled=not can_undo,
                 key="global_undo",
             ):
@@ -4384,7 +4384,7 @@ with tab_qc:
 
         with status_cols[2]:
             if st.button(
-                "🔄 Refresh QC", use_container_width=True, key="global_refresh"
+                "🔄 Refresh QC", width='stretch', key="global_refresh"
             ):
                 st.rerun()
 
@@ -4673,7 +4673,7 @@ with tab2:
                     for idx, s in enumerate(st.session_state.sample_order)
                 ]
             )
-            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+            st.dataframe(mapping_df, width='stretch', hide_index=True)
 
         # Run analysis
         st.subheader("Run Full Analysis (DDCt + Statistics)")
@@ -4870,7 +4870,7 @@ with tab2:
             st.session_state['_last_cmp_sample_key_3'] = cmp_sample_key_3 if use_third_comparison else None
 
             # Run button
-            if st.button("Run Full Analysis", type="primary", use_container_width=True):
+            if st.button("Run Full Analysis", type="primary", width='stretch'):
                 ok = AnalysisEngine.run_full_analysis(
                     ref_sample_key,
                     cmp_sample_key,
@@ -5109,12 +5109,12 @@ with tab_ov:
                 if g in _ov_errs:
                     st.warning(f"{g}: chart unavailable ({_ov_errs[g]})")
                 elif g in _ov_figs:
-                    st.plotly_chart(_ov_figs[g], use_container_width=True, key=f"ov_fig_{g}")
+                    st.plotly_chart(_ov_figs[g], width='stretch', key=f"ov_fig_{g}")
 
         # fold-change matrix
         st.markdown("##### Fold-change matrix")
         st.caption("Fold change vs reference; significance markers are vs the p-value comparison control.")
-        st.dataframe(matrix, use_container_width=True, hide_index=True)
+        st.dataframe(matrix, width='stretch', hide_index=True)
         st.caption("Download the full Excel / PowerPoint report from the **Export** tab.")
 
 
@@ -5208,12 +5208,12 @@ with tab3:
                     na_rep="—",
                 )
 
-                st.dataframe(styled, use_container_width=True)
+                st.dataframe(styled, width='stretch')
                 st.download_button(
                     "⬇️ Download CSV",
                     data=display_df.to_csv(index=False).encode("utf-8-sig"),
                     file_name=f"{gene}_results_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv", key=f"csv_{gene}", use_container_width=True,
+                    mime="text/csv", key=f"csv_{gene}", width='stretch',
                 )
 
         # ---- Auto-Analyze (deterministic, reproducible — no external LLM) ----
@@ -5234,7 +5234,7 @@ with tab3:
         # collapsed). On Streamlit Cloud's constrained tier that repeated native
         # + memory load crashed the process with a segfault. Run once on click,
         # cache in session_state, and render from the cache.
-        if st.button("▶ Run Auto-Analyze", key="run_auto_analyze", use_container_width=True):
+        if st.button("▶ Run Auto-Analyze", key="run_auto_analyze", width='stretch'):
             with st.spinner("Analyzing..."):
                 st.session_state["_auto_analyze"] = {
                     "screening": screen_data(st.session_state.get("data"), st.session_state.get("hk_gene")),
@@ -5282,7 +5282,7 @@ with tab3:
                              "Recommended test": v["test"], "Why": v["reason"]}
                             for g, v in _recs.items()
                         ]),
-                        use_container_width=True, hide_index=True,
+                        width='stretch', hide_index=True,
                     )
                     st.caption("Advisory — the app computes the test selected in the Mapping "
                                "tab; use this to sanity-check that choice.")
@@ -5332,7 +5332,7 @@ with tab4:
             with gene_cols[idx % len(gene_cols)]:
                 if st.button(
                     f"{'✓ ' if idx == st.session_state.selected_gene_idx else ''}{gene}",
-                    key=f"gene_btn_{gene}", use_container_width=True,
+                    key=f"gene_btn_{gene}", width='stretch',
                     type="primary" if idx == st.session_state.selected_gene_idx else "secondary",
                 ):
                     st.session_state.selected_gene_idx = idx
@@ -5503,7 +5503,7 @@ with tab5:
         with rpt_cols[0]:
             # Gated behind a button + spinner: export_to_excel post-processes chart
             # XML per gene, so running it on every rerun would be wasteful.
-            if st.button("Generate Excel report", key="gen_excel", use_container_width=True):
+            if st.button("Generate Excel report", key="gen_excel", width='stretch'):
                 with st.spinner("Building Excel report..."):
                     try:
                         _qc, _rep, _excl = _build_export_extras()
@@ -5521,7 +5521,7 @@ with tab5:
                     "Download Excel report", data=_xl_data,
                     file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
+                    width='stretch',
                 )
             elif _xl_stale:
                 st.caption(
@@ -5530,7 +5530,7 @@ with tab5:
                 )
 
         with rpt_cols[1]:
-            if st.button("Generate PowerPoint", key="gen_ppt", use_container_width=True):
+            if st.button("Generate PowerPoint", key="gen_ppt", width='stretch'):
                 with st.spinner("Generating PPT..."):
                     try:
                         ppt_bytes = PPTGenerator.generate_presentation(
@@ -5549,7 +5549,7 @@ with tab5:
                     data=ppt_data.getvalue() if hasattr(ppt_data, "getvalue") else ppt_data,
                     file_name=f"qPCR_Report_{efficacy}_{timestamp}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True,
+                    width='stretch',
                 )
             elif _ppt_stale:
                 st.caption(
@@ -5575,7 +5575,7 @@ with tab5:
             scale = 3 if fmt == "png" else 1
             # Rendering each figure launches headless Chrome (~seconds each), so gate
             # it behind an explicit button instead of re-rendering on every rerun.
-            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images", use_container_width=True):
+            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images", width='stretch'):
                 rendered, failed = {}, []
                 prog = st.progress(0.0, text="Rendering images...")
                 genes = list(st.session_state.graphs.items())
@@ -5611,14 +5611,14 @@ with tab5:
                     f"⬇️ Download All Images (.zip, {len(cached['images'])})",
                     data=build_zip({f"{g}.{_cfmt}": b for g, b in cached["images"].items()}),
                     file_name=f"qPCR_images_{efficacy}_{today}.zip",
-                    mime="application/zip", use_container_width=True, key="dl_images_zip",
+                    mime="application/zip", width='stretch', key="dl_images_zip",
                 )
                 img_cols = st.columns(min(len(cached["images"]), 4))
                 for idx, (gene, img_bytes) in enumerate(cached["images"].items()):
                     with img_cols[idx % len(img_cols)]:
                         st.download_button(label=f"{gene}.{_cfmt}", data=img_bytes,
                             file_name=f"{gene}_{today}.{_cfmt}",
-                            mime=_cmime, key=f"img_{gene}", use_container_width=True)
+                            mime=_cmime, key=f"img_{gene}", width='stretch')
     else:
         st.warning("Complete analysis first.")
 
