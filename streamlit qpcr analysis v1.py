@@ -4466,10 +4466,15 @@ with tab2:
             )
             if new_samples:
                 st.session_state.sample_order = existing_order + new_samples
-            # Remove samples no longer in data
-            st.session_state.sample_order = [
+            # Remove samples no longer in data, and de-duplicate. A repeated
+            # sample makes the per-sample widget keys below collide, which
+            # Streamlit raises on — and because this was the only code that
+            # rewrites sample_order, a duplicate that got in (e.g. from the
+            # drag-reorder component echoing a stale list) left the Mapping tab
+            # raising on every render with no way back through the UI.
+            st.session_state.sample_order = list(dict.fromkeys(
                 s for s in st.session_state.sample_order if s in current_data_samples
-            ]
+            ))
 
         # Group type options
         group_types = ["Negative Control", "Positive Control", "Treatment"]
@@ -4618,7 +4623,24 @@ with tab2:
             # Guard: the component can return None (headless / first render).
             sorted_labels = sorted_labels or order_labels
 
-            new_order = [label_to_sample[lbl] for lbl in sorted_labels] + excluded_samples_list
+            # Translate labels back to samples defensively. sort_items is called
+            # without a key=, so after a condition rename it can echo the labels
+            # from before the rename; indexing label_to_sample directly then threw
+            # KeyError and took the whole Mapping tab down. A label the component
+            # invents or repeats must not drop or duplicate a sample either, so
+            # anything unrecognised is ignored and every included sample missing
+            # from the result is re-appended in its previous order.
+            new_order = []
+            for lbl in sorted_labels:
+                mapped = label_to_sample.get(lbl)
+                if mapped is not None and mapped not in new_order:
+                    new_order.append(mapped)
+            for s_ in included_order:
+                if s_ not in new_order:
+                    new_order.append(s_)
+            for s_ in excluded_samples_list:
+                if s_ not in new_order:
+                    new_order.append(s_)
             if new_order != st.session_state.sample_order:
                 st.session_state.sample_order = new_order
                 st.rerun()
@@ -5161,9 +5183,15 @@ with tab3:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Genes", len(st.session_state.processed_data))
         col2.metric("Conditions", all_results["Condition"].nunique())
-        sig_count = (all_results["p_value"] < 0.05).sum()
-        total_testable = all_results["p_value"].notna().sum()
-        col3.metric("Sig. (p<0.05)", f"{sig_count}/{total_testable}")
+        # Guarded like _pval() in the Overview tab: if no gene carries a p_value
+        # (a stats step that could not run at all), report it as unavailable
+        # rather than raising KeyError and taking the whole tab down.
+        if "p_value" in all_results.columns:
+            sig_count = (all_results["p_value"] < 0.05).sum()
+            total_testable = all_results["p_value"].notna().sum()
+            col3.metric("Sig. (p<0.05)", f"{sig_count}/{total_testable}")
+        else:
+            col3.metric("Sig. (p<0.05)", "—")
         excluded_well_count = sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells)
         col4.metric("Excluded", excluded_well_count)
 
