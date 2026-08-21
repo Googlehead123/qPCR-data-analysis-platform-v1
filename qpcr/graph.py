@@ -177,6 +177,11 @@ class GraphGenerator:
         error_upper_array = gene_data_indexed[_eu].fillna(0).values
         error_lower_array = gene_data_indexed[_el].fillna(0).values
 
+        # Every trace used to be hardcoded showlegend=False, so the "Legend"
+        # toggle switched on a legend with nothing in it. Name the traces and let
+        # the setting drive their visibility instead.
+        show_legend = bool(settings.get("show_legend", False))
+
         gene_bar_settings = st.session_state.get(f"{gene}_bar_settings", {})
 
         show_error_global = settings.get("show_error", True)
@@ -221,7 +226,8 @@ class GraphGenerator:
                     ),
                     opacity=settings.get("bar_opacity", 0.85),
                 ),
-                showlegend=False,
+                name="Relative expression",
+                showlegend=show_legend,
             )
         )
 
@@ -250,7 +256,8 @@ class GraphGenerator:
                     y=scatter_y,
                     mode="markers",
                     marker=dict(size=5, color=scatter_colors, opacity=0.65, line=dict(width=0)),
-                    showlegend=False,
+                    name="Replicates",
+                    showlegend=show_legend,
                     hoverinfo="y",
                 ))
 
