@@ -580,6 +580,32 @@ def _reset_gene_style(gene: str) -> None:
         sigs.pop(gene, None)
 
 
+def _clear_all_gene_style_state() -> None:
+    """Drop every gene's chart styling and the exports built from it.
+
+    Called when a new file is uploaded. That path rebuilds ``graph_settings``
+    from defaults, but the editor's values really live in the widget keys, which
+    survived — so a new file whose gene names overlap the previous one silently
+    inherited the old experiment's styling (and its per-condition significance
+    and error-bar toggles, which are keyed by gene+condition).
+
+    The cached export bytes go too: they were built from the previous dataset,
+    and the download buttons would otherwise keep serving them under a filename
+    stamped with the new run's timestamp.
+    """
+    # Every analysed gene gets a "<gene>_bar_settings" entry, so that is the
+    # reliable record of which genes have styling state — including genes from a
+    # file loaded even earlier.
+    suffix = "_bar_settings"
+    genes = {k[: -len(suffix)] for k in list(st.session_state.keys())
+             if isinstance(k, str) and k.endswith(suffix)}
+    genes |= set(st.session_state.get("processed_data") or {})
+    for gene in genes:
+        _reset_gene_style(gene)
+    for key in ("_graph_signatures", "_gene_images", "_excel_export", "_ppt_export"):
+        st.session_state.pop(key, None)
+
+
 def resolve_gene_settings(gene: str) -> dict:
     """Fold a gene's per-gene overrides onto the global graph_settings.
 
@@ -3525,6 +3551,10 @@ with tab1:
                     "y_max": None,
                     "plot_bgcolor": "#FFFFFF",
                 }
+                # graph_settings above is only half the state: the per-gene editor
+                # keeps its values in widget keys, which would repopulate it on the
+                # next render and carry the previous file's styling over.
+                _clear_all_gene_style_state()
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
 
@@ -5429,6 +5459,43 @@ with tab5:
                 "field will be blank. Fill it in before sending the report out."
             )
 
+        # ---- Staleness guard for generated files ----
+        # Generating a report parks the bytes in session_state and the download
+        # button serves them until the next generate. Nothing invalidated them, so
+        # editing a chart (or re-running the analysis) and then pressing Download
+        # handed over a file built from the previous state — under a filename
+        # stamped with the current timestamp. Fingerprint what a report depends on
+        # and refuse to serve a file that no longer matches.
+        # "Date" is excluded: it is datetime.now() to the minute, so including it
+        # would expire every report after 60 seconds for no reason.
+        _export_fp = _digest({
+            "params": {k: v for k, v in analysis_params.items() if k != "Date"},
+            "settings": st.session_state.get("graph_settings"),
+            "display_names": st.session_state.get("gene_display_names"),
+            "genes": {
+                g: _df_fingerprint(df)
+                for g, df in st.session_state.processed_data.items()
+            },
+            "bar_settings": {
+                g: st.session_state.get(f"{g}_bar_settings")
+                for g in st.session_state.processed_data
+            },
+        })
+
+        def _put_export(slot: str, data) -> None:
+            st.session_state[slot] = {"fp": _export_fp, "data": data}
+
+        def _get_export(slot: str):
+            """Return ``(data, is_stale)`` for a previously generated export."""
+            entry = st.session_state.get(slot)
+            if not isinstance(entry, dict) or "data" not in entry:
+                return None, False
+            # _digest returns None when the state cannot be hashed; treat an
+            # unknown fingerprint as stale rather than vouching for the file.
+            if _export_fp is None or entry.get("fp") != _export_fp:
+                return None, True
+            return entry["data"], False
+
         # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")
 
@@ -5440,20 +5507,26 @@ with tab5:
                 with st.spinner("Building Excel report..."):
                     try:
                         _qc, _rep, _excl = _build_export_extras()
-                        st.session_state["_excel_export"] = export_to_excel(
+                        _put_export("_excel_export", export_to_excel(
                             st.session_state.data, st.session_state.processed_data,
                             analysis_params, st.session_state.sample_mapping,
                             qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
                             gene_display_names=st.session_state.get("gene_display_names", {}),
-                        )
+                        ))
                     except Exception as e:
                         st.error(f"Excel generation failed: {e}")
-            if "_excel_export" in st.session_state:
+            _xl_data, _xl_stale = _get_export("_excel_export")
+            if _xl_data is not None:
                 st.download_button(
-                    "Download Excel report", data=st.session_state["_excel_export"],
+                    "Download Excel report", data=_xl_data,
                     file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
+                )
+            elif _xl_stale:
+                st.caption(
+                    "Results or chart settings changed since the last Excel report — "
+                    "generate it again to download the current version."
                 )
 
         with rpt_cols[1]:
@@ -5466,17 +5539,22 @@ with tab5:
                             gene_display_names=st.session_state.get("gene_display_names", {}),
                         )
                         if ppt_bytes:
-                            st.session_state["_ppt_export"] = ppt_bytes
+                            _put_export("_ppt_export", ppt_bytes)
                     except Exception as e:
                         st.error(f"PPT generation failed: {e}")
-            if "_ppt_export" in st.session_state:
-                ppt_data = st.session_state["_ppt_export"]
+            ppt_data, _ppt_stale = _get_export("_ppt_export")
+            if ppt_data is not None:
                 st.download_button(
                     "Download PowerPoint",
                     data=ppt_data.getvalue() if hasattr(ppt_data, "getvalue") else ppt_data,
                     file_name=f"qPCR_Report_{efficacy}_{timestamp}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     use_container_width=True,
+                )
+            elif _ppt_stale:
+                st.caption(
+                    "Results or chart settings changed since the last PowerPoint — "
+                    "generate it again to download the current version."
                 )
 
         # ---- Gene Images ----
@@ -5515,11 +5593,16 @@ with tab5:
                         failed.append(f"{gene}: {e}")
                     prog.progress((idx + 1) / len(genes), text=f"Rendered {idx + 1}/{len(genes)}")
                 prog.empty()
-                st.session_state["_gene_images"] = {"fmt": fmt, "images": rendered}
+                _put_export("_gene_images", {"fmt": fmt, "images": rendered})
                 if failed:
                     st.warning("Some images failed:\n" + "\n".join(failed))
 
-            cached = st.session_state.get("_gene_images")
+            cached, _img_stale = _get_export("_gene_images")
+            if _img_stale:
+                st.caption(
+                    "Results or chart settings changed since these images were "
+                    "rendered — generate them again to download the current version."
+                )
             if cached and cached.get("images"):
                 _cfmt = cached["fmt"]
                 _cmime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[_cfmt]
