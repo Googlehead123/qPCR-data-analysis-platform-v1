@@ -134,6 +134,15 @@ class AnalysisEngine:
                     if condition == ref_sample:
                         ref_delta_ct = delta_ct
                     else:
+                        # Without reference wells there is nothing to normalise
+                        # against, so this row is dropped. That was silent, and
+                        # when it hits every condition of a gene the gene simply
+                        # vanishes from the results with no explanation.
+                        _skipped_warnings.append(
+                            f"Gene '{target}', condition '{condition}': no usable "
+                            f"reference ('{ref_sample}') wells for this gene "
+                            f"(target refs={len(ref_target)}, HK refs={len(ref_hk)})"
+                        )
                         continue
 
                 ddct = delta_ct - ref_delta_ct

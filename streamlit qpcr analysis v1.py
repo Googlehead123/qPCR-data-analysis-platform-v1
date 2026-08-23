@@ -175,7 +175,17 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
         "generated": timestamp,
         "software": app_version,
         "method": "Livak 2^-ddCt, single reference gene",
-        "fdr_correction": "Benjamini-Hochberg",
+        # This said "Benjamini-Hochberg" flatly, which was a false claim in the
+        # record that goes out with the report: BH q-values ARE computed
+        # (p_value_fdr / significance_fdr, and the implementation is correct),
+        # but no consumer reads them. Every asterisk on every chart, slide,
+        # summary sheet and results table is an UNCORRECTED p-value. Say that,
+        # until a switch exists to choose which one is reported.
+        "fdr_correction": (
+            "Benjamini-Hochberg q-values computed and reported per gene in the "
+            "Excel export; the significance markers shown on charts and slides "
+            "are uncorrected p-values"
+        ),
         "efficacy_type": efficacy or None,
         "reference_gene": hk_gene or None,
         "reference_condition": ref_condition or None,
@@ -430,13 +440,28 @@ def _analysis_state_snapshot() -> dict:
     which graphs/exports read live from sample_order without a re-run."""
     m = st.session_state.get("sample_mapping", {})
     return {
+        # The housekeeping gene and the reference/comparison conditions are read
+        # from live widgets on every rerun but were absent here, so changing any
+        # of them left processed_data untouched: the bars kept the old
+        # normalisation while _shared_figure_context DOES fingerprint hk_gene, so
+        # the replicate overlay moved to the new one — one chart, two reference
+        # genes — and _current_provenance reported the new gene for old numbers.
+        "hk_gene": st.session_state.get("hk_gene"),
+        "ref_key": st.session_state.get("_last_ref_sample_key"),
+        "cmp_keys": [
+            st.session_state.get("_last_cmp_sample_key"),
+            st.session_state.get("_last_cmp_sample_key_2"),
+            st.session_state.get("_last_cmp_sample_key_3"),
+        ],
         "excluded_wells": {
             str(k): sorted(v) for k, v in st.session_state.get("excluded_wells", {}).items()
         },
         "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
         "ttest_type": st.session_state.get("ttest_type", "welch"),
         "mapping": {
-            s: (v.get("condition", s), bool(v.get("include", True)))
+            # Group is included because it reaches the results as `Group` and is
+            # shown in the results table and the Excel Summary grouping.
+            s: (v.get("condition", s), bool(v.get("include", True)), v.get("group"))
             for s, v in sorted(m.items())
         },
     }
@@ -455,13 +480,24 @@ def maybe_autorun_analysis() -> None:
     if _analysis_state_snapshot() != st.session_state["_exclusion_snapshot"]:
         ok = AnalysisEngine.run_full_analysis(
             st.session_state["_last_ref_sample_key"],
-            st.session_state["_last_cmp_sample_key"],
+            # .get, not []: the guard above only proves _last_ref_sample_key
+            # exists, so indexing this one crashed the tab if the two diverged.
+            st.session_state.get("_last_cmp_sample_key"),
             st.session_state.get("_last_cmp_sample_key_2"),
             st.session_state.get("_last_cmp_sample_key_3"),
         )
+        # analysis_stale was previously set False in three places and True in
+        # none, so it could never warn about anything. It now means what its name
+        # says: the inputs moved and the re-run did not succeed, so what is on
+        # screen no longer matches the settings.
+        st.session_state.analysis_stale = not ok
         if ok:
-            st.session_state.analysis_stale = False
             st.info("Analysis auto-updated to reflect changes in QC, mapping, or settings.")
+        else:
+            st.warning(
+                "Settings changed but the analysis could not be re-run, so the "
+                "results below are out of date. Re-run it from the Mapping tab."
+            )
 
 
 def _ensure_bar_settings(gene, gene_data) -> None:
@@ -1797,17 +1833,41 @@ class AnalysisEngine(_CoreAnalysisEngine):
                 )
 
                 if processed_df is None or processed_df.empty:
+                    # Report the engine's own reasons rather than guessing. The
+                    # fixed "check mapping and housekeeping gene" text was the
+                    # wrong diagnosis whenever the real cause was a reference
+                    # condition with no wells left.
+                    _why = (processed_df.attrs.get("_skipped_warnings", [])
+                            if processed_df is not None else [])
                     st.warning(
-                        "⚠️ No ΔΔCt results produced. Check mapping and housekeeping gene."
+                        "⚠️ No ΔΔCt results produced."
+                        + ("\n\nReasons reported by the calculation:\n"
+                           + "\n".join(f"  • {w}" for w in _why[:10])
+                           if _why else
+                           " Check the mapping, the housekeeping gene, and that the "
+                           "reference condition has wells that survived QC.")
                     )
                     return False
 
                 # FIX-06: Display warnings for skipped genes/conditions
                 _skipped = processed_df.attrs.get("_skipped_warnings", [])
                 if _skipped:
+                    # A gene can lose EVERY condition here and so disappear from
+                    # the results entirely; name those separately, because a
+                    # missing gene is far easier to overlook than a missing bar.
+                    _lost = sorted({
+                        g for g in (st.session_state.get("data", processed_df)["Target"].unique()
+                                    if "Target" in processed_df.columns else [])
+                        if g != hk_gene and g not in set(processed_df["Target"].unique())
+                    }) if "Target" in processed_df.columns else []
                     st.warning(
-                        f"⚠️ {len(_skipped)} condition(s) skipped due to all wells being excluded:\n"
+                        f"⚠️ {len(_skipped)} condition(s) skipped (no usable wells "
+                        f"after QC exclusions):\n"
                         + "\n".join(f"  • {w}" for w in _skipped)
+                        + (f"\n\n**Dropped entirely from the results: "
+                           f"{', '.join(_lost)}** — these genes have no bars, no "
+                           f"p-values and no rows in the export."
+                           if _lost else "")
                     )
 
                 # --- Statistical test ---
@@ -1846,6 +1906,25 @@ class AnalysisEngine(_CoreAnalysisEngine):
                         f"(one group has n=1 replicate): "
                         + ", ".join(_onesamp[:5])
                         + (f" ... and {len(_onesamp) - 5} more" if len(_onesamp) > 5 else "")
+                    )
+
+                # calculate_statistics also records the comparisons it could not
+                # run at all, and nothing read it. When the comparison condition
+                # has no data (renamed in Mapping, or every well QC-excluded)
+                # EVERY p-value comes back NaN and the chart simply has no
+                # asterisks — which reads as "nothing is significant" rather than
+                # "no test ran". This must be an error, not an info.
+                _stats_skipped = processed_with_stats.attrs.get(
+                    "_stats_skipped_warnings", []
+                )
+                if _stats_skipped:
+                    st.error(
+                        f"⚠️ No statistical test could be run for "
+                        f"{len(_stats_skipped)} gene/comparison(s) — their p-values "
+                        f"are blank, NOT non-significant:\n"
+                        + "\n".join(f"  • {w}" for w in _stats_skipped[:10])
+                        + (f"\n  ... and {len(_stats_skipped) - 10} more"
+                           if len(_stats_skipped) > 10 else "")
                     )
 
                 # --- Organize data for graphs ---

@@ -23,7 +23,10 @@ def build_miqe_checklist(prov: dict) -> str:
         f"- **Calibrator / reference condition:** {prov.get('reference_condition') or '—'}",
         f"- **Comparison condition(s):** {cmps}",
         f"- **Statistical test:** {prov.get('statistical_test', '—')}",
-        f"- **Multiple-testing correction:** {prov.get('fdr_correction', 'Benjamini-Hochberg')}",
+        # No "Benjamini-Hochberg" default: the reported markers are uncorrected
+        # p-values, so asserting a correction the caller did not state would put
+        # a false claim into the MIQE checklist.
+        f"- **Multiple-testing correction:** {prov.get('fdr_correction') or 'not applied to the reported markers'}",
         f"- **Genes analysed:** {prov.get('n_genes', '—')}; "
         f"**biological/technical samples:** {prov.get('n_samples', '—')}",
         f"- **Excluded wells (QC):** {prov.get('excluded_wells_count', 0)} "
