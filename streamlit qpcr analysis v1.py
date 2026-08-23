@@ -43,7 +43,11 @@ except ImportError:
 def natural_sort_key(sample_name):
     """Extract numbers from sample name for natural sorting (e.g., Sample2 < Sample10)"""
     parts = re.split(r"(\d+)", str(sample_name))
-    return [int(part) if part.isdigit() else part.lower() for part in parts]
+    # `part.isascii()` guards int(): "²".isdigit() is True but int("²")
+    # raises, so a sample named e.g. "20 mJ/cm²" used to abort the whole
+    # script run from the upload sort, with no way to load the file.
+    return [int(part) if part.isascii() and part.isdigit() else part.lower()
+            for part in parts]
 
 
 WORKFLOW_STEPS = [
@@ -3722,6 +3726,30 @@ with tab1:
                     st.success(f"{file.name}: {len(parsed)} wells parsed")
                 elif parsed is not None and parsed.empty:
                     st.warning(f"{file.name}: parsed successfully but contained no valid data rows.")
+                else:
+                    # parse() returned None. It reports the reason itself, but
+                    # this branch did not exist, so the file's failure was
+                    # invisible in the upload list.
+                    st.error(f"{file.name}: could NOT be loaded — see the error above.")
+
+            if not all_data:
+                # Nothing usable arrived. This used to fall through leaving the
+                # PREVIOUS file's data in session_state while the uploader showed
+                # the new filename, so every metric, the preview, QC and the
+                # analysis kept describing the old experiment. Clearing also lets
+                # the hash record advance so the failed file is not re-parsed on
+                # every rerun.
+                if st.session_state.get("data") is not None:
+                    st.error(
+                        "None of the selected files could be loaded. The previously "
+                        "loaded data has been cleared so nothing below describes the "
+                        "wrong experiment."
+                    )
+                st.session_state.data = None
+                st.session_state.processed_data = {}
+                st.session_state.graphs = {}
+                _clear_all_gene_style_state()
+                st.session_state._uploaded_file_hashes = current_file_hashes
 
             if all_data:
                 st.session_state.data = pd.concat(all_data, ignore_index=True)

@@ -10,7 +10,11 @@ from typing import Optional
 def natural_sort_key(sample_name):
     """Extract numbers from sample name for natural sorting (e.g., Sample2 < Sample10)"""
     parts = re.split(r"(\d+)", str(sample_name))
-    return [int(part) if part.isdigit() else part.lower() for part in parts]
+    # `part.isascii()` guards int(): "²".isdigit() is True but int("²")
+    # raises, so a sample named e.g. "20 mJ/cm²" used to abort the whole
+    # script run from the upload sort, with no way to load the file.
+    return [int(part) if part.isascii() and part.isdigit() else part.lower()
+            for part in parts]
 
 
 def get_well_exclusion_key(gene: str, sample: str) -> tuple:
