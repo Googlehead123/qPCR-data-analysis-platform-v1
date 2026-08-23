@@ -322,9 +322,20 @@ def _qc_threshold_key() -> tuple:
 
 
 def _excluded_key(excluded_wells) -> tuple:
-    """Normalise an exclusion set to a deterministic, hashable cache key."""
+    """Normalise an exclusion set OR per-(gene,sample) dict to a cache key.
+
+    A dict has to be walked explicitly: iterating one yields only its keys, so
+    ``{('G','S'): {'A1'}}`` and ``{('G','S'): {'A2'}}`` hashed identically and a
+    cached QC view would not notice which well was excluded. No caller passes a
+    dict today, but ``QualityControl.create_plate_heatmap`` accepts that form.
+    """
     if not excluded_wells:
         return ()
+    if isinstance(excluded_wells, dict):
+        return tuple(sorted(
+            (str(k), tuple(sorted(str(w) for w in (v or ()))))
+            for k, v in excluded_wells.items()
+        ))
     return tuple(sorted(str(w) for w in excluded_wells))
 
 
@@ -428,9 +439,29 @@ def apply_auto_qc(threshold: float = None) -> None:
         threshold = st.session_state.get("qc_sd_threshold", 0.3)
     threshold = float(threshold)
     exclusions, audit = QualityControl.auto_select_replicates(data, sd_threshold=threshold)
-    st.session_state.excluded_wells = {k: set(v) for k, v in exclusions.items()}
+
+    # Preserve exclusions the user made by hand. This used to assign the
+    # auto-QC result wholesale, so nudging the SD threshold to check sensitivity
+    # silently deleted every manual per-well exclusion in groups auto-QC never
+    # touched — and the SD banner could not flag them, because those groups'
+    # SD is fine. Ownership is tracked so a well auto-QC dropped last time is
+    # not mistaken for a manual one now.
+    prev_auto = st.session_state.get("_auto_qc_owned", {}) or {}
+    merged: dict = {}
+    for key, wells in (st.session_state.get("excluded_wells", {}) or {}).items():
+        manual = set(wells) - set(prev_auto.get(key, ()))
+        if manual:
+            merged[key] = manual
+    for key, wells in exclusions.items():
+        merged.setdefault(key, set()).update(wells)
+
+    st.session_state.excluded_wells = merged
+    st.session_state._auto_qc_owned = {k: set(v) for k, v in exclusions.items()}
     st.session_state.auto_qc_audit = audit
     st.session_state.qc_sd_threshold = threshold
+    # The per-well checkboxes are keyed, so they would render the pre-change
+    # state and write it back on the next "Apply Changes".
+    _clear_well_checkbox_state()
 
 
 def _analysis_state_snapshot() -> dict:
@@ -659,6 +690,112 @@ def _clear_all_gene_style_state() -> None:
     for gene in genes:
         _reset_gene_style(gene)
     for key in ("_graph_signatures", "_gene_images", "_excel_export", "_ppt_export"):
+        st.session_state.pop(key, None)
+    _clear_non_gene_widget_state()
+
+
+# Keyed widgets OUTSIDE the per-gene editor whose stored value outlives the
+# session_state entry it is supposed to seed. Clearing the entry alone is a
+# no-op — the widget re-supplies its old value on the next render — so a new
+# upload inherited the previous experiment's choices.
+_RESET_WIDGET_PREFIXES = (
+    "cond_",      # condition name per sample: the previous file's labels
+    "include_",   # per-sample include flag: the previous file's exclusions
+    "cb_",        # per-well QC include/exclude: the previous file's decisions
+)
+_RESET_WIDGET_KEYS = frozenset({
+    # Analysis configuration — a stale comparison condition silently keeps the
+    # 2nd/3rd p-value comparison switched on against a condition from the old
+    # file (st.checkbox ignores value= once it has state).
+    "use_second_pval", "use_third_pval", "ref_choice_ddct",
+    "cmp_choice_pval", "cmp_choice_pval_2", "cmp_choice_pval_3",
+    # Printed onto the PowerPoint. Carrying the previous run's concentration
+    # over is exactly the confident-wrong-number this field was made blank to
+    # avoid.
+    "exp_concentration",
+    # These three write straight into graph_settings, so re-initialising
+    # graph_settings without them left the old values in force.
+    "show_legend_global", "eb_mode_global", "show_n_global",
+    # Overview auto-selects these from the efficacy category; without clearing,
+    # they never auto-select again and % of benchmark is computed against the
+    # wrong control.
+    "overview_benchmark", "overview_highlight",
+    # Display-only, but pointing at genes/samples that no longer exist.
+    "heatmap_gene_select", "heatmap_sample_select",
+    "qc_gene_filter", "qc_sample_filter", "qc_grid_selected_cell",
+    # Auto-QC review state for the previous file's triplicates.
+    "qc_sd_threshold_input", "auto_qc_audit_editor",
+})
+
+
+def _clear_non_gene_widget_state() -> None:
+    """Drop keyed widget state that a new upload must not inherit."""
+    for key in list(st.session_state.keys()):
+        k = str(key)
+        if k in _RESET_WIDGET_KEYS or k.startswith(_RESET_WIDGET_PREFIXES):
+            st.session_state.pop(key, None)
+
+
+def _push_qc_history() -> None:
+    """Snapshot the whole QC decision state before changing it.
+
+    History used to hold ``excluded_wells`` alone, while ``apply_auto_qc`` also
+    rewrites ``qc_sd_threshold``, ``auto_qc_audit`` and ``_auto_qc_owned``. After
+    0.30 -> 0.50 -> Undo, the banner, the threshold box and the decisions table
+    all still described 0.50 while the exclusions were the 0.30 set — and because
+    ``qc_sd_threshold`` matched the widget, the threshold-change branch never
+    re-fired, so it never self-corrected.
+    """
+    st.session_state.setdefault("excluded_wells_history", []).append({
+        "excluded_wells": {
+            k: set(v) for k, v in (st.session_state.get("excluded_wells") or {}).items()
+        },
+        "auto_qc_owned": {
+            k: set(v) for k, v in (st.session_state.get("_auto_qc_owned") or {}).items()
+        },
+        "auto_qc_audit": list(st.session_state.get("auto_qc_audit") or []),
+        "qc_sd_threshold": st.session_state.get("qc_sd_threshold", 0.3),
+    })
+
+
+def _pop_qc_history() -> bool:
+    """Restore the previous QC decision state. Returns False if there is none."""
+    hist = st.session_state.get("excluded_wells_history") or []
+    if not hist:
+        return False
+    snap = hist.pop()
+    # Tolerate the old exclusions-only entries so a session that was already
+    # running keeps working across this change.
+    if not isinstance(snap, dict) or "excluded_wells" not in snap:
+        st.session_state.excluded_wells = {
+            k: set(v) for k, v in (snap or {}).items()
+        }
+    else:
+        st.session_state.excluded_wells = {
+            k: set(v) for k, v in snap["excluded_wells"].items()
+        }
+        st.session_state._auto_qc_owned = {
+            k: set(v) for k, v in snap.get("auto_qc_owned", {}).items()
+        }
+        st.session_state.auto_qc_audit = snap.get("auto_qc_audit", [])
+        st.session_state.qc_sd_threshold = snap.get("qc_sd_threshold", 0.3)
+        # The threshold box is keyed, so it has to be dropped to re-read the
+        # restored value instead of showing the one that was just undone.
+        st.session_state.pop("qc_sd_threshold_input", None)
+    _clear_well_checkbox_state()
+    return True
+
+
+def _clear_well_checkbox_state() -> None:
+    """Drop the per-well QC checkboxes so they re-read ``excluded_wells``.
+
+    The checkboxes are keyed (``cb_{gene}_{well}_{sample}_{idx}``), so their
+    stored value wins over the computed ``value=`` — every writer that changes
+    ``excluded_wells`` from outside the form must call this or the grid renders
+    the pre-change state, and the next "Apply Changes" writes that stale view
+    back, silently undoing the change.
+    """
+    for key in [k for k in list(st.session_state.keys()) if str(k).startswith("cb_")]:
         st.session_state.pop(key, None)
 
 
@@ -3596,6 +3733,10 @@ with tab1:
                 st.session_state.sample_mapping = {}
                 st.session_state.excluded_wells = {}
                 st.session_state.excluded_wells_history = []
+                # Which exclusions auto-QC owns, so manual ones survive a
+                # threshold change. Must be dropped with the exclusions or the
+                # new file's first auto-QC treats the old file's wells as manual.
+                st.session_state._auto_qc_owned = {}
                 st.session_state.excluded_samples = set()
                 st.session_state.hk_gene = None
                 st.session_state.selected_efficacy = None
@@ -3800,6 +3941,27 @@ with tab_qc:
         # ==================== QC SUMMARY DASHBOARD ====================
         st.caption("Browse all CT values, review triplicates, and exclude outliers before analysis.")
 
+        # The QC thresholds live as mutable class attributes that the QC Settings
+        # widgets reassign — but those widgets are ~80 lines BELOW this call, so on
+        # the rerun that follows a threshold edit this read still saw the old
+        # value and every summary metric was one rerun stale (which is what the
+        # "Re-run QC with New Settings" button was really working around). The
+        # widgets are keyed, so their stored state is the authoritative value and
+        # can be applied before anything reads it.
+        _qc_widget_thresholds = (
+            ("CT_HIGH_THRESHOLD", "qc_settings_ct_high", 1.0),
+            ("CT_LOW_THRESHOLD", "qc_settings_ct_low", 1.0),
+            ("CV_THRESHOLD", "qc_settings_cv", 100.0),   # widget is in percent
+            ("HK_VARIATION_THRESHOLD", "qc_settings_hk_var", 1.0),
+        )
+        for _attr, _wkey, _scale in _qc_widget_thresholds:
+            if _wkey in st.session_state:
+                try:
+                    setattr(QualityControl, _attr,
+                            float(st.session_state[_wkey]) / _scale)
+                except (TypeError, ValueError):
+                    pass
+
         # Get comprehensive QC stats using helper to get all excluded wells
         qc_stats = get_qc_summary_stats(data, get_all_excluded_wells())
 
@@ -3934,9 +4096,7 @@ with tab_qc:
                          "best 2 replicates (closest CT values).",
                 )
             if abs(new_thresh - _cur_thresh) > 1e-9:
-                st.session_state.excluded_wells_history.append(
-                    {k: set(v) for k, v in st.session_state.excluded_wells.items()}
-                )
+                _push_qc_history()
                 apply_auto_qc(new_thresh)
                 st.rerun()
 
@@ -3996,9 +4156,7 @@ with tab_qc:
                         hide_index=True, width='stretch', key="auto_qc_audit_editor",
                     )
                     if st.button("Apply overrides", key="apply_auto_qc_overrides", type="primary"):
-                        st.session_state.excluded_wells_history.append(
-                            {k: set(v) for k, v in st.session_state.excluded_wells.items()}
-                        )
+                        _push_qc_history()
                         for i, a in enumerate(audit):
                             dropped = a["dropped_wells"]
                             if not dropped:
@@ -4014,6 +4172,15 @@ with tab_qc:
                                         cur.discard(w)
                                     if not cur:
                                         del st.session_state.excluded_wells[key]
+                        # Overriding an auto-QC decision makes those wells the
+                        # user's, so auto-QC must not reclaim (or re-delete)
+                        # them on the next threshold change.
+                        _owned = st.session_state.get("_auto_qc_owned", {}) or {}
+                        for i, a in enumerate(audit):
+                            if a["dropped_wells"]:
+                                _owned.pop((a["Target"], a["Sample"]), None)
+                        st.session_state._auto_qc_owned = _owned
+                        _clear_well_checkbox_state()
                         st.rerun()
 
             st.markdown("---")
@@ -4103,25 +4270,22 @@ with tab_qc:
                 action_cols = st.columns(3)
                 with action_cols[0]:
                     if st.button("Include All Visible", key="qc_incl_all_visible", width='stretch'):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
+                        _push_qc_history()
                         for _, r in wells_all.iterrows():
                             include_well(r["Well"], r["Target"], r["Sample"])
+                        _clear_well_checkbox_state()
                         st.rerun()
                 with action_cols[1]:
                     if st.button("Exclude All Visible", key="qc_excl_all_visible", width='stretch'):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
+                        _push_qc_history()
                         for _, r in wells_all.iterrows():
                             exclude_well(r["Well"], r["Target"], r["Sample"])
+                        _clear_well_checkbox_state()
                         st.rerun()
                 with action_cols[2]:
                     can_undo = len(st.session_state.excluded_wells_history) > 0
                     if st.button("Undo Last Change", key="qc_undo_browser", width='stretch', disabled=not can_undo):
-                        if st.session_state.excluded_wells_history:
-                            st.session_state.excluded_wells = st.session_state.excluded_wells_history.pop()
+                        if _pop_qc_history():
                             st.rerun()
 
                 # Render per-gene expandable sections
@@ -4230,16 +4394,12 @@ with tab_qc:
                                 sample = row["Sample"]
                                 if not include and not is_well_excluded(well, gene, sample):
                                     if not changed:
-                                        st.session_state.excluded_wells_history.append(
-                                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                                        )
+                                        _push_qc_history()
                                         changed = True
                                     exclude_well(well, gene, sample)
                                 elif include and is_well_excluded(well, gene, sample):
                                     if not changed:
-                                        st.session_state.excluded_wells_history.append(
-                                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                                        )
+                                        _push_qc_history()
                                         changed = True
                                     include_well(well, gene, sample)
                             if changed:
@@ -4261,7 +4421,15 @@ with tab_qc:
 
             with heatmap_col2:
                 st.markdown("**Replicate Statistics**")
-                rep_stats = get_replicate_stats(data)
+                # Exclusions have to be applied here: get_replicate_stats takes
+                # no exclusion argument, and the Excel export pre-filters before
+                # calling it. The same "Replicate Statistics" table was therefore
+                # showing n=3 / High CV on screen while the workbook said n=2 /
+                # OK for the very same triplicate.
+                _rs_excl = get_all_excluded_wells()
+                rep_stats = get_replicate_stats(
+                    data[~data["Well"].isin(_rs_excl)] if _rs_excl else data
+                )
                 if not rep_stats.empty:
                     def highlight_status(row):
                         if row["Status"] == "High CV":
@@ -4460,10 +4628,7 @@ with tab_qc:
                 disabled=not can_undo,
                 key="global_undo",
             ):
-                if st.session_state.excluded_wells_history:
-                    st.session_state.excluded_wells = (
-                        st.session_state.excluded_wells_history.pop()
-                    )
+                if _pop_qc_history():
                     st.rerun()
 
         with status_cols[2]:
