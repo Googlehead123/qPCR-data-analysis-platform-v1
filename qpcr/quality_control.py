@@ -355,14 +355,13 @@ class QualityControl:
 
         df = data.copy()
 
-        # Normalize excluded_wells and filter
-        if isinstance(excluded_wells, dict):
-            excl_flat = set()
-            for well_set in excluded_wells.values():
-                excl_flat.update(well_set)
-            df = df[~df["Well"].isin(excl_flat)]
-        elif excluded_wells:
-            df = df[~df["Well"].isin(excluded_wells)]
+        # Scope the exclusion to its own (gene, sample) — see excluded_mask.
+        # Flattening removed the coordinate from every group sharing it, which
+        # hid genuine high-SD groups from this suggestion list.
+        if excluded_wells:
+            _mask = QualityControl.excluded_mask(df, excluded_wells)
+            if _mask.any():
+                df = df[~_mask]
 
         if gene_filter:
             df = df[df["Target"] == gene_filter]
@@ -433,16 +432,16 @@ class QualityControl:
         if data is None or getattr(data, "empty", True):
             return exclusions, audit
 
-        pre_excluded = set()
-        if isinstance(excluded_wells, dict):
-            for s in excluded_wells.values():
-                pre_excluded.update(s)
-        elif excluded_wells:
-            pre_excluded.update(excluded_wells)
-
         df = data[["Well", "Sample", "Target", "CT"]].copy()
-        if pre_excluded:
-            df = df[~df["Well"].isin(pre_excluded)]
+        # Scope the pre-exclusion to its own (gene, sample) via excluded_mask.
+        # Flattening to bare well IDs dropped that plate coordinate from EVERY
+        # group sharing it, so auto-QC evaluated an unrelated gene's triplicate
+        # on the wrong wells: a group carrying a 10-Ct outlier was reported at
+        # SD 0.00 and left untrimmed, while DDCt kept using the outlier.
+        if excluded_wells:
+            _pre_mask = QualityControl.excluded_mask(df, excluded_wells)
+            if _pre_mask.any():
+                df = df[~_pre_mask]
         # Only real numeric CTs participate in pair selection.
         df = df[pd.to_numeric(df["CT"], errors="coerce").notna()]
 
@@ -672,13 +671,27 @@ class QualityControl:
         if data is None or data.empty:
             return go.Figure()
 
+        # Coordinate-aware exclusion. Flattening a per-(gene, sample) dict to
+        # bare well IDs marks that plate position excluded for every gene and
+        # sample sharing it, so the heatmap crossed out wells DDCt still used.
+        # Multi-file uploads are concatenated (the app tells operators to upload
+        # plates together when the reference gene is in another file), so one
+        # well ID legitimately recurs across plates. Keep the coordinate.
+        excluded_scoped: set = set()
+        excluded_flat: set = set()
         if isinstance(excluded_wells, dict):
-            _flat: set = set()
-            for _ws in excluded_wells.values():
-                _flat.update(_ws)
-            excluded_wells = _flat
+            for _k, _ws in excluded_wells.items():
+                if isinstance(_k, tuple) and len(_k) == 2:
+                    _gene, _sample = _k
+                    excluded_scoped.update(
+                        (str(_gene), str(_sample), str(_w)) for _w in (_ws or ())
+                    )
+                else:
+                    # Unrecognised key shape: fall back to a bare well match
+                    # rather than silently dropping the exclusion.
+                    excluded_flat.update(str(_w) for _w in (_ws or ()))
         else:
-            excluded_wells = excluded_wells or set()
+            excluded_flat = {str(_w) for _w in (excluded_wells or ())}
 
         rows = list("ABCDEFGH")
         cols = list(range(1, 13))
@@ -686,6 +699,11 @@ class QualityControl:
         plate_values = np.full((8, 12), np.nan)
         plate_text = [["" for _ in range(12)] for _ in range(8)]
         plate_colors = [[0 for _ in range(12)] for _ in range(8)]
+        # Grid positions to cross out. Collected here, where the row's (Target,
+        # Sample) is known, so the red X agrees with the "[X]" hover marker and
+        # inherits the same scoping. The annotation loop below has no row
+        # context of its own, which is why it used to need a flat well set.
+        excluded_positions: set = set()
 
         for _, row in data.iterrows():
             well = row["Well"]
@@ -705,13 +723,27 @@ class QualityControl:
 
                     sample_short = str(row["Sample"])[:10]
                     target_short = str(row["Target"])[:8]
-                    excluded_marker = " [X]" if well in excluded_wells else ""
+                    # Match padded and unpadded forms alike ("A1" / "A01"):
+                    # the old annotation loop accepted both and the exclusion
+                    # source is not guaranteed to use the same form as the file.
+                    _aliases = {
+                        str(well),
+                        f"{well_row}{well_col}",
+                        f"{well_row}{well_col:02d}",
+                    }
+                    _tgt, _smp = str(row["Target"]), str(row["Sample"])
+                    is_excluded = bool(
+                        _aliases & excluded_flat
+                        or any((_tgt, _smp, a) in excluded_scoped for a in _aliases)
+                    )
+                    excluded_marker = " [X]" if is_excluded else ""
                     plate_text[r_idx][c_idx] = (
                         f"{well}{excluded_marker}<br>{sample_short}<br>{target_short}<br>CT: {ct_val:.1f}"
                     )
 
-                    if well in excluded_wells:
+                    if is_excluded:
                         plate_colors[r_idx][c_idx] = -1
+                        excluded_positions.add((r_idx, c_idx))
 
         fig = go.Figure(
             data=go.Heatmap(
@@ -727,19 +759,15 @@ class QualityControl:
             )
         )
 
-        for r_idx, row_letter in enumerate(rows):
-            for c_idx, col_num in enumerate(cols):
-                well_name = f"{row_letter}{col_num}"
-                well_name_padded = f"{row_letter}{col_num:02d}"
-                if well_name in excluded_wells or well_name_padded in excluded_wells:
-                    fig.add_annotation(
-                        x=str(col_num),
-                        y=row_letter,
-                        text="X",
-                        showarrow=False,
-                        font=dict(size=20, color="red"),
-                        opacity=0.8,
-                    )
+        for r_idx, c_idx in sorted(excluded_positions):
+            fig.add_annotation(
+                x=str(cols[c_idx]),
+                y=rows[r_idx],
+                text="X",
+                showarrow=False,
+                font=dict(size=20, color="red"),
+                opacity=0.8,
+            )
 
         fig.update_layout(
             title="96-Well Plate Overview",

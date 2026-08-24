@@ -347,22 +347,48 @@ def _excluded_key(excluded_wells) -> tuple:
 
     A dict has to be walked explicitly: iterating one yields only its keys, so
     ``{('G','S'): {'A1'}}`` and ``{('G','S'): {'A2'}}`` hashed identically and a
-    cached QC view would not notice which well was excluded. No caller passes a
-    dict today, but ``QualityControl.create_plate_heatmap`` accepts that form.
+    cached QC view would not notice which well was excluded.
+
+    The key is tagged and REVERSIBLE, and ``_unkey_excluded`` must be used to
+    read it back. Encoding a dict and then rebuilding it with ``set(key)``
+    silently degrades a per-(gene, sample) exclusion into a set of key/value
+    tuples that match no well at all, so the QC view counted zero exclusions
+    while DDCt applied them. The QC tab does pass the dict form
+    (see the QC Overview call site).
     """
     if not excluded_wells:
         return ()
     if isinstance(excluded_wells, dict):
-        return tuple(sorted(
-            (str(k), tuple(sorted(str(w) for w in (v or ()))))
+        return ("dict", tuple(sorted(
+            (tuple(str(p) for p in k) if isinstance(k, tuple) else (str(k),),
+             tuple(sorted(str(w) for w in (v or ()))))
             for k, v in excluded_wells.items()
-        ))
-    return tuple(sorted(str(w) for w in excluded_wells))
+        )))
+    return ("set", tuple(sorted(str(w) for w in excluded_wells)))
+
+
+def _unkey_excluded(excluded_key: tuple):
+    """Rebuild the exclusion structure that ``_excluded_key`` encoded.
+
+    Returns the SAME shape the caller passed. That matters: a flat set of well
+    IDs excludes that plate coordinate for every gene and sample sharing it
+    (see ``QualityControl.excluded_mask``), which is not what a per-(gene,
+    sample) dict means.
+    """
+    if not excluded_key:
+        return set()
+    kind, payload = excluded_key
+    if kind == "dict":
+        return {
+            (k[0] if len(k) == 1 else tuple(k)): set(wells)
+            for k, wells in payload
+        }
+    return set(payload)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _cached_qc_summary_stats(data: pd.DataFrame, excluded_key: tuple, thresholds: tuple) -> dict:
-    return QualityControl.get_qc_summary_stats(data, set(excluded_key))
+    return QualityControl.get_qc_summary_stats(data, _unkey_excluded(excluded_key))
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -374,7 +400,7 @@ def _cached_replicate_stats(data: pd.DataFrame, thresholds: tuple) -> pd.DataFra
 def _cached_plate_heatmap(data: pd.DataFrame, value_col: str, excluded_key: tuple,
                           thresholds: tuple) -> go.Figure:
     return QualityControl.create_plate_heatmap(
-        data, value_col=value_col, excluded_wells=set(excluded_key)
+        data, value_col=value_col, excluded_wells=_unkey_excluded(excluded_key)
     )
 
 
@@ -4627,7 +4653,13 @@ with tab_qc:
             heatmap_col1, heatmap_col2 = st.columns([2, 1])
 
             with heatmap_col1:
-                render_plate_heatmaps(data, get_all_excluded_wells())
+                # The dict, not get_all_excluded_wells(): flattening excludes a
+                # plate coordinate for every gene and sample sharing it, so the
+                # heatmap marked wells that DDCt still used, and disagreed with
+                # the QC summary directly above it (which passes the dict).
+                render_plate_heatmaps(
+                    data, st.session_state.get("excluded_wells", {})
+                )
 
             with heatmap_col2:
                 st.markdown("**Replicate Statistics**")
