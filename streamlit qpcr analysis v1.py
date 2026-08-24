@@ -5333,27 +5333,72 @@ with tab2:
                     "**P-value References:** Used for statistical comparison (t-test). Choose one or two conditions for comparison."
                 )
 
+            # These four selectboxes carry SAMPLE KEYS as their options, with the
+            # condition name supplied by format_func. Condition names cannot be
+            # the option values: Streamlit derives a keyed widget's identity from
+            # its key alone and validates the stored value against the CURRENT
+            # options, so renaming the selected condition — or un-including its
+            # sample — removed that value from the list and Streamlit silently
+            # reset the widget to options[0] AND wrote it back to session_state.
+            # Every fold change and p-value was then recomputed against a
+            # reference the operator never chose, with analysis_stale still False
+            # and the summary panel re-rendering self-consistently, so nothing
+            # indicated the choice had been discarded (observed: p 0.0158 ->
+            # 0.000335, ** -> ***). A sample key survives a rename, so only the
+            # displayed label changes.
+            _ref_options = [sample_to_condition[c] for c in condition_list]
+            _cond_of = {
+                s: st.session_state.sample_mapping.get(s, {}).get("condition", s)
+                for s in _ref_options
+            }
+
+            def _fmt_cond(sample_key):
+                return _cond_of.get(sample_key, sample_key)
+
+            # Keying on sample identity stops a RENAME from silently moving the
+            # reference, but removal still can: un-including the reference
+            # sample, or losing it to QC, genuinely takes it out of the options,
+            # and Streamlit then resets the widget to options[0] and recomputes
+            # everything against it. That reset is legitimate — being silent
+            # about it is not.
+            for _wkey, _wlabel in (
+                ("ref_choice_ddct", "ΔΔCt reference"),
+                ("cmp_choice_pval", "p-value reference (*)"),
+                ("cmp_choice_pval_2", "p-value reference (#)"),
+                ("cmp_choice_pval_3", "p-value reference (†)"),
+            ):
+                _stored = st.session_state.get(_wkey)
+                if _stored is not None and _stored not in _ref_options:
+                    st.warning(
+                        f"The {_wlabel} was sample **{_stored}**, which is no "
+                        "longer included. It has been reset to "
+                        f"**{_fmt_cond(_ref_options[0])}**, so the fold changes "
+                        "and p-values below are relative to that instead."
+                    )
+
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1:
-                ref_condition = st.selectbox(
+                ref_sample_key = st.selectbox(
                     "🎯 ΔΔCt Reference Condition",
-                    condition_list,
+                    _ref_options,
                     index=0,
                     key="ref_choice_ddct",
+                    format_func=_fmt_cond,
                     help="Baseline for relative expression calculation",
                 )
-                ref_sample_key = sample_to_condition[ref_condition]
+                ref_condition = _fmt_cond(ref_sample_key)
                 st.caption(f"→ Sample: **{ref_sample_key}**")
 
             with col_r2:
-                cmp_condition = st.selectbox(
+                cmp_sample_key = st.selectbox(
                     "📈 P-value Reference 1 (*)",
-                    condition_list,
+                    _ref_options,
                     index=0,
                     key="cmp_choice_pval",
+                    format_func=_fmt_cond,
                     help="Primary control group for statistical testing (asterisk symbols)",
                 )
-                cmp_sample_key = sample_to_condition[cmp_condition]
+                cmp_condition = _fmt_cond(cmp_sample_key)
                 st.caption(f"→ Sample: **{cmp_sample_key}**")
 
             with col_r3:
@@ -5366,16 +5411,17 @@ with tab2:
                 )
 
                 if use_second_comparison:
-                    condition_list_2 = [c for c in condition_list if c != cmp_condition]
-                    if condition_list_2:
-                        cmp_condition_2 = st.selectbox(
+                    options_2 = [s for s in _ref_options if s != cmp_sample_key]
+                    if options_2:
+                        cmp_sample_key_2 = st.selectbox(
                             "P-value Reference 2 (#)",
-                            condition_list_2,
+                            options_2,
                             index=0,
                             key="cmp_choice_pval_2",
+                            format_func=_fmt_cond,
                             help="Secondary control group for statistical testing (hashtag symbols)",
                         )
-                        cmp_sample_key_2 = sample_to_condition[cmp_condition_2]
+                        cmp_condition_2 = _fmt_cond(cmp_sample_key_2)
                         st.caption(f"→ Sample: **{cmp_sample_key_2}**")
                     else:
                         st.warning("Need at least 3 conditions for dual comparison")
@@ -5393,17 +5439,22 @@ with tab2:
                 ) if use_second_comparison else False
 
                 if use_third_comparison:
-                    used = {cmp_condition, cmp_condition_2} if use_second_comparison and cmp_sample_key_2 else {cmp_condition}
-                    condition_list_3 = [c for c in condition_list if c not in used]
-                    if condition_list_3:
-                        cmp_condition_3 = st.selectbox(
+                    used = (
+                        {cmp_sample_key, cmp_sample_key_2}
+                        if use_second_comparison and cmp_sample_key_2
+                        else {cmp_sample_key}
+                    )
+                    options_3 = [s for s in _ref_options if s not in used]
+                    if options_3:
+                        cmp_sample_key_3 = st.selectbox(
                             "P-value Reference 3 (†)",
-                            condition_list_3,
+                            options_3,
                             index=0,
                             key="cmp_choice_pval_3",
+                            format_func=_fmt_cond,
                             help="Third control group for statistical testing (dagger symbols)",
                         )
-                        cmp_sample_key_3 = sample_to_condition[cmp_condition_3]
+                        cmp_condition_3 = _fmt_cond(cmp_sample_key_3)
                         st.caption(f"→ Sample: **{cmp_sample_key_3}**")
                     else:
                         st.warning("Need at least 4 conditions for triple comparison")
