@@ -1561,13 +1561,30 @@ def render_gene_editor(current_gene):
                 widget_key=f"ref_sel_{current_gene}", default="None",
                 help="Horizontal dashed line at a condition's expression level")
         with c2:
-            gs[f"{current_gene}_font_size"] = st.slider("Global font", 8, 28,
-                value=gs.get(f"{current_gene}_font_size", gs.get("font_size", 14)),
-                key=f"gf_{current_gene}")
-            gs[f"{current_gene}_tick_size"] = st.slider("X-tick labels", 8, 24,
-                value=gs.get(f"{current_gene}_tick_size", 12), key=f"ts_{current_gene}")
-            gs[f"{current_gene}_ylabel_size"] = st.slider("Y-axis label", 8, 24,
-                value=gs.get(f"{current_gene}_ylabel_size", 14), key=f"ys_{current_gene}")
+            # ONE text-size control, not three. The editor carried separate
+            # "Global font", "X-tick labels" and "Y-axis label" sliders — three
+            # ways to break the type hierarchy, and three decisions where one
+            # will do. Against the LEAN rule this was the clearest offender in a
+            # tab that had 26+ controls across five nested sub-tabs.
+            #
+            # It sets the scale and derives the rest at the ratios the defaults
+            # already used (global 14 / tick 12 / y-label 14), so an existing
+            # chart is unchanged. graph.py scales all of them again for slide
+            # legibility, so this is a relative control — which is what it
+            # always really was.
+            _base_font = int(
+                gs.get(f"{current_gene}_font_size", gs.get("font_size", 14))
+            )
+            _base_font = st.slider(
+                "Text size", 8, 28, value=_base_font,
+                key=f"gf_{current_gene}",
+                help="Scales the axis titles, tick labels and captions together",
+            )
+            gs[f"{current_gene}_font_size"] = _base_font
+            gs[f"{current_gene}_ylabel_size"] = _base_font
+            gs[f"{current_gene}_tick_size"] = max(
+                8, int(round(_base_font * 12 / 14))
+            )
 
     with t_colors:
         _render_per_bar_table(current_gene, gene_data)
