@@ -6083,21 +6083,61 @@ with tab_ov:
         )
 
         # benchmark + highlight selectors (auto, overridable)
+        bopts = ["(none)"] + conditions
+
+        # Both are AUTO-SELECTED, and a keyed widget derives its identity from
+        # the key alone — so the recomputed index= was thrown away on every
+        # rerun after the first and these never re-selected. _RESET_WIDGET_KEYS
+        # clears them on a NEW UPLOAD, but switching efficacy category or
+        # reference condition moves the auto-default without clearing anything:
+        # arriving at 탄력 by switching left the benchmark on "(none)" showing
+        # "Median % of benchmark —", while starting on 탄력 picked
+        # "TGFβ 10 ng/ml" and showed 252%. Same data, two answers, and the help
+        # text promised auto-selection either way.
+        #
+        # Re-seed the widget key when the auto-default itself moves, which is
+        # the pattern tasks/lessons.md prescribes: assign the key BEFORE
+        # instantiation. index= is dropped entirely — passing it alongside a
+        # session_state write is what triggers Streamlit's "created with a
+        # default value but also had its value set" warning.
+        _auto_sig = (
+            st.session_state.get("selected_efficacy"),
+            st.session_state.get("analysis_ref_condition"),
+            bench_default,
+            hl_default,
+        )
+        if st.session_state.get("_overview_auto_sig") != _auto_sig:
+            st.session_state["_overview_auto_sig"] = _auto_sig
+            st.session_state["overview_benchmark"] = (
+                bench_default if bench_default in bopts else "(none)"
+            )
+            if treatments:
+                st.session_state["overview_highlight"] = (
+                    hl_default if hl_default in treatments else treatments[0]
+                )
+        # An override can also be invalidated by the conditions changing under
+        # it; without this the stored value is silently reset to options[0].
+        elif st.session_state.get("overview_benchmark") not in bopts:
+            st.session_state["overview_benchmark"] = (
+                bench_default if bench_default in bopts else "(none)"
+            )
+
         sc1, sc2 = st.columns(2)
         with sc1:
-            bopts = ["(none)"] + conditions
-            bidx = bopts.index(bench_default) if bench_default in bopts else 0
             benchmark = st.selectbox(
-                "Benchmark (positive control)", bopts, index=bidx,
+                "Benchmark (positive control)", bopts,
                 key="overview_benchmark",
                 help="Auto-selected from the efficacy category's positive control; override if needed.",
             )
             benchmark = None if benchmark == "(none)" else benchmark
         with sc2:
             if treatments:
-                hidx = treatments.index(hl_default) if hl_default in treatments else 0
+                if st.session_state.get("overview_highlight") not in treatments:
+                    st.session_state["overview_highlight"] = (
+                        hl_default if hl_default in treatments else treatments[0]
+                    )
                 highlight = st.selectbox(
-                    "Highlight active", treatments, index=hidx, key="overview_highlight",
+                    "Highlight active", treatments, key="overview_highlight",
                     help="Test article summarized in the verdict and %-of-benchmark.",
                 )
             else:
@@ -6612,6 +6652,14 @@ with tab5:
             # superseded state and therefore matches itself, so _get_export
             # vouched for it. A file made while stale must never look current.
             "stale": bool(st.session_state.get("analysis_stale")),
+            # The gene-image render parameters. These were absent, so changing
+            # the format or the pixel size left the cached images looking
+            # current and the download served the PREVIOUS render — at the old
+            # size, in the old format. Width/Height were also unkeyed, so their
+            # values were not addressable here at all.
+            "img_fmt": st.session_state.get("pub_img_format"),
+            "img_w": st.session_state.get("pub_img_width"),
+            "img_h": st.session_state.get("pub_img_height"),
         })
 
         def _put_export(slot: str, data) -> None:
@@ -6725,9 +6773,14 @@ with tab5:
         with img_col1:
             img_format = st.selectbox("Format", ["PNG (300 DPI)", "SVG (Vector)", "PDF (Vector)"], key="pub_img_format")
         with img_col2:
-            img_width = st.number_input("Width (px)", min_value=400, max_value=3000, value=1200, step=100)
+            # Keyed so the value is addressable and can reach _export_fp.
+            img_width = st.number_input(
+                "Width (px)", min_value=400, max_value=3000, value=1200,
+                step=100, key="pub_img_width")
         with img_col3:
-            img_height = st.number_input("Height (px)", min_value=300, max_value=2000, value=800, step=100)
+            img_height = st.number_input(
+                "Height (px)", min_value=300, max_value=2000, value=800,
+                step=100, key="pub_img_height")
 
         if st.session_state.graphs:
             fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
