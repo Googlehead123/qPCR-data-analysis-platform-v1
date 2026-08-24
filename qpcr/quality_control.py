@@ -12,11 +12,57 @@ from typing import Tuple
 
 
 class QualityControl:
+    # IMMUTABLE DEFAULTS. Do NOT reassign these at runtime.
+    #
+    # The QC Settings widgets used to write straight onto these class
+    # attributes. A class attribute is PROCESS state while a Streamlit session
+    # is not: one container runs one Python process and every browser session
+    # shares module and class state, so one user's thresholds silently became
+    # every concurrent user's thresholds — and persisted across a refresh, so a
+    # fresh session inherited them instead of these documented defaults. On a
+    # validated instrument tool that is also a provenance problem:
+    # build_provenance would record thresholds the operator never set.
+    #
+    # They feed QC DISPLAY and the provenance record, not exclusion —
+    # apply_auto_qc passes its own sd_threshold explicitly to
+    # auto_select_replicates — so no published fold change moved. That is what
+    # makes this Major rather than Critical.
+    #
+    # Callers now pass a per-session `thresholds` dict; these remain the
+    # fallback. See resolve_thresholds.
     CT_HIGH_THRESHOLD = 35.0
     CT_LOW_THRESHOLD = 10.0
     CV_THRESHOLD = 0.05
     HK_VARIATION_THRESHOLD = 1.0
+
+    THRESHOLD_KEYS = ("ct_high", "ct_low", "cv", "hk_variation")
+
     GRUBBS_ALPHA = 0.05
+
+    @staticmethod
+    def resolve_thresholds(thresholds: dict = None) -> dict:
+        """Fill a partial per-session threshold dict from the class defaults.
+
+        Accepts None so every method keeps working for callers that do not care
+        (the tests, and any pure-computation use), while the app threads the
+        session's own values through.
+        """
+        base = {
+            "ct_high": QualityControl.CT_HIGH_THRESHOLD,
+            "ct_low": QualityControl.CT_LOW_THRESHOLD,
+            "cv": QualityControl.CV_THRESHOLD,
+            "hk_variation": QualityControl.HK_VARIATION_THRESHOLD,
+        }
+        if not thresholds:
+            return base
+        for key in QualityControl.THRESHOLD_KEYS:
+            value = thresholds.get(key)
+            if value is not None:
+                try:
+                    base[key] = float(value)
+                except (TypeError, ValueError):
+                    pass
+        return base
 
     @staticmethod
     def excluded_mask(df: pd.DataFrame, excluded_wells) -> pd.Series:
@@ -55,12 +101,13 @@ class QualityControl:
 
     @staticmethod
     def get_triplicate_data(
-        data: pd.DataFrame, excluded_wells: set = None
+        data: pd.DataFrame, excluded_wells: set = None, thresholds: dict = None
     ) -> pd.DataFrame:
         """
         Build a comprehensive triplicate-level view of all CT values.
         Returns DataFrame with one row per well, grouped by Sample+Target.
         """
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
@@ -121,13 +168,13 @@ class QualityControl:
             if row["n"] < 2:
                 issues.append("Low n")
                 severity = "warning"
-            if pd.notna(row["CV_pct"]) and row["CV_pct"] > QualityControl.CV_THRESHOLD * 100:
+            if pd.notna(row["CV_pct"]) and row["CV_pct"] > _qct["cv"] * 100:
                 issues.append(f"High CV ({row['CV_pct']:.1f}%)")
                 severity = "warning"
-            if row["Mean_CT"] > QualityControl.CT_HIGH_THRESHOLD:
+            if row["Mean_CT"] > _qct["ct_high"]:
                 issues.append("High CT")
                 severity = "warning"
-            if row["Mean_CT"] < QualityControl.CT_LOW_THRESHOLD:
+            if row["Mean_CT"] < _qct["ct_low"]:
                 issues.append("Low CT")
                 severity = "warning"
             if row["Range"] > 1.0 and row["n"] >= 2:
@@ -160,11 +207,12 @@ class QualityControl:
 
     @staticmethod
     def get_wells_for_triplicate(
-        data: pd.DataFrame, sample: str, target: str
+        data: pd.DataFrame, sample: str, target: str, thresholds: dict = None
     ) -> pd.DataFrame:
         """
         Get all wells for a specific Sample+Target combination with detailed info.
         """
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
@@ -192,9 +240,9 @@ class QualityControl:
 
         def well_status(row):
             issues = []
-            if row["CT"] > QualityControl.CT_HIGH_THRESHOLD:
+            if row["CT"] > _qct["ct_high"]:
                 issues.append("High CT")
-            if row["CT"] < QualityControl.CT_LOW_THRESHOLD:
+            if row["CT"] < _qct["ct_low"]:
                 issues.append("Low CT")
             if row["Is_Outlier"]:
                 issues.append("Grubbs outlier")
@@ -218,10 +266,12 @@ class QualityControl:
         ]
 
     @staticmethod
-    def get_qc_summary_stats(data: pd.DataFrame, excluded_wells: set = None) -> dict:
+    def get_qc_summary_stats(data: pd.DataFrame, excluded_wells: set = None,
+                             thresholds: dict = None) -> dict:
         """
         Calculate overall QC summary statistics for the dataset.
         """
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return {}
 
@@ -239,10 +289,10 @@ class QualityControl:
         ct_max = active_data["CT"].max()
 
         high_ct_count = len(
-            active_data[active_data["CT"] > QualityControl.CT_HIGH_THRESHOLD]
+            active_data[active_data["CT"] > _qct["ct_high"]]
         )
         low_ct_count = len(
-            active_data[active_data["CT"] < QualityControl.CT_LOW_THRESHOLD]
+            active_data[active_data["CT"] < _qct["ct_low"]]
         )
 
         triplicate_stats = QualityControl.get_triplicate_data(data, excluded_wells)
@@ -509,17 +559,19 @@ class QualityControl:
         return g_stat > g_crit, int(max_idx)
 
     @staticmethod
-    def detect_outliers(data: pd.DataFrame, hk_gene: str = None) -> pd.DataFrame:
+    def detect_outliers(data: pd.DataFrame, hk_gene: str = None,
+                        thresholds: dict = None) -> pd.DataFrame:
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
         qc_df = data[["Well", "Sample", "Target", "CT"]].copy()
 
-        ct_high = qc_df["CT"] > QualityControl.CT_HIGH_THRESHOLD
-        ct_low = qc_df["CT"] < QualityControl.CT_LOW_THRESHOLD
+        ct_high = qc_df["CT"] > _qct["ct_high"]
+        ct_low = qc_df["CT"] < _qct["ct_low"]
 
-        high_ct_issue = f"CT > {QualityControl.CT_HIGH_THRESHOLD} (low expression)"
-        low_ct_issue = f"CT < {QualityControl.CT_LOW_THRESHOLD} (unusually high)"
+        high_ct_issue = f"CT > {_qct["ct_high"]} (low expression)"
+        low_ct_issue = f"CT < {_qct["ct_low"]} (unusually high)"
 
         qc_df["Issues"] = pd.DataFrame(
             {
@@ -541,7 +593,7 @@ class QualityControl:
             cv_stats["std"] / cv_stats["mean"],
             np.nan,
         )
-        high_cv_groups = cv_stats[cv_stats["cv"] > QualityControl.CV_THRESHOLD][
+        high_cv_groups = cv_stats[cv_stats["cv"] > _qct["cv"]][
             ["Sample", "Target", "cv"]
         ]
 
@@ -598,7 +650,7 @@ class QualityControl:
 
                 deviations = (hk_by_sample - overall_hk_mean).abs()
                 flagged_samples = deviations[
-                    deviations > QualityControl.HK_VARIATION_THRESHOLD
+                    deviations > _qct["hk_variation"]
                 ]
 
                 if not flagged_samples.empty:
@@ -625,7 +677,9 @@ class QualityControl:
         return qc_df
 
     @staticmethod
-    def get_replicate_stats(data: pd.DataFrame) -> pd.DataFrame:
+    def get_replicate_stats(data: pd.DataFrame,
+                            thresholds: dict = None) -> pd.DataFrame:
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
@@ -649,9 +703,9 @@ class QualityControl:
         # which advertised a dependency that did not exist until now.)
         rep_stats["Status"] = np.select(
             [
-                rep_stats["Mean CT"] < QualityControl.CT_LOW_THRESHOLD,
-                rep_stats["Mean CT"] > QualityControl.CT_HIGH_THRESHOLD,
-                rep_stats["CV%"] > QualityControl.CV_THRESHOLD * 100,
+                rep_stats["Mean CT"] < _qct["ct_low"],
+                rep_stats["Mean CT"] > _qct["ct_high"],
+                rep_stats["CV%"] > _qct["cv"] * 100,
             ],
             ["Check Signal", "Low Expression", "High CV"],
             default="OK",

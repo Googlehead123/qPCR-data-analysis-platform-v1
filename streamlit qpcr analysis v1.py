@@ -400,20 +400,66 @@ def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping,
 # no session_state), so memoizing them is exact.
 
 
-def _qc_threshold_key() -> tuple:
-    """The QC thresholds that the helpers read, as a cache-key tuple.
+# The QC Settings widgets ARE the store: a widget key is session state, so the
+# session's own values live there and nothing has to be mirrored. `scale`
+# converts the widget's unit to the package's (the CV input is in percent).
+_QC_THRESHOLD_WIDGETS = {
+    "ct_high": ("qc_settings_ct_high", 1.0),
+    "ct_low": ("qc_settings_ct_low", 1.0),
+    "cv": ("qc_settings_cv", 0.01),
+    "hk_variation": ("qc_settings_hk_var", 1.0),
+}
 
-    These live as MUTABLE CLASS ATTRIBUTES on ``QualityControl`` and the QC tab's
-    sliders reassign them at runtime; the helper methods read them directly
-    instead of taking them as arguments. They must therefore be part of every QC
-    cache key, or moving a threshold slider would keep serving the old counts.
+
+def qc_thresholds() -> dict:
+    """This SESSION's QC thresholds, defaults filled in from the package.
+
+    These used to be reassigned onto ``QualityControl``'s class attributes by
+    the QC Settings widgets, and the helper methods read them from there. A
+    class attribute is PROCESS state and a Streamlit session is not: one
+    container runs one Python process and every browser session shares class
+    state, so one operator's thresholds became every concurrent operator's — and
+    survived a refresh, so a new session silently inherited them instead of the
+    documented defaults. For a validated instrument tool that is also a
+    provenance problem, since build_provenance would record thresholds nobody
+    set.
+
+    They now live in session_state and are PASSED to the helpers. The class
+    attributes are the immutable fallback.
     """
-    return (
-        float(QualityControl.CT_HIGH_THRESHOLD),
-        float(QualityControl.CT_LOW_THRESHOLD),
-        float(QualityControl.CV_THRESHOLD),
-        float(QualityControl.HK_VARIATION_THRESHOLD),
-    )
+    stored = {}
+    for name, (widget_key, scale) in _QC_THRESHOLD_WIDGETS.items():
+        value = st.session_state.get(widget_key)
+        if value is not None:
+            try:
+                stored[name] = float(value) * scale
+            except (TypeError, ValueError):
+                pass
+    return QualityControl.resolve_thresholds(stored)
+
+
+def _unkey_thresholds(threshold_key: tuple) -> dict:
+    """Rebuild the threshold dict from a ``_qc_threshold_key`` tuple.
+
+    The cached wrappers only receive the hashable key, so they need this to hand
+    the helpers the dict form. Keeping the two in one place stops the tuple
+    order and the key names drifting apart.
+    """
+    try:
+        return dict(zip(QualityControl.THRESHOLD_KEYS, threshold_key))
+    except TypeError:
+        return QualityControl.resolve_thresholds(None)
+
+
+def _qc_threshold_key() -> tuple:
+    """The session's thresholds as a cache-key tuple.
+
+    Still part of every QC cache key: the helpers' output depends on them, so a
+    threshold move must invalidate the memo even though they are now arguments
+    rather than class state.
+    """
+    t = qc_thresholds()
+    return tuple(float(t[k]) for k in QualityControl.THRESHOLD_KEYS)
 
 
 def _excluded_key(excluded_wells) -> tuple:
@@ -462,12 +508,16 @@ def _unkey_excluded(excluded_key: tuple):
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _cached_qc_summary_stats(data: pd.DataFrame, excluded_key: tuple, thresholds: tuple) -> dict:
-    return QualityControl.get_qc_summary_stats(data, _unkey_excluded(excluded_key))
+    return QualityControl.get_qc_summary_stats(
+        data, _unkey_excluded(excluded_key), thresholds=_unkey_thresholds(thresholds)
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _cached_replicate_stats(data: pd.DataFrame, thresholds: tuple) -> pd.DataFrame:
-    return QualityControl.get_replicate_stats(data)
+    return QualityControl.get_replicate_stats(
+        data, thresholds=_unkey_thresholds(thresholds)
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=12)
@@ -483,7 +533,9 @@ def get_qc_summary_stats(data, excluded_wells=None) -> dict:
     try:
         return _cached_qc_summary_stats(data, _excluded_key(excluded_wells), _qc_threshold_key())
     except Exception:
-        return QualityControl.get_qc_summary_stats(data, excluded_wells)
+        return QualityControl.get_qc_summary_stats(
+            data, excluded_wells, thresholds=qc_thresholds()
+        )
 
 
 def get_replicate_stats(data) -> pd.DataFrame:
@@ -491,7 +543,9 @@ def get_replicate_stats(data) -> pd.DataFrame:
     try:
         return _cached_replicate_stats(data, _qc_threshold_key())
     except Exception:
-        return QualityControl.get_replicate_stats(data)
+        return QualityControl.get_replicate_stats(
+            data, thresholds=qc_thresholds()
+        )
 
 
 def get_plate_heatmap(data, value_col: str = "CT", excluded_wells=None) -> go.Figure:
@@ -3708,10 +3762,12 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         rows.append({"Metric": "CT Range", "Value": f"{qc_stats.get('ct_min', '')}-{qc_stats.get('ct_max', '')}"})
         # Interpolate the configured thresholds: the COUNTS honour QC Settings
         # but these labels were hardcoded to 35/10, and this sheet goes to
-        # clients, so a re-thresholded run shipped a mislabelled row.
-        rows.append({"Metric": f"High CT Wells (>{QualityControl.CT_HIGH_THRESHOLD:g})",
+        # clients, so a re-thresholded run shipped a mislabelled row. Read from
+        # the SESSION now, not from class attributes.
+        _qct_report = qc_thresholds()
+        rows.append({"Metric": f"High CT Wells (>{_qct_report['ct_high']:g})",
                      "Value": qc_stats.get("high_ct_count", "")})
-        rows.append({"Metric": f"Low CT Wells (<{QualityControl.CT_LOW_THRESHOLD:g})",
+        rows.append({"Metric": f"Low CT Wells (<{_qct_report['ct_low']:g})",
                      "Value": qc_stats.get("low_ct_count", "")})
         rows.append({"Metric": "Total Triplicates", "Value": qc_stats.get("total_triplicates", "")})
         rows.append({"Metric": "Healthy Triplicates", "Value": qc_stats.get("healthy_triplicates", "")})
@@ -4614,26 +4670,19 @@ with tab_qc:
         # ==================== QC SUMMARY DASHBOARD ====================
         st.caption("Browse all CT values, review triplicates, and exclude outliers before analysis.")
 
-        # The QC thresholds live as mutable class attributes that the QC Settings
-        # widgets reassign — but those widgets are ~80 lines BELOW this call, so on
-        # the rerun that follows a threshold edit this read still saw the old
-        # value and every summary metric was one rerun stale (which is what the
-        # "Re-run QC with New Settings" button was really working around). The
-        # widgets are keyed, so their stored state is the authoritative value and
-        # can be applied before anything reads it.
-        _qc_widget_thresholds = (
-            ("CT_HIGH_THRESHOLD", "qc_settings_ct_high", 1.0),
-            ("CT_LOW_THRESHOLD", "qc_settings_ct_low", 1.0),
-            ("CV_THRESHOLD", "qc_settings_cv", 100.0),   # widget is in percent
-            ("HK_VARIATION_THRESHOLD", "qc_settings_hk_var", 1.0),
-        )
-        for _attr, _wkey, _scale in _qc_widget_thresholds:
-            if _wkey in st.session_state:
-                try:
-                    setattr(QualityControl, _attr,
-                            float(st.session_state[_wkey]) / _scale)
-                except (TypeError, ValueError):
-                    pass
+        # The block that used to sit here pre-applied the QC Settings widget
+        # values onto QualityControl's class attributes, because those widgets
+        # render ~80 lines BELOW this point and a class-attribute read here would
+        # otherwise have been one rerun stale. It was the workaround that made
+        # the thresholds process-global: a class attribute is shared by every
+        # browser session on the container, so one operator's setting became
+        # everyone's and survived a refresh.
+        #
+        # Both problems are gone for the same reason. qc_thresholds() reads the
+        # widget KEYS, and a widget's key is populated in session_state at the
+        # start of every rerun regardless of where in the script it renders — so
+        # the value is both current here and private to this session. Nothing
+        # writes to the class attributes any more; they are immutable defaults.
 
         # Get comprehensive QC stats using helper to get all excluded wells
         # The dict, not the flattened set: a flat set of well IDs excludes that
@@ -4686,7 +4735,7 @@ with tab_qc:
                 f"{qc_stats.get('ct_min', 0):.1f} - {qc_stats.get('ct_max', 0):.1f}",
             )
             dist_cols[2].metric(
-                f"High CT (>{QualityControl.CT_HIGH_THRESHOLD:g})",
+                f"High CT (>{qc_thresholds()['ct_high']:g})",
                 qc_stats.get("high_ct_count", 0),
                 delta="check" if qc_stats.get("high_ct_count", 0) > 0 else None,
                 delta_color="off",
@@ -4714,10 +4763,18 @@ with tab_qc:
             )
 
             # ---- Inline QC Settings (collapsed) ----
+            # These widgets no longer assign onto QualityControl's class
+            # attributes. A class attribute is PROCESS state: one Cloud
+            # container runs one Python process and every browser session shares
+            # it, so one operator's thresholds became every concurrent
+            # operator's, and survived a refresh so a fresh session inherited
+            # them instead of the documented defaults. The widget keys ARE the
+            # per-session store (see _QC_THRESHOLD_WIDGETS) and the values are
+            # passed to the QC helpers as arguments.
             with st.expander("QC Settings", expanded=False):
                 thresh_col1, thresh_col2 = st.columns(2)
                 with thresh_col1:
-                    new_ct_high = st.number_input(
+                    st.number_input(
                         "High CT Threshold",
                         min_value=25.0, max_value=45.0,
                         value=float(QualityControl.CT_HIGH_THRESHOLD),
@@ -4725,9 +4782,7 @@ with tab_qc:
                         help="Wells with CT above this are flagged as low expression",
                         key="qc_settings_ct_high",
                     )
-                    QualityControl.CT_HIGH_THRESHOLD = new_ct_high
-
-                    new_ct_low = st.number_input(
+                    st.number_input(
                         "Low CT Threshold",
                         min_value=5.0, max_value=20.0,
                         value=float(QualityControl.CT_LOW_THRESHOLD),
@@ -4735,10 +4790,9 @@ with tab_qc:
                         help="Wells with CT below this are flagged as unusually high expression",
                         key="qc_settings_ct_low",
                     )
-                    QualityControl.CT_LOW_THRESHOLD = new_ct_low
 
                 with thresh_col2:
-                    new_cv = st.number_input(
+                    st.number_input(
                         "CV% Threshold",
                         min_value=1.0, max_value=20.0,
                         value=float(QualityControl.CV_THRESHOLD * 100),
@@ -4746,9 +4800,7 @@ with tab_qc:
                         help="Replicates with CV above this are flagged as high variability",
                         key="qc_settings_cv",
                     )
-                    QualityControl.CV_THRESHOLD = new_cv / 100
-
-                    new_hk_var = st.number_input(
+                    st.number_input(
                         "HK Variation Threshold",
                         min_value=0.5, max_value=3.0,
                         value=float(QualityControl.HK_VARIATION_THRESHOLD),
@@ -4756,10 +4808,19 @@ with tab_qc:
                         help="Housekeeping gene deviation threshold across samples",
                         key="qc_settings_hk_var",
                     )
-                    QualityControl.HK_VARIATION_THRESHOLD = new_hk_var
 
-                if st.button("🔄 Re-run QC with New Settings", type="primary", width='stretch', key="qc_rerun_settings"):
-                    st.rerun()
+                # The "Re-run QC with New Settings" button that used to sit here
+                # was a NO-OP: it only called st.rerun(), and changing a
+                # number_input already triggers a rerun that applies the new
+                # threshold before this point. Its label implied the settings
+                # above were inert until pressed, which was the opposite of
+                # true. Verified: the metric label changed to the new threshold
+                # BEFORE the button was pressed, and pressing it changed nothing.
+                st.caption(
+                    "Changes apply immediately — the QC counts above update as "
+                    "soon as a threshold moves. These settings belong to your "
+                    "session only."
+                )
 
             # ---- Automatic replicate QC (best-2-of-3) ----
             st.markdown("---")
