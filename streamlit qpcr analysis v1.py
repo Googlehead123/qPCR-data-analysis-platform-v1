@@ -3951,25 +3951,34 @@ with tab1:
                 if had_previous_analysis:
                     st.info("Previous analysis results cleared due to new data upload.")
 
-                # FIX-05: Detect overlapping data across multiple files
-                if len(all_data) > 1:
-                    combined = st.session_state.data
-                    dup_check_cols = ["Target", "Well", "Sample"]
-                    duplicated_mask = combined.duplicated(subset=dup_check_cols, keep=False)
-                    if duplicated_mask.any():
-                        dup_rows = combined[duplicated_mask]
-                        dup_sources = dup_rows.groupby(dup_check_cols)["Source_File"].apply(
-                            lambda x: list(x.unique())
+                # FIX-05: Detect overlapping data across files AND within one.
+                # This whole block used to sit behind `len(all_data) > 1`, so two
+                # identical Target+Well+Sample rows inside a SINGLE file became
+                # silent extra replicates — inflating n and tightening the SD.
+                combined = st.session_state.data
+                dup_check_cols = ["Target", "Well", "Sample"]
+                duplicated_mask = combined.duplicated(subset=dup_check_cols, keep=False)
+                if duplicated_mask.any():
+                    dup_rows = combined[duplicated_mask]
+                    dup_sources = dup_rows.groupby(dup_check_cols)["Source_File"].apply(
+                        lambda x: list(x.unique())
+                    )
+                    cross_file_dups = dup_sources[dup_sources.apply(len) > 1]
+                    within_file_dups = dup_sources[dup_sources.apply(len) == 1]
+                    if len(cross_file_dups) > 0:
+                        st.warning(
+                            f"⚠️ Found {len(cross_file_dups)} overlapping data "
+                            f"point(s) across files (same Target+Well+Sample in "
+                            f"different files). This may cause duplicated results. "
+                            f"Consider deduplicating your input files."
                         )
-                        # Only warn if same combo appears in DIFFERENT files
-                        cross_file_dups = dup_sources[dup_sources.apply(len) > 1]
-                        if len(cross_file_dups) > 0:
-                            n_dups = len(cross_file_dups)
-                            st.warning(
-                                f"⚠️ Found {n_dups} overlapping data point(s) across files "
-                                f"(same Target+Well+Sample in different files). "
-                                f"This may cause duplicated results. Consider deduplicating your input files."
-                            )
+                    if len(within_file_dups) > 0:
+                        st.warning(
+                            f"⚠️ Found {len(within_file_dups)} repeated "
+                            f"Target+Well+Sample row(s) within a single file. They "
+                            f"are counted as extra replicates, which inflates n "
+                            f"and narrows the error bars."
+                        )
 
                 unique_samples = sorted(
                     st.session_state.data["Sample"].unique(), key=natural_sort_key
@@ -4024,17 +4033,33 @@ with tab1:
             st.warning(
                 "No standard housekeeping gene detected. Please select one manually."
             )
+            # Require an explicit choice. This used to be a plain selectbox over
+            # the targets in file order with index=0, and its result was assigned
+            # straight to hk_gene — so despite the warning, an ARBITRARY target
+            # was already the housekeeping gene, the metric displayed it, and
+            # run_full_analysis's `if not hk_gene:` guard was satisfied. On a
+            # plate whose reference gene lives in the companion file, everything
+            # was normalised to whichever target happened to be listed first.
+            _HK_PROMPT = "— select a housekeeping gene —"
+            _hk_options = [_HK_PROMPT] + all_genes
             default_idx = 0
             if st.session_state.get("hk_gene") in all_genes:
-                default_idx = all_genes.index(st.session_state.hk_gene)
-            st.session_state.hk_gene = st.selectbox(
+                default_idx = _hk_options.index(st.session_state.hk_gene)
+            _picked = st.selectbox(
                 "🔬 Select Housekeeping Gene",
-                all_genes,
+                _hk_options,
                 index=default_idx,
                 key="hk_select_manual",
                 help="Select the reference/housekeeping gene for normalization",
             )
-            col4.metric("HK Gene", st.session_state.hk_gene)
+            st.session_state.hk_gene = None if _picked == _HK_PROMPT else _picked
+            col4.metric("HK Gene", st.session_state.hk_gene or "—")
+            if st.session_state.hk_gene is None:
+                st.info(
+                    "Pick the housekeeping gene before running the analysis. If "
+                    "this plate's reference gene is in another file, upload both "
+                    "files together."
+                )
 
         st.subheader("Data Preview")
         st.dataframe(st.session_state.data.head(50), height=300)
@@ -4829,8 +4854,16 @@ with tab2:
 
         # Show control structure
         with st.expander("📋 Control Structure for this Test"):
-            for ctrl_type, ctrl_name in config["controls"].items():
-                st.markdown(f"- **{ctrl_type.title()}**: {ctrl_name}")
+            # Only the real control roles. Iterating the whole dict printed
+            # "Compare_To: negative" and "Negative_Display: ..." as if they were
+            # two more controls — the first is a routing key and the second is
+            # display text reserved for the PPT writer — so 진정 appeared to have
+            # four controls where it has two.
+            for ctrl_type in ("baseline", "negative", "positive"):
+                ctrl_name = config["controls"].get(ctrl_type)
+                if ctrl_name:
+                    _shown = config["controls"].get(f"{ctrl_type}_display") or ctrl_name
+                    st.markdown(f"- **{ctrl_type.title()}**: {_shown}")
 
         # Sample mapping interface with professional layout
         st.markdown("### Sample Condition Mapping")
@@ -4860,6 +4893,14 @@ with tab2:
             st.session_state.sample_order = list(dict.fromkeys(
                 s for s in st.session_state.sample_order if s in current_data_samples
             ))
+        # sample_order is pruned above but sample_mapping never was, and three
+        # places iterate the mapping rather than the order — excluded_samples, the
+        # duplicate-condition warning and the "Groups" metric — so stale entries
+        # from a previous file inflated the group count and could name conditions
+        # that are no longer on screen.
+        for _gone in [s for s in list(st.session_state.sample_mapping)
+                      if s not in current_data_samples]:
+            del st.session_state.sample_mapping[_gone]
 
         # Group type options
         group_types = ["Negative Control", "Positive Control", "Treatment"]
@@ -4886,10 +4927,23 @@ with tab2:
                 if label and sl == str(label).strip().lower():
                     grp = _role_to_group[role]
                     return grp if grp in group_types else "Treatment"
+            # Substring pass. This used to match in BOTH directions on any
+            # length, so a short sample name inside a dosed control label won:
+            # every real export here names samples "1".."21", and under 탄력 the
+            # sample named "1" became a Positive Control because "1" is inside
+            # "tgfβ 10 ng/ml" (under 진정, "4" inside "poly(i:c)+il-4"). The
+            # derived group reaches processed_data["Group"], the results table and
+            # the Excel Summary grouping, and analysis.py takes a pooled
+            # condition's group from its first sample — so one mis-grouped sample
+            # relabels a whole condition. Require at least 3 characters and a
+            # prefix/containment relation, which keeps "Non-treated 24h" and
+            # "Dexamethasone" matching while a bare number no longer does.
             for role in ("baseline", "negative", "positive"):
                 label = controls.get(role)
                 ll = str(label).strip().lower() if label else ""
-                if ll and (ll in sl or sl in ll):
+                if not ll or len(sl) < 3:
+                    continue
+                if ll.startswith(sl) or sl.startswith(ll) or ll in sl:
                     grp = _role_to_group[role]
                     return grp if grp in group_types else "Treatment"
             return "Treatment"
@@ -4910,7 +4964,11 @@ with tab2:
                 st.session_state.sample_mapping[sample] = entry
             entry.pop("concentration", None)
             entry.setdefault("include", True)
-            entry["group"] = _suggest_group(sample)
+            # Derive the group from the CONDITION name the user typed, falling
+            # back to the raw sample name. This was fed the raw sample name only,
+            # so renaming "1" to "Non-treated" never updated the group — the
+            # rename is precisely the point at which the role becomes knowable.
+            entry["group"] = _suggest_group(entry.get("condition") or sample)
 
         st.caption(
             "Choose which samples to include and name their conditions. "
@@ -4963,6 +5021,19 @@ with tab2:
                     placeholder="Enter condition name...",
                     max_chars=50,
                 )
+                # Strip before storing. analysis.py groups on this string exactly,
+                # so "Non-treated" and "Non-treated " (one pasted with a trailing
+                # space) became two conditions with visually identical bar labels
+                # — two n=3 bars each with its own p-value instead of one n=6 —
+                # and the duplicate-name notice compares raw strings, so it did
+                # not fire. The matching layer already strips (_suggest_group,
+                # the Overview _match), so only the grouping layer disagreed.
+                cond = (cond or "").strip()
+                if not cond:
+                    # An empty name pooled every sample into one "" condition,
+                    # making every fold change exactly 1.0.
+                    cond = sample
+                    st.caption("⚠️ Blank condition — using the sample name.")
                 st.session_state.sample_mapping[sample]["condition"] = cond
 
         # ---- Order (always available; reflects live into graphs and exports) ----
