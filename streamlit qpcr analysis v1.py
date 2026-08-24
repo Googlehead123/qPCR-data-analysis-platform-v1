@@ -3074,9 +3074,20 @@ class PPTGenerator:
                     if _n_sig == 0:
                         _verdict = "無"
                     elif not _expected or _fc_col not in _rows.columns:
-                        # No configured direction for this marker (or no fold
-                        # change to judge): say so rather than claiming either.
-                        _verdict = _VERDICT_REVIEW
+                        # No configured direction for this marker, so there is
+                        # nothing to check the sign against: fall back to the
+                        # historical significance-only verdict rather than
+                        # stamping the review verdict on a result that may be
+                        # perfectly good. Decision (Min, 2026-08-24), and it
+                        # matters: EFFICACY_CONFIG covers 73 of 83 markers, but
+                        # the gaps CLUSTER — 립 색상 has NONE of its six (VEGFA,
+                        # VEGF, NOS3, EDN1, MC1R, TYR), so every slide in that
+                        # category would otherwise have flipped. 외이도염 lacks
+                        # CBD103/cBD103, 탈모 개선 lacks FLG, 열 노화 lacks NID1.
+                        # Filling those in is what makes the verdict correct
+                        # rather than merely cautious; until then this confines
+                        # the change to markers that can actually be judged.
+                        _verdict = "有"
                     else:
                         _fc = pd.to_numeric(
                             _rows.loc[_sig_mask, _fc_col], errors="coerce"

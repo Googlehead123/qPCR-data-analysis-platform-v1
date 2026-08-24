@@ -878,11 +878,28 @@ class TestEfficacyVerdictRespectsDirection:
         ])
         assert "無" in text
 
-    def test_unconfigured_marker_does_not_claim_either_way(self):
-        """A gene with no expected_direction entry cannot be judged."""
+    def test_unconfigured_marker_keeps_the_historical_verdict(self):
+        """A gene with no expected_direction entry has nothing to check.
+
+        Decision (Min, 2026-08-24): fall back to significance-only rather than
+        3rd-verdict it. EFFICACY_CONFIG covers 73/83 markers and the gaps
+        cluster — 립 색상 has none of its six — so 3rd-verdicting the
+        unconfigured case would have flipped whole categories of report.
+        """
         text = self._verdict("NOTAGENE", [
             {"Condition": "Test article", "Fold_Change": 4.0,
              "p_value": 0.001, "significance": "**"},
         ])
-        assert "有" not in text
-        assert "재검토" in text
+        assert "有" in text
+        assert "재검토" not in text
+
+    def test_a_whole_category_without_directions_is_unaffected(self):
+        """립 색상 configures no direction for any of its six markers."""
+        from qpcr.constants import EFFICACY_CONFIG
+        from qpcr.auto import expected_direction_for
+
+        cfg = EFFICACY_CONFIG["립 색상"]
+        assert not any(
+            expected_direction_for(g, cfg.get("expected_direction", {}))
+            for g in cfg["genes"]
+        ), "fixture assumption changed — 립 색상 now has directions configured"
