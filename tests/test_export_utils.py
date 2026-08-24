@@ -76,6 +76,53 @@ def test_looks_like_browser_error():
         ValueError("some unrelated numerical error"))
 
 
+def test_a_plotly_closest_error_does_not_trigger_the_chrome_download():
+    """'close' as a bare keyword also matched 'closest'.
+
+    A plain Plotly property error mentioning hovermode='closest' looked like a
+    browser crash, so the ~150 MB Chrome download ran and then the SAME
+    unrelated error was re-raised. Phrases, not substrings.
+    """
+    for msg in (
+        "hovermode: 'closest' is not a valid value",
+        "Invalid property specified for object of type "
+        "plotly.graph_objs.Bar: 'closest'",
+        "Invalid value of type builtins.str received for the 'hoverinfo' "
+        "property: 'closest'",
+    ):
+        assert not export_utils._looks_like_browser_error(ValueError(msg)), msg
+
+    # Real browser-death phrasings must still match.
+    for msg in (
+        "Chrome closed unexpectedly while rendering",
+        "the browser closed the connection",
+        "connection closed before the render finished",
+    ):
+        assert export_utils._looks_like_browser_error(RuntimeError(msg)), msg
+
+
+def test_failure_message_does_not_promise_an_export_that_does_not_exist(
+    monkeypatch,
+):
+    """The old message offered a 'Download Interactive HTML' export.
+
+    No such export exists anywhere in the app, so it sent the operator hunting
+    for a button that was never built.
+    """
+    fig = _fig()
+
+    def _boom(*a, **k):
+        raise RuntimeError("chromium failed to launch")
+
+    monkeypatch.setattr(export_utils, "_download_fallback_chrome",
+                        lambda: "/nonexistent/chrome")
+    monkeypatch.setattr(type(fig), "to_image", _boom, raising=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        export_utils.export_figure_to_bytes(fig)
+    assert "Interactive HTML" not in str(excinfo.value)
+
+
 # ---- fallback control flow ----------------------------------------------
 
 def test_fallback_downloads_chrome_then_retries(monkeypatch):

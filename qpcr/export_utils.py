@@ -202,6 +202,11 @@ def _looks_like_browser_error(err: Exception) -> bool:
     browser problems, not unrelated rendering errors.
     """
     msg = str(err).lower()
+    # Phrases, not bare words. "close" alone also matched "closest", so a plain
+    # Plotly property error — hovermode: 'closest' is not a valid value, or an
+    # invalid 'closest' property on a Bar — triggered the ~150 MB Chrome
+    # download and then re-raised the same unrelated error. "not found" and
+    # "timeout" stay as-is: both only appear here in browser-launch messages.
     return any(
         keyword in msg
         for keyword in (
@@ -210,7 +215,9 @@ def _looks_like_browser_error(err: Exception) -> bool:
             "browser",
             "kaleido",
             "choreographer",
-            "close",
+            "closed unexpectedly",
+            "closed the connection",
+            "connection closed",
             "not found",
             "browser_path",
             "executable",
@@ -273,7 +280,10 @@ def export_figure_to_bytes(fig, fmt: str = "png", scale: int = 2,
                 "Image export requires a headless Chrome/Chromium that can launch.\n"
                 f"• System browser tried: {resolved}\n"
                 f"• Automatic Chrome download also failed: {second_err}\n"
+                # No "Download Interactive HTML" alternative is offered: there
+                # is no such export anywhere in the app, so pointing at it sent
+                # the operator looking for a button that does not exist.
                 "Fixes: run `plotly_get_chrome` in the app environment, or on "
-                "Streamlit Cloud keep 'chromium' in packages.txt. You can still use "
-                "the 'Download Interactive HTML' export as an alternative."
+                "Streamlit Cloud keep 'chromium' in packages.txt. The Excel "
+                "report does not need Chrome, so it remains available."
             ) from second_err

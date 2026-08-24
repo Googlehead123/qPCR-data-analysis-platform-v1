@@ -15,6 +15,7 @@ from scipy import stats
 import gc
 import hashlib
 import io
+import logging
 import warnings
 import json
 import re
@@ -3887,43 +3888,25 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
             data = zf_in.read(item.filename)
 
             if item.filename in gene_for_chart:
-                gene = gene_for_chart[item.filename]
-                root = etree.fromstring(data)
-
-                cat_ax = root.find(".//c:catAx", nsmap)
-                val_ax = root.find(".//c:valAx", nsmap)
-
-                # X-axis: add txPr for 9pt gray Arial labels
-                if cat_ax is not None:
-                    cat_ax.append(_build_axis_txpr(C, A))
-
-                if val_ax is not None:
-                    # Hidden gridlines (noFill)
-                    mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
-                    mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
-                    mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
-                    etree.SubElement(mg_ln, f"{{{A}}}noFill")
-
-                    # Y-axis tick label font
-                    val_ax.append(_build_axis_txpr(C, A))
-
-                    # Rich text Y-axis title
-                    _build_yaxis_title(val_ax, gene, hk_gene, C, A)
-
-                # Chart area: white fill, light gray border
-                chart_space = root
-                cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
-                sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
-                etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
-                ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
-                ln_cs.set("w", "9525")
-                sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
-                sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
-                sc_ln.set("val", "tx1")
-                etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
-                etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
-
-                data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                # Per-chart isolation. One try/finally used to wrap the WHOLE
+                # loop, so a single gene's XML post-processing failure threw
+                # away the ENTIRE workbook — Raw_Data, QC_Report, FC_Matrix,
+                # Replicate_FC and every _Analysis sheet, all of which had
+                # already been written successfully in phase 1. Now a bad chart
+                # costs only its own styling: the unmodified chart is written
+                # through and the gene is named in the log.
+                try:
+                    data = _restyle_gene_chart_xml(
+                        data, gene_for_chart[item.filename], hk_gene,
+                        C, A, nsmap,
+                    )
+                except Exception as _chart_err:  # noqa: BLE001
+                    logging.warning(
+                        "Excel chart styling failed for %s (%s); writing the "
+                        "unstyled chart. %s",
+                        gene_for_chart[item.filename], item.filename,
+                        _chart_err,
+                    )
 
             zf_out.writestr(item, data)
 
@@ -3934,13 +3917,125 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
     return result
 
 
+# ECMA-376 child order for the chart elements this module rewrites. These are
+# xsd:sequence, so position is meaning — and phase 2 builds them with append and
+# SubElement, which always land LAST. Validating a generated workbook against
+# the real dml-chart.xsd failed on three counts: txPr after crossAx (must be
+# before), majorGridlines after spPr (must follow axPos), and errBars' minus
+# before plus. The third is upstream: openpyxl 3.1.5 declares
+# ErrorBars.__elements__ with minus before plus, so it appears even in a bare
+# openpyxl workbook that touches none of this code — fixing only the appends
+# here would not clear it, which is why the reorder is applied to errBars too.
+# Excel's own output (the lab reference workbook) is in perfect schema order.
+_AX_SHARED_ORDER = (
+    "axId", "scaling", "delete", "axPos", "majorGridlines", "minorGridlines",
+    "title", "numFmt", "majorTickMark", "minorTickMark", "tickLblPos", "spPr",
+    "txPr", "crossAx", "crosses", "crossesAt",
+)
+_CAT_AX_ORDER = _AX_SHARED_ORDER + (
+    "auto", "lblAlgn", "lblOffset", "tickLblSkip", "tickMarkSkip",
+    "noMultiLvlLbl", "extLst",
+)
+_VAL_AX_ORDER = _AX_SHARED_ORDER + (
+    "crossBetween", "majorUnit", "minorUnit", "dispUnits", "extLst",
+)
+_ERR_BARS_ORDER = (
+    "errDir", "errBarType", "errValType", "noEndCap", "plus", "minus", "val",
+    "spPr", "extLst",
+)
+
+
+def _reorder_xml_children(element, order, ns) -> None:
+    """Sort ``element``'s children into the schema's declared sequence.
+
+    Unknown children keep their relative position at the end, so an element this
+    list does not know about is never dropped.
+    """
+    if element is None:
+        return
+    rank = {name: i for i, name in enumerate(order)}
+    kids = list(element)
+    if not kids:
+        return
+
+    def _key(pair):
+        i, child = pair
+        tag = child.tag
+        local = tag.split("}")[-1] if isinstance(tag, str) else ""
+        return (rank.get(local, len(order)), i)
+
+    for _, child in sorted(enumerate(kids), key=_key):
+        element.append(child)
+
+
+def _restyle_gene_chart_xml(data: bytes, gene: str, hk_gene: str,
+                            C: str, A: str, nsmap: dict) -> bytes:
+    """Apply phase-2 styling to one gene chart's XML and return the new bytes.
+
+    Extracted so a failure can be caught PER CHART; see the call site. Ends by
+    sorting the elements it touched back into the ECMA-376 sequence, because
+    append/SubElement always land last and these are xsd:sequence.
+    """
+    from lxml import etree
+
+    root = etree.fromstring(data)
+
+    cat_ax = root.find(".//c:catAx", nsmap)
+    val_ax = root.find(".//c:valAx", nsmap)
+
+    # X-axis: add txPr for 9pt gray Arial labels
+    if cat_ax is not None:
+        cat_ax.append(_build_axis_txpr(C, A))
+
+    if val_ax is not None:
+        # Hidden gridlines (noFill)
+        mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
+        mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
+        mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
+        etree.SubElement(mg_ln, f"{{{A}}}noFill")
+
+        # Y-axis tick label font
+        val_ax.append(_build_axis_txpr(C, A))
+
+        # Rich text Y-axis title
+        _build_yaxis_title(val_ax, gene, hk_gene, C, A)
+
+    # Chart area: white fill, light gray border. NOT reordered — CT_ChartSpace
+    # puts spPr directly after chart, so appending it here is already correct.
+    chart_space = root
+    cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
+    sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
+    etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
+    ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
+    ln_cs.set("w", "9525")
+    sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
+    sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
+    sc_ln.set("val", "tx1")
+    etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
+    etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
+
+    # Restore the declared sequence for everything touched here, plus errBars,
+    # whose minus-before-plus order comes from openpyxl itself.
+    _reorder_xml_children(cat_ax, _CAT_AX_ORDER, C)
+    _reorder_xml_children(val_ax, _VAL_AX_ORDER, C)
+    for _eb in root.iter(f"{{{C}}}errBars"):
+        _reorder_xml_children(_eb, _ERR_BARS_ORDER, C)
+
+    return etree.tostring(
+        root, xml_declaration=True, encoding="UTF-8", standalone=True
+    )
+
+
 def _build_axis_txpr(C, A):
     """Build txPr element for axis tick labels: 9pt gray Arial."""
     from lxml import etree
 
     txpr = etree.Element(f"{{{C}}}txPr")
     bp = etree.SubElement(txpr, f"{{{A}}}bodyPr")
-    bp.set("rot", "-60000000")
+    # No `rot`: OOXML measures rotation in 60000ths of a degree, so the old
+    # "-60000000" was -1000 degrees — far outside the valid -90..90 range. These
+    # are horizontal tick labels (vert="horz"), and omitting rot is the default
+    # horizontal, which is what was clearly intended.
     bp.set("vert", "horz")
     bp.set("wrap", "square")
     etree.SubElement(txpr, f"{{{A}}}lstStyle")
