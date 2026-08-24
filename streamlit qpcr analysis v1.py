@@ -3189,7 +3189,37 @@ class PPTGenerator:
 
             slide_w = int(prs.slide_width)
             left = max(0, int((slide_w - w_emu) / 2))
-            top = int(1.0 * 914400)  # 1.0" below header
+
+            # Start below whatever the header actually occupies, not at a fixed
+            # 1.0". The chart's top band is opaque white and the picture is
+            # later in z-order, so a hardcoded 1.0" painted over the template's
+            # assay-metadata box (which runs to ~1.53"): "Inducer: ..." was
+            # sliced through mid-glyph and "Treatment time" and "Test method"
+            # disappeared entirely from every gene slide. The text is still in
+            # the file — it was covered, not dropped — so nothing but geometry
+            # is wrong here.
+            _HEADER_BAND = int(1.6 * 914400)
+            _GAP = int(0.06 * 914400)
+            header_bottom = 0
+            for _sh in slide.shapes:
+                if not _sh.has_text_frame or not _sh.text_frame.text.strip():
+                    continue
+                if _sh.top is None or _sh.height is None:
+                    continue
+                if _sh.top < _HEADER_BAND:
+                    header_bottom = max(header_bottom, int(_sh.top + _sh.height))
+            top = max(int(1.0 * 914400), header_bottom + _GAP)
+
+            # Keep the bottom edge where it was, so the chart cannot grow down
+            # into the "Results: 효능" box that sits below it.
+            _bottom_limit = int(1.0 * 914400) + max_h_emu
+            if top + h_emu > _bottom_limit:
+                _avail = max(_bottom_limit - top, int(1.0 * 914400))
+                if h_emu > _avail:
+                    scale_f = _avail / h_emu
+                    h_emu = _avail
+                    w_emu = int(w_emu * scale_f)
+                    left = max(0, int((slide_w - w_emu) / 2))
 
             slide.shapes.add_picture(
                 img_stream, left, top, width=Emu(w_emu), height=Emu(h_emu)
