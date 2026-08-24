@@ -806,3 +806,83 @@ class TestTemplateDetailFields:
             controls.get("negative_display") or controls["negative"]
         )
         assert fields["Cell line:"] == EFFICACY_CONFIG["광노화"]["cell"]
+
+
+class TestEfficacyVerdictRespectsDirection:
+    """The client slide's 효능 有/無 must agree with expected_direction.
+
+    The verdict tested only that a significance marker existed on a test-article
+    row, so a significant move AGAINST the configured mechanism was stamped
+    효능 有: MMP1 is configured "down" for 광노화, and a 4x RISE read as a
+    success. Approved 2026-08-24: require significance AND the right direction,
+    with a third verdict when a significant marker went the wrong way.
+    """
+
+    def _slide_with_results_box(self):
+        from pptx import Presentation
+        from pptx.util import Emu
+
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        # Left/top keep it out of the top-right detail-box branch.
+        box = slide.shapes.add_textbox(Emu(500000), Emu(3000000), Emu(3000000), Emu(500000))
+        box.text_frame.paragraphs[0].add_run().text = "Results: 효능 有"
+        return prs, slide
+
+    def _verdict(self, gene, rows):
+        from importlib import import_module
+        import plotly.graph_objects as go
+
+        spec = import_module("streamlit qpcr analysis v1")
+        prs, slide = self._slide_with_results_box()
+        fig = go.Figure(data=[go.Bar(x=["A"], y=[1])])
+        params = {
+            "Efficacy_Type": "광노화",
+            "Reference_Sample": "Non-treated",
+            "Compare_To": "Non-treated",
+        }
+        with patch.object(go.Figure, "to_image", return_value=MOCK_PNG_BYTES):
+            spec.PPTGenerator._populate_gene_slide(
+                prs, slide, gene, fig, pd.DataFrame(rows), params, {},
+            )
+        for shape in slide.shapes:
+            if shape.has_text_frame and "Results" in shape.text_frame.text:
+                return shape.text_frame.text
+        raise AssertionError("results box not found")
+
+    def test_significant_but_wrong_direction_is_not_efficacy(self):
+        """MMP1 is configured 'down'; a significant 4x RISE is not 효능 有."""
+        text = self._verdict("MMP1", [
+            {"Condition": "Test article", "Fold_Change": 4.0,
+             "p_value": 0.001, "significance": "**"},
+        ])
+        assert "有" not in text, (
+            f"a significant move against expected_direction must not read as "
+            f"efficacy; got {text!r}"
+        )
+        assert "재검토" in text
+
+    def test_significant_in_the_expected_direction_is_efficacy(self):
+        text = self._verdict("MMP1", [
+            {"Condition": "Test article", "Fold_Change": 0.4,
+             "p_value": 0.001, "significance": "**"},
+        ])
+        assert "有" in text
+
+    def test_no_significant_marker_is_no_efficacy(self):
+        text = self._verdict("MMP1", [
+            {"Condition": "Test article", "Fold_Change": 0.4,
+             "p_value": 0.4, "significance": ""},
+        ])
+        assert "無" in text
+
+    def test_unconfigured_marker_does_not_claim_either_way(self):
+        """A gene with no expected_direction entry cannot be judged."""
+        text = self._verdict("NOTAGENE", [
+            {"Condition": "Test article", "Fold_Change": 4.0,
+             "p_value": 0.001, "significance": "**"},
+        ])
+        assert "有" not in text
+        assert "재검토" in text

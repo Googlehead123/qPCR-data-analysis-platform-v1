@@ -12,7 +12,9 @@ mutates results.
 
 from qpcr.auto.screening import screen_data
 from qpcr.auto.stats_advisor import recommend_test
-from qpcr.auto.interpret import interpret_results, interpret_gene
+from qpcr.auto.interpret import (
+    interpret_results, interpret_gene, expected_direction_for,
+)
 from qpcr.auto.miqe import build_miqe_checklist
 
 __all__ = ["screen_data", "recommend_test", "interpret_results", "interpret_gene",

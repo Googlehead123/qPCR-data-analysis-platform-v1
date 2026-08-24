@@ -32,7 +32,10 @@ from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
 from qpcr.analysis import AnalysisEngine as _CoreAnalysisEngine
-from qpcr.auto import screen_data, recommend_test, interpret_results, build_miqe_checklist
+from qpcr.auto import (
+    screen_data, recommend_test, interpret_results, build_miqe_checklist,
+    expected_direction_for,
+)
 
 try:
     from streamlit_sortables import sort_items
@@ -50,6 +53,17 @@ def natural_sort_key(sample_name):
     return [int(part) if part.isascii() and part.isdigit() else part.lower()
             for part in parts]
 
+
+# Third verdict for the PPT gene slide, used when a marker IS significant but
+# moved against its configured expected_direction, or when the direction is not
+# configured for that marker. Neither 有 nor 無 is honest there: a significant
+# change the wrong way is a finding a reviewer must see, not an absence of one.
+#
+# WORDING NOT YET CONFIRMED BY THE OWNER (2026-08-24). The approach was
+# approved; this exact Korean string is a placeholder. It appears on a
+# client-facing slide as "Results: 효능 재검토 필요", so confirm before shipping.
+# Changing it here changes every slide.
+_VERDICT_REVIEW = "재검토 필요"
 
 WORKFLOW_STEPS = [
     ("Upload", "upload"),
@@ -3000,12 +3014,55 @@ class PPTGenerator:
                         _norm = gene_data["Condition"].astype(str).str.strip().str.lower()
                         _skip_norm = {str(s).strip().lower() for s in _skip}
                         _rows = gene_data[~_norm.isin(_skip_norm)]
-                    sig_vals = _rows.get("significance", pd.Series(dtype=object))
-                    has_efficacy = (
-                        bool(sig_vals.astype(str).str.len().gt(0).any())
-                        if len(sig_vals) else False
+
+                    # Significance ALONE is not efficacy. This checked only that
+                    # a marker existed, so a significant move AGAINST the
+                    # configured mechanism was stamped 효능 有 on a client slide:
+                    # a 4x rise in MMP1, which 광노화 expects to fall, read as a
+                    # success. Require the direction to agree.
+                    _expected = expected_direction_for(
+                        gene,
+                        EFFICACY_CONFIG.get(
+                            analysis_params.get("Efficacy_Type", ""), {}
+                        ).get("expected_direction", {}),
                     )
-                result_text = f"Results: 효능 {'有' if has_efficacy else '無'}"
+                    _fc_col = (
+                        "Fold_Change" if "Fold_Change" in _rows.columns
+                        else "Relative_Expression"
+                    )
+                    _sig = _rows.get("significance", pd.Series(dtype=object))
+                    _sig_mask = (
+                        _sig.astype(str).str.len().gt(0) if len(_sig)
+                        else pd.Series(dtype=bool)
+                    )
+                    _n_sig = int(_sig_mask.sum()) if len(_sig_mask) else 0
+
+                    if _n_sig == 0:
+                        _verdict = "無"
+                    elif not _expected or _fc_col not in _rows.columns:
+                        # No configured direction for this marker (or no fold
+                        # change to judge): say so rather than claiming either.
+                        _verdict = _VERDICT_REVIEW
+                    else:
+                        _fc = pd.to_numeric(
+                            _rows.loc[_sig_mask, _fc_col], errors="coerce"
+                        ).dropna()
+                        _agree = (
+                            (_fc > 1.0) if _expected == "up" else (_fc < 1.0)
+                        )
+                        if len(_fc) == 0:
+                            _verdict = _VERDICT_REVIEW
+                        elif bool(_agree.all()):
+                            _verdict = "有"
+                        else:
+                            # At least one significant marker moved the wrong
+                            # way. That is a finding a reviewer must see, not an
+                            # absence of effect, so it is neither 有 nor 無.
+                            _verdict = _VERDICT_REVIEW
+                    has_efficacy = _verdict == "有"
+                else:
+                    _verdict = "無"
+                result_text = f"Results: 효능 {_verdict}"
                 for para in shape.text_frame.paragraphs:
                     runs = list(para.runs)
                     for i, run in enumerate(runs):
