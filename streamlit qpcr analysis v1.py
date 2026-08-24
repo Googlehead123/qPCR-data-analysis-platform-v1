@@ -4154,7 +4154,12 @@ with tab_qc:
                     pass
 
         # Get comprehensive QC stats using helper to get all excluded wells
-        qc_stats = get_qc_summary_stats(data, get_all_excluded_wells())
+        # The dict, not the flattened set: a flat set of well IDs excludes that
+        # plate coordinate for every gene and sample sharing it (see
+        # QualityControl.excluded_mask), which diverged from what DDCt uses.
+        qc_stats = get_qc_summary_stats(
+            data, st.session_state.get("excluded_wells", {})
+        )
 
         # Summary metrics — 2 rows of 3 for better readability
         row1_cols = st.columns(3)
@@ -4617,9 +4622,11 @@ with tab_qc:
                 # calling it. The same "Replicate Statistics" table was therefore
                 # showing n=3 / High CV on screen while the workbook said n=2 /
                 # OK for the very same triplicate.
-                _rs_excl = get_all_excluded_wells()
+                _rs_mask = QualityControl.excluded_mask(
+                    data, st.session_state.get("excluded_wells", {})
+                )
                 rep_stats = get_replicate_stats(
-                    data[~data["Well"].isin(_rs_excl)] if _rs_excl else data
+                    data[~_rs_mask] if _rs_mask.any() else data
                 )
                 if not rep_stats.empty:
                     def highlight_status(row):
@@ -4638,11 +4645,12 @@ with tab_qc:
             st.markdown("### Flagged Wells")
 
             # Use same SD-based flagging logic as the Triplicate Browser
-            _ov_excl_flat = set()
-            if isinstance(st.session_state.excluded_wells, dict):
-                for _ws in st.session_state.excluded_wells.values():
-                    _ov_excl_flat.update(_ws)
-            _ov_active = data[~data["Well"].isin(_ov_excl_flat)] if _ov_excl_flat else data
+            # Dict-aware: flattening to well IDs excluded the coordinate for
+            # every gene sharing it, so this list disagreed with the analysis.
+            _ov_mask = QualityControl.excluded_mask(
+                data, st.session_state.get("excluded_wells", {})
+            )
+            _ov_active = data[~_ov_mask] if _ov_mask.any() else data
 
             _ov_flagged_rows = []
             for (gene_t, sample_t), grp in _ov_active.groupby(["Target", "Sample"]):
@@ -5983,19 +5991,17 @@ with tab5:
             excl = st.session_state.get("excluded_wells", {})
 
             if st.session_state.get("data") is not None:
-                excl_flat = set()
-                if isinstance(excl, dict):
-                    for well_set in excl.values():
-                        excl_flat.update(well_set)
-                elif excl:
-                    excl_flat = set(excl)
-
+                # Dict-aware, matching the QC tab: flattening the per-(gene,
+                # sample) exclusions to bare well IDs dropped that coordinate for
+                # every gene sharing it, so the workbook's QC sheet disagreed
+                # with both the screen and the DDCt the report is built on.
                 qc_data = st.session_state.data.copy()
-                if excl_flat:
-                    qc_data = qc_data[~qc_data["Well"].isin(excl_flat)]
+                _exp_mask = QualityControl.excluded_mask(qc_data, excl)
+                if _exp_mask.any():
+                    qc_data = qc_data[~_exp_mask]
 
                 replicate_stats_df = get_replicate_stats(qc_data)
-                qc_summary = get_qc_summary_stats(st.session_state.data, excl_flat or None)
+                qc_summary = get_qc_summary_stats(st.session_state.data, excl or None)
                 qc_stats = qc_summary if qc_summary else None
 
             return qc_stats, replicate_stats_df, excl

@@ -19,6 +19,41 @@ class QualityControl:
     GRUBBS_ALPHA = 0.05
 
     @staticmethod
+    def excluded_mask(df: pd.DataFrame, excluded_wells) -> pd.Series:
+        """Boolean mask of the rows excluded by ``excluded_wells``.
+
+        Accepts a flat set of well IDs OR the per-(gene, sample) dict the app
+        actually stores. The dict form is what makes this correct: ``Well`` is the
+        raw plate coordinate with no per-file disambiguation, and the app's data
+        frame is a concat of every uploaded file, so "A1" recurs once per plate
+        (and once per target on a multiplex plate). Every QC *display* path used
+        to flatten the dict to a bare set of well IDs, which then excluded that
+        coordinate for EVERY gene and sample sharing it — so the QC screen showed
+        a housekeeping triplicate at n=2 while ΔΔCt used all three wells. Two
+        plates uploaded together is the normal workflow here, so this was live.
+        """
+        if df is None or len(df) == 0:
+            return pd.Series(dtype=bool, index=getattr(df, "index", None))
+        if not excluded_wells:
+            return pd.Series(False, index=df.index)
+        if isinstance(excluded_wells, dict):
+            if not {"Target", "Sample"} <= set(df.columns):
+                flat = set()
+                for wells in excluded_wells.values():
+                    flat |= set(wells or ())
+                return df["Well"].isin(flat)
+            return pd.Series(
+                [
+                    well in excluded_wells.get((target, sample), ())
+                    for target, sample, well in zip(
+                        df["Target"], df["Sample"], df["Well"]
+                    )
+                ],
+                index=df.index,
+            )
+        return df["Well"].isin(excluded_wells)
+
+    @staticmethod
     def get_triplicate_data(
         data: pd.DataFrame, excluded_wells: set = None
     ) -> pd.DataFrame:
@@ -32,7 +67,7 @@ class QualityControl:
         excluded_wells = excluded_wells or set()
 
         df = data[["Well", "Sample", "Target", "CT"]].copy()
-        df["Excluded"] = df["Well"].isin(excluded_wells)
+        df["Excluded"] = QualityControl.excluded_mask(df, excluded_wells)
 
         group_stats = (
             df[~df["Excluded"]]
@@ -191,10 +226,11 @@ class QualityControl:
             return {}
 
         excluded_wells = excluded_wells or set()
-        active_data = data[~data["Well"].isin(excluded_wells)]
+        _excl_mask = QualityControl.excluded_mask(data, excluded_wells)
+        active_data = data[~_excl_mask]
 
         total_wells = len(data)
-        excluded_count = len(data[data["Well"].isin(excluded_wells)])
+        excluded_count = int(_excl_mask.sum())
         active_wells = total_wells - excluded_count
 
         ct_mean = active_data["CT"].mean()
