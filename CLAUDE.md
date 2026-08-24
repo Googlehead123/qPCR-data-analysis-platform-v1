@@ -1,19 +1,27 @@
 # qPCR Data Analysis Platform v1
 
 ## Overview
-Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/dermatology efficacy evaluation. Supports 10 Korean efficacy categories with automated DDCt calculations, quality control, and report generation.
+Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/dermatology efficacy evaluation. Supports 21 Korean efficacy categories with automated DDCt calculations, quality control, and report generation.
 
 ## Tech Stack
 - **Framework:** Streamlit
-- **Language:** Python 3.12
-- **Visualization:** Plotly, Matplotlib, Seaborn
+- **Language:** Python — dev 3.12, Streamlit Cloud 3.13. The Cloud version is set
+  in the deploy dialog's Advanced settings, **not** by a file in the repo.
+  `runtime.txt` was deleted 2026-08-24: it is a Heroku convention, Streamlit
+  reads it nowhere, and it read as authoritative while controlling nothing —
+  which is how the bad numpy pin shipped in August.
+- **Visualization:** Plotly (only). Matplotlib and Seaborn were pinned but
+  imported nowhere; both pins were dropped 2026-08-24, removing 7 packages and
+  ~15 MB from every cold boot. The only mention left is a comment in
+  `qpcr/constants.py` explaining why matplotlib must NOT be used for font
+  detection (it cannot index `.ttc` collections).
 - **Reports:** python-pptx (PowerPoint), kaleido (image export)
 - **Data:** Pandas, NumPy, SciPy
 
 ## How to Run
 ```bash
 streamlit run "streamlit qpcr analysis v1.py"    # http://localhost:8501
-pytest tests/                                      # Run 80+ tests
+pytest tests/                                      # 265 tests
 ```
 
 ## Key Files

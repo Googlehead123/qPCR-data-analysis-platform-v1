@@ -1049,7 +1049,17 @@ def _shared_figure_context(efficacy_config: dict, any_data_points: bool):
         "efficacy": efficacy_config,
         "sample_order": st.session_state.get("sample_order"),
         "sample_mapping": st.session_state.get("sample_mapping", {}),
-        "error_bar_mode": st.session_state.get("error_bar_mode"),
+        # graph_settings, not a bare session_state key: there IS no
+        # st.session_state["error_bar_mode"] — the value lives in
+        # graph_settings["error_bar_mode"]. This entry was therefore always
+        # None and contributed nothing, and was harmless only by accident
+        # (resolve_gene_settings copies the mode into the per-gene dict, which
+        # IS hashed). The docstring above claimed this block covers what
+        # create_gene_graph reads directly, so leaving it would have been a
+        # standing invitation to a stale-chart bug.
+        "error_bar_mode": st.session_state.get("graph_settings", {}).get(
+            "error_bar_mode"
+        ),
         "ref_condition": st.session_state.get("analysis_ref_condition"),
         "cmp_conditions": [
             st.session_state.get("analysis_cmp_condition", ""),

@@ -1,4 +1,2 @@
-libxml2-dev
-libxslt-dev
 chromium
 fonts-noto-cjk
