@@ -3336,6 +3336,8 @@ def export_to_excel(
     replicate_stats: pd.DataFrame = None,
     excluded_wells=None,
     gene_display_names: dict = None,
+    *,
+    graph_settings: dict = None,
 ) -> bytes:
     """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix.
 
@@ -3343,6 +3345,15 @@ def export_to_excel(
     tab). When provided, per-gene sheet names, the FC matrix index, and the chart
     Y-axis title all use the display name so Excel matches what the user sees on
     screen. Raw gene name is preserved as a `Target_Raw` column for traceability.
+
+    `graph_settings` is keyword-only and carries the operator's chart choices —
+    the error-bar mode and the Y-axis bounds. This parameter did not exist, so
+    the native Excel chart could not see either: it always plotted the SD-derived
+    columns and hardcoded the axis minimum to 0. With SEM selected the workbook's
+    bars were ~1.7-1.8x too large and with 95% CI ~2.6-2.8x too small, while the
+    PowerPoint and PNG from the SAME click carried a caption naming the mode the
+    operator actually chose. Two exports of one run disagreed about what the bars
+    meant, and the Excel chart carries no caption of its own to give it away.
     """
     gene_display_names = gene_display_names or {}
     _disp = lambda g: str(gene_display_names.get(g, g))
@@ -3486,7 +3497,8 @@ def export_to_excel(
 
     # Post-process: add gene chart sheets with openpyxl (supports rich text axis titles)
     output = _add_gene_chart_sheets(
-        output, processed_data, params, gene_display_names=gene_display_names
+        output, processed_data, params, gene_display_names=gene_display_names,
+        graph_settings=graph_settings,
     )
 
     return output.getvalue()
@@ -3523,7 +3535,8 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         replicate_stats.to_excel(writer, sheet_name="QC_Report", index=False, startrow=start_row)
 
 
-def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_names=None):
+def _add_gene_chart_sheets(output_buf, processed_data, params,
+                           gene_display_names=None, graph_settings=None):
     """Post-process Excel bytes to add per-gene chart sheets using openpyxl.
 
     Two-phase approach:
@@ -3533,6 +3546,15 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
 
     `gene_display_names` maps raw gene -> display name. The sheet name and the
     Y-axis title both use the display name so they always agree.
+
+    `graph_settings` carries the operator's error-bar mode and Y-axis bounds, so
+    the native chart plots the same spread the screen and the deck do. See
+    export_to_excel's docstring for what went wrong without it.
+
+    Note the all-white bars, the absent significance markers and the 219/-27 bar
+    geometry are a DELIBERATE clone of the lab reference workbook
+    (+qPCR_진정_20260205_1424.xlsx), which writes ten identical white per-point
+    overrides of its own. Do not "fix" those to match the screen.
     """
     from openpyxl import load_workbook
     from openpyxl.chart import BarChart, Reference
@@ -3563,7 +3585,6 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
             continue
 
         display = _disp(gene)
-        display_for_chart_order.append(display)
         sheet_name = _sanitize_sheet_name(display, _used_sheet_names, "_Chart")
         ws = wb.create_sheet(sheet_name)
 
@@ -3580,19 +3601,45 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         p_values_3 = gene_data.get("p_value_3", pd.Series()).tolist() if has_p3 else []
         sig_3 = gene_data.get("significance_3", pd.Series()).tolist() if has_p3 else []
 
-        # Fold-change-domain asymmetric error bounds (Livak). Match the on-screen
-        # Plotly graph instead of plotting Ct-domain SEM symmetrically on the
-        # linear fold-change axis. Fall back to symmetric SEM when unavailable.
-        if "FC_Error_Upper" in gene_data.columns and "FC_Error_Lower" in gene_data.columns:
-            fc_err_upper = gene_data["FC_Error_Upper"].fillna(0).tolist()
-            fc_err_lower = gene_data["FC_Error_Lower"].fillna(0).tolist()
+        # Fold-change-domain asymmetric error bounds, in the mode the OPERATOR
+        # chose. Same precedence ladder as qpcr/graph.py, including its
+        # availability guards, so an older stored frame lacking the transformed
+        # columns still falls back rather than raising.
+        _cols = set(gene_data.columns)
+        _eb_mode = (graph_settings or {}).get("error_bar_mode") or "livak_sd"
+        if _eb_mode == "ci95" and {"FC_CI_Upper", "FC_CI_Lower"} <= _cols:
+            _eu, _el = "FC_CI_Upper", "FC_CI_Lower"
+        elif _eb_mode == "sem" and {"FC_SEM_Upper", "FC_SEM_Lower"} <= _cols:
+            _eu, _el = "FC_SEM_Upper", "FC_SEM_Lower"
+        elif {"FC_Error_Upper", "FC_Error_Lower"} <= _cols:
+            # 'sd' resolves here too: the Livak bars ARE the SD, transformed.
+            _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
         else:
-            fc_err_upper = [s if pd.notna(s) else 0 for s in sems]
+            _eu = _el = None
+
+        if _eu:
+            # None, not 0: an undefined spread (n=1) written as 0 draws a
+            # zero-length bar, the visual signature of the most precise
+            # measurement in the panel. Excel treats an empty custom-error cell
+            # as no bar. The _Analysis sheet already writes blank here, so
+            # filling with 0 made two sheets of one workbook contradict.
+            fc_err_upper = [v if pd.notna(v) else None for v in gene_data[_eu]]
+            fc_err_lower = [v if pd.notna(v) else None for v in gene_data[_el]]
+        else:
+            fc_err_upper = [s if pd.notna(s) else None for s in sems]
             fc_err_lower = list(fc_err_upper)
 
         n_rows = len(conditions)
         if n_rows == 0:
             continue
+
+        # Recorded only once a chart is actually going to exist. This ran BEFORE
+        # the skip above, so a gene that produced no chart still consumed an
+        # entry: n_gene_charts over-counted and the later
+        # zip(gene_chart_files, display_for_chart_order) shifted every display
+        # name onto the wrong chart's Y-axis title. Same failure class the
+        # numeric chart-file sort was added to fix, re-entering by another door.
+        display_for_chart_order.append(display)
 
         hdr_row, data_start = 5, 6
         headers = ["Condition", "Fold_Change", "SEM", "p_value", "significance"]
@@ -3618,7 +3665,9 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
             fc = fold_changes[i]
             ws.cell(row=r, column=4, value=fc if pd.notna(fc) else 0)
             sem = sems[i]
-            ws.cell(row=r, column=5, value=sem if pd.notna(sem) else 0)
+            # None, not 0 — an undefined SEM (n=1) is not a SEM of zero, and the
+            # _Analysis sheet in the same workbook already writes it blank.
+            ws.cell(row=r, column=5, value=sem if pd.notna(sem) else None)
             pv = p_values[i] if i < len(p_values) else None
             ws.cell(row=r, column=6, value=pv if pd.notna(pv) else None)
             sig = significances[i] if i < len(significances) else ""
@@ -3711,7 +3760,27 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         chart.y_axis.delete = False
         chart.y_axis.majorTickMark = "out"
         chart.y_axis.minorTickMark = "none"
-        chart.y_axis.scaling.min = 0
+        # Honour the operator's Y bounds. min was hardcoded to 0 and max never
+        # set, so the axis limits typed in the Graphs tab reached the screen and
+        # the deck but not the workbook. The lab reference workbook sets
+        # max=32 min=0 by hand, so bounds ARE part of how these charts are read.
+        _gs_gene = (graph_settings or {})
+        _y_min = _gs_gene.get("y_min")
+        _y_max = _gs_gene.get("y_max")
+        _y_log = bool(_gs_gene.get("y_log_scale"))
+        if _y_log:
+            # A log axis cannot start at 0, so the hardcoded floor must not
+            # survive into one. openpyxl writes logBase on the scaling object.
+            chart.y_axis.scaling.logBase = 10
+            chart.y_axis.scaling.min = (
+                float(_y_min) if _y_min not in (None, "", 0) else None
+            )
+        else:
+            chart.y_axis.scaling.min = (
+                float(_y_min) if _y_min not in (None, "") else 0
+            )
+        if _y_max not in (None, ""):
+            chart.y_axis.scaling.max = float(_y_max)
         chart.y_axis.majorGridlines = None
         yax_sp_xml = (
             '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
@@ -6292,6 +6361,10 @@ with tab5:
                             analysis_params, st.session_state.sample_mapping,
                             qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
                             gene_display_names=st.session_state.get("gene_display_names", {}),
+                            # The PPT writer already receives these; Excel did
+                            # not, so the workbook silently plotted SD whatever
+                            # the operator selected.
+                            graph_settings=st.session_state.get("graph_settings", {}),
                         ))
                     except Exception as e:
                         st.error(f"Excel generation failed: {e}")
