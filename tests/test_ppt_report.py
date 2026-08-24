@@ -808,6 +808,66 @@ class TestTemplateDetailFields:
         assert fields["Cell line:"] == EFFICACY_CONFIG["광노화"]["cell"]
 
 
+class TestKoreanRunsNameAKoreanFace:
+    """Every Hangul-bearing PPT run must declare an East-Asian face.
+
+    All template runs were Arial, which has zero Hangul coverage, so 진정 효능
+    평가 and Results: 효능 有 rendered by host substitution — visibly a different
+    typeface from the chart image's Korean inside the same slide. python-pptx's
+    font.name writes a:latin only; a:ea is what East-Asian runs read.
+    """
+
+    NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+    def test_set_korean_face_writes_both_latin_and_ea(self, mock_streamlit):
+        from importlib import import_module
+        from pptx import Presentation
+        from pptx.util import Emu
+        from qpcr.constants import KOREAN_FONT_NAME
+
+        spec = import_module("streamlit qpcr analysis v1")
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        box = slide.shapes.add_textbox(Emu(0), Emu(0), Emu(1000000), Emu(500000))
+        run = box.text_frame.paragraphs[0].add_run()
+        run.text = "진정 효능 평가"
+
+        spec._set_korean_face(run)
+
+        assert run.font.name == KOREAN_FONT_NAME
+        rPr = run._r.find(f"{self.NS}rPr")
+        ea = rPr.find(f"{self.NS}ea")
+        assert ea is not None, "a:ea missing — East-Asian runs read that one"
+        assert ea.get("typeface") == KOREAN_FONT_NAME
+
+    def test_deck_sweep_covers_untouched_template_korean(self, mock_streamlit):
+        """The template's own Korean is not written by any writer."""
+        from importlib import import_module
+        from pptx import Presentation
+        from pptx.util import Emu
+        from qpcr.constants import KOREAN_FONT_NAME
+
+        spec = import_module("streamlit qpcr analysis v1")
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        box = slide.shapes.add_textbox(Emu(0), Emu(0), Emu(1000000), Emu(500000))
+        p = box.text_frame.paragraphs[0]
+        kr = p.add_run()
+        kr.text = "효능 평가"
+        en = p.add_run()
+        en.text = "Results only"
+
+        spec._apply_korean_face_to_deck(prs)
+
+        rPr = kr._r.find(f"{self.NS}rPr")
+        ea = rPr.find(f"{self.NS}ea")
+        assert ea is not None and ea.get("typeface") == KOREAN_FONT_NAME
+
+        # A Latin-only run is left alone — no need to name a Korean face on it.
+        en_rPr = en._r.find(f"{self.NS}rPr")
+        assert en_rPr is None or en_rPr.find(f"{self.NS}ea") is None
+
+
 class TestEfficacyVerdictRespectsDirection:
     """The client slide's 효능 有/無 must agree with expected_direction.
 

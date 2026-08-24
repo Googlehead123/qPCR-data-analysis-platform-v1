@@ -16,6 +16,22 @@ DEFAULT_GROUP_COLORS = {
     "Treatment": "#FFFFFF",
 }
 
+# The Korean face for PowerPoint and Excel output. Matches the lab reference
+# workbook +qPCR_진정_20260205_1424.xlsx, whose default font is 맑은 고딕
+# (family 2, charset 129) — decision (Min, 2026-08-24), item 8a. "Malgun Gothic"
+# is the same face under its Latin name, which is what OOXML wants.
+#
+# Every PPT text run was Arial, which has ZERO Hangul coverage, so 진정 효능 평가
+# and Results: 효능 有 rendered by host substitution — visibly a different
+# typeface from the chart's Korean inside the same slide. The Excel workbook
+# defaulted to Calibri, same problem.
+#
+# Note this face is absent on Linux and Streamlit Cloud, so a deck generated
+# there still falls back — but packages.txt installs fonts-noto-cjk, so it falls
+# back to Noto Sans CJK KR and Korean renders either way. The reference match
+# holds where it matters, which is Windows PowerPoint.
+KOREAN_FONT_NAME = "Malgun Gothic"
+
 GRAPH_PRESETS = {
     "Classic": {"color": "#D3D3D3", "ref": "#FFFFFF"},
     "Steel": {"color": "#4A7A9F", "ref": "#FFFFFF"},

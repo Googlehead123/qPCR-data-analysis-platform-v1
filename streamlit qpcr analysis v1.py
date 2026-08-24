@@ -26,7 +26,7 @@ from typing import Dict, Tuple
 
 from qpcr.constants import (
     GRAPH_PRESETS, GRAPH_PRESET_CHOICES, DEFAULT_GRAPH_PRESET,
-    FIGURE_SIZE_PRESETS, EFFICACY_CONFIG,
+    FIGURE_SIZE_PRESETS, EFFICACY_CONFIG, KOREAN_FONT_NAME,
     PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
@@ -71,6 +71,59 @@ except ImportError:
 # client-facing slide as "Results: 효능 재검토 필요", so confirm before shipping.
 # Changing it here changes every slide.
 _VERDICT_REVIEW = "재검토 필요"
+
+
+def _set_korean_face(run) -> None:
+    """Name the Korean face on a PPT run that carries Hangul.
+
+    The template's runs are Arial, which has zero Hangul coverage, so every
+    Korean string this code writes — 진정 효능 평가, Results: 효능 有, the title
+    slide's efficacy name — rendered by host substitution and visibly differed
+    from the chart image's Korean inside the same slide.
+
+    Sets BOTH the run font and the OOXML a:ea attribute: python-pptx's
+    ``font.name`` writes a:latin only, and a:ea is what East-Asian runs read.
+    Best-effort — a font that cannot be named is not worth losing a deck over.
+    """
+    try:
+        run.font.name = KOREAN_FONT_NAME
+        rPr = run._r.get_or_add_rPr()
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        ea = rPr.find(f"{ns}ea")
+        if ea is None:
+            ea = rPr.makeelement(f"{ns}ea", {})
+            rPr.append(ea)
+        ea.set("typeface", KOREAN_FONT_NAME)
+    except Exception as _face_err:  # noqa: BLE001
+        logging.warning("Korean font not applied to a slide run: %s", _face_err)
+
+
+_HANGUL_RE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
+
+
+def _apply_korean_face_to_deck(prs) -> None:
+    """Name the Korean face on every Hangul-bearing run that lacks one.
+
+    Catches the template's OWN Korean text, which no writer touches. Runs that
+    already declare an East-Asian face are left alone, so a template that has
+    been set up properly is not overridden.
+    """
+    ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                for run in para.runs:
+                    if not _HANGUL_RE.search(run.text or ""):
+                        continue
+                    try:
+                        rPr = run._r.find(f"{ns}rPr")
+                        if rPr is not None and rPr.find(f"{ns}ea") is not None:
+                            continue  # already declares an East-Asian face
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _set_korean_face(run)
 
 WORKFLOW_STEPS = [
     ("Upload", "upload"),
@@ -2721,7 +2774,7 @@ class PPTGenerator:
         p.text = "유전자 발현 분석 (Gene Expression Analysis)"
         p.font.size = Pt(40)
         p.font.bold = True
-        p.font.name = "Malgun Gothic"
+        p.font.name = KOREAN_FONT_NAME
         p.alignment = PP_ALIGN.CENTER
 
         # Subtitle (Efficacy Type)
@@ -2733,7 +2786,7 @@ class PPTGenerator:
         efficacy = analysis_params.get("Efficacy_Type", "Analysis")
         p.text = f"{efficacy} Efficacy Test"
         p.font.size = Pt(28)
-        p.font.name = "Malgun Gothic"
+        p.font.name = KOREAN_FONT_NAME
         p.alignment = PP_ALIGN.CENTER
 
         # Date and Info
@@ -2745,7 +2798,7 @@ class PPTGenerator:
         date = analysis_params.get("Date", "")
         p.text = f"Date: {date}"
         p.font.size = Pt(18)
-        p.font.name = "Arial"
+        p.font.name = KOREAN_FONT_NAME
         p.alignment = PP_ALIGN.CENTER
 
         # Logo Placeholder (Bottom Right)
@@ -2785,7 +2838,7 @@ class PPTGenerator:
         p.text = f"{display_name} Expression"
         p.font.size = Pt(32)
         p.font.bold = True
-        p.font.name = "Malgun Gothic"
+        p.font.name = KOREAN_FONT_NAME
 
         # Navy Blue Line
         line = slide.shapes.add_shape(
@@ -3020,6 +3073,7 @@ class PPTGenerator:
                     for run in para.runs:
                         if "효능" in run.text:
                             run.text = run.text.replace("효능 평가", f"{display_name} 효능 평가")
+                            _set_korean_face(run)
                             break
                     break
 
@@ -3113,6 +3167,7 @@ class PPTGenerator:
                     for i, run in enumerate(runs):
                         if i == 0:
                             run.text = result_text
+                            _set_korean_face(run)
                         else:
                             run.text = ""
                     break
@@ -3320,6 +3375,7 @@ class PPTGenerator:
                         for run in para.runs:
                             if "소재" in run.text:
                                 run.text = run.text.replace("소재", efficacy)
+                                _set_korean_face(run)
 
             # Step 2: Copy gene template (index 2) BEFORE deleting to avoid
             # ZIP part-name conflicts (delete frees a name that add_slide reuses)
@@ -3358,6 +3414,14 @@ class PPTGenerator:
                     prs, gene, fig, gene_data, analysis_params, graph_settings=gs,
                     display_name=gene_display_names.get(gene, gene),
                 )
+
+        # Final sweep: name the Korean face on every Hangul-bearing run in the
+        # deck. The writers above cover the runs they author, but the template
+        # carries Korean of its own (the title slide's "효능 평가") which no code
+        # path touches, so it would still render by host substitution. Only runs
+        # with no East-Asian face yet are altered, so a template run that
+        # already declares one keeps it.
+        _apply_korean_face_to_deck(prs)
 
         output = io.BytesIO()
         prs.save(output)
@@ -3429,6 +3493,16 @@ def export_to_excel(
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        # Workbook default font. The generated workbook defaulted to Calibri,
+        # which has no Hangul, so 대조군 / 시료 1 처리 (10 ppm) in Sample_Mapping,
+        # every *_Analysis sheet, FC_Matrix and the *_Chart sheets all rendered
+        # by host substitution. The lab reference workbook's default is 맑은 고딕
+        # (family 2, charset 129) — this matches it.
+        try:
+            writer.book.formats[0].set_font_name(KOREAN_FONT_NAME)
+        except Exception as _font_err:  # noqa: BLE001
+            logging.warning("Workbook default font not set: %s", _font_err)
+
         # Parameters sheet
         pd.DataFrame([params]).to_excel(
             writer, sheet_name="Analysis_Parameters", index=False
@@ -4106,6 +4180,10 @@ def _build_axis_txpr(C, A):
     etree.SubElement(sc, f"{{{A}}}lumOff").set("val", "35000")
     lat = etree.SubElement(dRPr, f"{{{A}}}latin")
     lat.set("typeface", "Arial")
+    # a:ea is the attribute East-Asian runs actually read; without it Hangul
+    # axis text fell back no matter what latin/cs said.
+    ea = etree.SubElement(dRPr, f"{{{A}}}ea")
+    ea.set("typeface", KOREAN_FONT_NAME)
     cs = etree.SubElement(dRPr, f"{{{A}}}cs")
     cs.set("typeface", "Arial")
     return txpr
@@ -4141,6 +4219,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
     sc1.set("lastClr", "000000")
     lat1 = etree.SubElement(rPr1, f"{{{A}}}latin")
     lat1.set("typeface", "Arial")
+    ea1 = etree.SubElement(rPr1, f"{{{A}}}ea")
+    ea1.set("typeface", KOREAN_FONT_NAME)
     cs1 = etree.SubElement(rPr1, f"{{{A}}}cs")
     cs1.set("typeface", "Arial")
     t1 = etree.SubElement(r1, f"{{{A}}}t")
@@ -4161,6 +4241,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
     etree.SubElement(sf2, f"{{{A}}}srgbClr").set("val", "FF0000")
     lat2 = etree.SubElement(rPr2, f"{{{A}}}latin")
     lat2.set("typeface", "Arial")
+    ea2 = etree.SubElement(rPr2, f"{{{A}}}ea")
+    ea2.set("typeface", KOREAN_FONT_NAME)
     cs2 = etree.SubElement(rPr2, f"{{{A}}}cs")
     cs2.set("typeface", "Arial")
     t2 = etree.SubElement(r2, f"{{{A}}}t")
@@ -4178,6 +4260,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
     sc3.set("lastClr", "000000")
     lat3 = etree.SubElement(rPr3, f"{{{A}}}latin")
     lat3.set("typeface", "Arial")
+    ea3 = etree.SubElement(rPr3, f"{{{A}}}ea")
+    ea3.set("typeface", KOREAN_FONT_NAME)
     cs3 = etree.SubElement(rPr3, f"{{{A}}}cs")
     cs3.set("typeface", "Arial")
     t3 = etree.SubElement(r3, f"{{{A}}}t")
