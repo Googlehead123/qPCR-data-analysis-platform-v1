@@ -287,7 +287,14 @@ class GraphGenerator:
         if ref_line_value is not None and pd.notna(ref_line_value):
             y_max_auto = max(y_max_auto, ref_line_value * 1.20)
 
-        fixed_symbol_spacing = y_max_auto * 0.05
+        # Stacked significance symbols are POSITIONED LATER, once plot_h_px is
+        # known (see "emit the deferred significance symbols" below). The step
+        # used to be y_max_auto * 0.05, a fraction of the DATA range, which at
+        # the default 28x16cm geometry is ~13.5 px — smaller than the 16 px
+        # asterisk it has to clear, so a dagger's stem was drawn straight
+        # through the middle asterisk of a "***" and corrupted it. A glyph must
+        # be cleared in PIXELS, so the step has to come from the font sizes.
+        pending_sig = []
 
         if show_sig_global:
             # Direct mode: add significance symbols above each bar
@@ -335,19 +342,10 @@ class GraphGenerator:
                         symbols_to_show.append(sig_3)
                         font_sizes.append(dagger_font_size)
 
-                    # Stack symbols with fixed absolute spacing
-                    for si, (sym, fs) in enumerate(zip(symbols_to_show, font_sizes)):
-                        y_pos = base_y_position + (fixed_symbol_spacing * 0.2) + (si * fixed_symbol_spacing)
-                        fig.add_annotation(
-                            x=idx,
-                            y=y_pos,
-                            text=sym,
-                            showarrow=False,
-                            font=dict(size=fs, color="black", family=PLOTLY_FONT_FAMILY),
-                            xref="x",
-                            yref="y",
-                            xanchor="center",
-                            yanchor="bottom",
+                    if symbols_to_show:
+                        pending_sig.append(
+                            (idx, base_y_position,
+                             list(zip(symbols_to_show, font_sizes)))
                         )
 
         gene_label = display_gene_name if display_gene_name else gene
@@ -481,6 +479,44 @@ class GraphGenerator:
         b_margin_px = gene_margins.get("b", 200)
         t_margin_px = gene_margins.get("t", 60)
         plot_h_px = max(fig_h_px - b_margin_px - legend_extra_px - t_margin_px, 100)
+
+        # Emit the deferred significance symbols. The step between stacked
+        # symbols is derived from the FONT SIZES in px and converted to data
+        # units through the plot height, so each glyph clears the one below it
+        # whatever the figure geometry or the data range. 1.25x the larger of the
+        # two adjacent sizes gives a normal line's worth of leading.
+        if pending_sig:
+            _data_per_px = (y_max_auto / plot_h_px) if plot_h_px else 0.0
+            _stack_top = 0.0
+            for _idx, _base_y, _syms in pending_sig:
+                _y = _base_y + max(_syms[0][1], 8) * 0.35 * _data_per_px
+                _prev_fs = None
+                for _sym, _fs in _syms:
+                    if _prev_fs is not None:
+                        _y += max(_prev_fs, _fs) * 1.25 * _data_per_px
+                    fig.add_annotation(
+                        x=_idx,
+                        y=_y,
+                        text=_sym,
+                        showarrow=False,
+                        font=dict(size=_fs, color="black",
+                                  family=PLOTLY_FONT_FAMILY),
+                        xref="x",
+                        yref="y",
+                        xanchor="center",
+                        yanchor="bottom",
+                    )
+                    _prev_fs = _fs
+                # The glyph itself occupies height above its anchor.
+                _stack_top = max(_stack_top, _y + _fs * 1.2 * _data_per_px)
+
+            # Give the stack room. Without this a taller stack is clipped by the
+            # axis range, which was computed before the symbols were placed.
+            # Only when the operator has not pinned the bounds themselves.
+            if (settings.get("y_min") is None and settings.get("y_max") is None
+                    and not is_log and _stack_top > y_max_auto):
+                y_max_auto = _stack_top
+                y_axis_config["range"] = [0, y_max_auto]
 
         fig.update_layout(
             title="",

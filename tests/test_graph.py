@@ -202,6 +202,97 @@ class TestGraphGeneratorBugFixes:
         assert fig.layout is not None
 
 
+class TestStackedSignificanceSpacing:
+    """Stacked significance symbols must clear each other in PIXELS.
+
+    The step was y_max_auto * 0.05 — a fraction of the DATA range, which at the
+    default 28x16cm geometry is ~13.5px, smaller than the 16px asterisk it has
+    to clear. A dagger's stem was drawn straight through the middle asterisk of
+    a "***" and corrupted it on client-facing charts.
+    """
+
+    SIG_CHARS = set("*#†")
+
+    def _fig(self, **overrides):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+
+        data = pd.DataFrame({
+            "Target": ["KI67"] * 3,
+            "Condition": ["Non-treated", "EGF 25 ng/ml", "Test article"],
+            "Relative_Expression": [1.0, 0.52, 0.46],
+            "Fold_Change": [1.0, 0.52, 0.46],
+            "FC_Error_Upper": [0.25, 0.04, 0.01],
+            "FC_Error_Lower": [0.25, 0.04, 0.01],
+            "n_replicates": [3, 3, 3],
+            "significance": ["", "***", "***"],
+            "significance_2": ["", "##", "#"],
+            "significance_3": ["", "†", "††"],
+        })
+        settings = {"show_error": True, "show_significance": True,
+                    "figure_height": 16, "figure_width": 28}
+        settings.update(overrides)
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67", settings=settings, sample_order=None
+        )
+
+    def _stacks(self, fig):
+        from qpcr.constants import CM_TO_PX
+        m = fig.layout.margin
+        plot_h = int(16 * CM_TO_PX) - (m.b or 0) - (m.t or 0)
+        lo, hi = fig.layout.yaxis.range
+        per_px = (hi - lo) / plot_h
+        by_x = {}
+        for a in fig.layout.annotations:
+            if a.text and set(a.text) <= self.SIG_CHARS and a.yref == "y":
+                by_x.setdefault(a.x, []).append((a.y, a.font.size, a.text))
+        for items in by_x.values():
+            items.sort()
+        return by_x, per_px, hi
+
+    def test_stacked_symbols_do_not_overlap(self, mock_streamlit):
+        fig = self._fig()
+        by_x, per_px, _ = self._stacks(fig)
+        assert by_x, "expected stacked significance symbols on this fixture"
+        for x, items in by_x.items():
+            for i in range(1, len(items)):
+                y, fs, txt = items[i]
+                prev_y, prev_fs, prev_txt = items[i - 1]
+                gap_px = (y - prev_y) / per_px
+                assert gap_px >= max(prev_fs, fs), (
+                    f"bar {x}: {prev_txt!r} -> {txt!r} step is {gap_px:.1f}px "
+                    f"but must clear a {max(prev_fs, fs)}px glyph"
+                )
+
+    def test_stack_is_not_clipped_by_the_axis(self, mock_streamlit):
+        """Widening the step must also widen the range that has to contain it."""
+        fig = self._fig()
+        by_x, per_px, y_hi = self._stacks(fig)
+        for x, items in by_x.items():
+            top_y, top_fs, _ = items[-1]
+            assert top_y + top_fs * 1.2 * per_px <= y_hi + 1e-9, (
+                f"bar {x}: the top symbol runs past the axis maximum {y_hi}"
+            )
+
+    def test_a_short_figure_still_clears_the_glyphs(self, mock_streamlit):
+        """The step is geometry-dependent, so check a much shorter figure too."""
+        fig = self._fig(figure_height=8)
+        from qpcr.constants import CM_TO_PX
+        m = fig.layout.margin
+        plot_h = max(int(8 * CM_TO_PX) - (m.b or 0) - (m.t or 0), 100)
+        lo, hi = fig.layout.yaxis.range
+        per_px = (hi - lo) / plot_h
+        by_x = {}
+        for a in fig.layout.annotations:
+            if a.text and set(a.text) <= self.SIG_CHARS and a.yref == "y":
+                by_x.setdefault(a.x, []).append((a.y, a.font.size, a.text))
+        for items in by_x.values():
+            items.sort()
+            for i in range(1, len(items)):
+                gap_px = (items[i][0] - items[i - 1][0]) / per_px
+                assert gap_px >= max(items[i - 1][1], items[i][1])
+
+
 class TestGraphGeneratorWrapText:
     def test_wrap_text_short_string(self, mock_streamlit):
         from importlib import import_module
