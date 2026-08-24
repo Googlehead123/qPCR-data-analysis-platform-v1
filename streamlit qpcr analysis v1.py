@@ -3384,6 +3384,7 @@ def export_to_excel(
     gene_display_names: dict = None,
     *,
     graph_settings: dict = None,
+    provenance: dict = None,
 ) -> bytes:
     """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix.
 
@@ -3534,12 +3535,44 @@ def export_to_excel(
                     )
                     if not replicate_fc.empty:
                         replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)
+                    else:
+                        # Both branches used to be silent — the empty case said
+                        # nothing at all and the exception went only to
+                        # logging.warning, so the operator got a workbook with
+                        # no Replicate_FC sheet and no way to know why.
+                        st.warning(
+                            "The workbook has no Replicate_FC sheet: no "
+                            "per-replicate fold changes could be computed for "
+                            f"reference '{ref_sample}'."
+                        )
                 except Exception as e:
-                    import logging
                     logging.warning(f"Replicate_FC sheet skipped: {e}")
+                    st.warning(
+                        f"The workbook has no Replicate_FC sheet: {e}"
+                    )
 
         # QC Report sheet
         _write_qc_report_sheet(writer, qc_stats, replicate_stats)
+
+        # Provenance + MIQE checklist. The Analysis tab told the operator this
+        # record "is downloadable on the Export tab" and it was not: no sheet,
+        # no slide, no button, and build_miqe_checklist was imported and never
+        # called anywhere. That record is the honesty mechanism for the two
+        # settled statistical choices (uncorrected markers, technical-well n),
+        # so a report that omits it cannot be checked against them.
+        if provenance:
+            _prov_lines = format_provenance_text(provenance).splitlines()
+            try:
+                _prov_lines += ["", "MIQE CHECKLIST", ""]
+                _prov_lines += [
+                    _ln.lstrip("- ").replace("**", "")
+                    for _ln in build_miqe_checklist(provenance).splitlines()
+                ]
+            except Exception as _miqe_err:  # noqa: BLE001
+                logging.warning("MIQE checklist omitted: %s", _miqe_err)
+            pd.DataFrame({"qPCR Analysis Provenance": _prov_lines}).to_excel(
+                writer, sheet_name="Provenance", index=False
+            )
 
     # Post-process: add gene chart sheets with openpyxl (supports rich text axis titles)
     output = _add_gene_chart_sheets(
@@ -4422,7 +4455,15 @@ with tab1:
             )
 
         if not warnings_found:
-            st.success("Data validation passed. No issues detected.")
+            # Guarded on non-empty: an empty plate trips none of the checks
+            # above, so it used to be congratulated with "validation passed".
+            if data is None or data.empty:
+                st.info(
+                    "No wells to validate — the uploaded file produced no "
+                    "usable rows."
+                )
+            else:
+                st.success("Data validation passed. No issues detected.")
 
 # ==================== TAB QC: QUALITY CONTROL ====================
 with tab_qc:
@@ -6105,8 +6146,9 @@ with tab3:
         with st.expander("🔬 Analysis Provenance (reproducibility record)", expanded=False):
             st.code(format_provenance_text(_current_provenance()), language=None)
             st.caption(
-                "This record — method, reference gene/condition, comparisons, test, "
-                "and every excluded well — is downloadable on the Export tab."
+                "This record — method, reference gene/condition, comparisons, "
+                "test, and every excluded well — ships as the **Provenance** "
+                "sheet of the Excel report, together with the MIQE checklist."
             )
 
         # Show results per gene
@@ -6505,6 +6547,7 @@ with tab5:
                             # not, so the workbook silently plotted SD whatever
                             # the operator selected.
                             graph_settings=st.session_state.get("graph_settings", {}),
+                            provenance=_current_provenance(),
                         ))
                     except Exception as e:
                         st.error(f"Excel generation failed: {e}")
@@ -6602,15 +6645,27 @@ with tab5:
                 _cfmt = cached["fmt"]
                 _cmime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[_cfmt]
                 today = datetime.now().strftime("%Y%m%d")
+                # Display name, not the raw target: Excel and PPT honour the
+                # rename and only the images did not. Sanitised because a target
+                # containing "/" became a directory inside the zip.
+                #
+                # Built with a uniqueness counter rather than a dict
+                # comprehension keyed on the stem: two genes renamed to the same
+                # display name collapsed to ONE entry and a gene vanished from
+                # the download silently, while its own per-gene button still
+                # worked. _sanitize_sheet_name already takes a used-names set for
+                # exactly this reason on the Excel side.
+                _zip_entries = {}
+                _used_stems: dict = {}
+                for _g, _b in cached["images"].items():
+                    _stem = _safe_image_stem(_g)
+                    _n = _used_stems.get(_stem, 0) + 1
+                    _used_stems[_stem] = _n
+                    _name = _stem if _n == 1 else f"{_stem}_{_n}"
+                    _zip_entries[f"{_name}.{_cfmt}"] = _b
                 st.download_button(
-                    f"⬇️ Download All Images (.zip, {len(cached['images'])})",
-                    # Display name, not the raw target: Excel and PPT honour the
-                    # rename and only the images did not. Sanitised because a
-                    # target containing "/" became a directory inside the zip.
-                    data=build_zip({
-                        f"{_safe_image_stem(g)}.{_cfmt}": b
-                        for g, b in cached["images"].items()
-                    }),
+                    f"⬇️ Download All Images (.zip, {len(_zip_entries)})",
+                    data=build_zip(_zip_entries),
                     file_name=f"qPCR_images_{efficacy}_{today}.zip",
                     mime="application/zip", width='stretch', key="dl_images_zip",
                 )
