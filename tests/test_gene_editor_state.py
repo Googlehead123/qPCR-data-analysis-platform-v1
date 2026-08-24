@@ -137,7 +137,7 @@ out["color_after_other_interaction"] = {
 # --- Reset this gene must restore defaults
 at = app()
 at.slider(key="fig_w_%%s" %% G).set_value(19.5).run()
-at.selectbox(key="preset_%%s" %% G).select("Coral").run()
+at.selectbox(key="preset_%%s" %% G).select("Warm Neutral").run()
 at.slider(key="gf_%%s" %% G).set_value(22).run()
 g = gs(at)
 out["before_reset"] = {"width": g.get("%%s_figure_width" %% G),
@@ -217,13 +217,19 @@ def test_custom_bar_color_survives_the_next_interaction(results):
 def test_reset_this_gene_restores_defaults(results):
     """Reset used to pop graph_settings only; the keyed widgets kept their values
     and repopulated it on the next run, making the button a no-op."""
+    from qpcr.constants import DEFAULT_GRAPH_PRESET
+
     before = results["before_reset"]
-    assert before["preset"] == "Coral" and before["font"] == 22, before
+    # Any offered non-default preset serves the purpose; "Coral" is no longer
+    # offered since the list was cut to the house palettes plus one neutral.
+    assert before["preset"] == "Warm Neutral" and before["font"] == 22, before
     after = results["after_reset"]
     assert after["exceptions"] == []
     assert (after["width"], after["height"]) == (28.0, 16.0), after
-    assert after["preset"] == "Classic", after
-    assert after["widget_preset"] == "Classic", after
+    # Steel, not Classic: Classic was the default while being the preset with
+    # the SMALLEST control-vs-treated separation of the eight (dE 15.4 vs 56.7).
+    assert after["preset"] == DEFAULT_GRAPH_PRESET, after
+    assert after["widget_preset"] == DEFAULT_GRAPH_PRESET, after
     assert after["font"] in (None, 14), after
     assert after["slider_w"] == 28.0, after
 

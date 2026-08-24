@@ -28,6 +28,26 @@ GRAPH_PRESETS = {
     "Colorblind-Safe": {"color": "#0072B2", "ref": "#FFFFFF"},
 }
 
+# What the Graphs tab OFFERS. The dict above keeps every preset so a stored
+# per-gene choice still resolves — dropping an entry would make Streamlit reset
+# that widget to options[0] and silently repaint a gene (see the reference
+# selectbox fix). The offered set is the two house palettes plus one neutral.
+#
+# Steel leads, and is the default. "Classic" was the default while being the
+# WORST preset for the job it has to do: #D3D3D3 at 0.85 opacity composites to
+# #dadada, 1.40:1 against the paper, and its white reference bar sits at dE 15.4
+# from the treated bars — the smallest control-vs-treated separation of all
+# eight (Steel is 56.7). The default was the one where the control bar is
+# hardest to pick out.
+#
+# Colour is not a data channel here: every preset is a single tone plus a white
+# reference bar, so all of them are colourblind-safe by construction and the
+# "Colorblind-Safe" name implied the others were not. It stays resolvable but
+# is no longer offered.
+GRAPH_PRESET_CHOICES = ("Steel", "Warm Neutral", "Classic")
+
+DEFAULT_GRAPH_PRESET = "Steel"
+
 FIGURE_SIZE_PRESETS = {
     "PPT Full": {"width": 28, "height": 16},
     "PPT Half": {"width": 14, "height": 10},

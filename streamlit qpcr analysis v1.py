@@ -25,7 +25,8 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from qpcr.constants import (
-    GRAPH_PRESETS, FIGURE_SIZE_PRESETS, EFFICACY_CONFIG,
+    GRAPH_PRESETS, GRAPH_PRESET_CHOICES, DEFAULT_GRAPH_PRESET,
+    FIGURE_SIZE_PRESETS, EFFICACY_CONFIG,
     PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
@@ -701,7 +702,7 @@ _GENE_SETTING_SUFFIXES = (
 # them would shadow that global and make it dead state.
 _GENE_STYLE_DEFAULTS = {
     "show_sig": True, "show_err": True, "bar_gap": 0.45,
-    "color_preset": "Classic", "show_data_points": False,
+    "color_preset": DEFAULT_GRAPH_PRESET, "show_data_points": False,
     "label_mode": "Auto-wrap",
 }
 
@@ -944,7 +945,8 @@ def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
         display_gene_name=st.session_state.gene_display_names.get(gene, gene),
         ref_line_value=ref_val, ref_line_label=ref_lbl,
         show_data_points=show_dp, replicate_data=replicate_df,
-        color_preset=st.session_state.graph_settings.get(f"{gene}_color_preset", "Classic"),
+        color_preset=st.session_state.graph_settings.get(
+            f"{gene}_color_preset", DEFAULT_GRAPH_PRESET),
         ref_condition=st.session_state.get("analysis_ref_condition"),
     )
 
@@ -1108,7 +1110,7 @@ def _gene_figure_signature(gene, gene_data, shared, other_genes) -> str | None:
         "display_name": st.session_state.gene_display_names.get(gene, gene),
         "ref_line": gs.get(f"{gene}_ref_line", "None"),
         "show_data_points": bool(gs.get(f"{gene}_show_data_points", False)),
-        "color_preset": gs.get(f"{gene}_color_preset", "Classic"),
+        "color_preset": gs.get(f"{gene}_color_preset", DEFAULT_GRAPH_PRESET),
         "shared": shared,
     })
 
@@ -1266,7 +1268,7 @@ def _render_per_bar_table(current_gene, gene_data):
             f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
             unsafe_allow_html=True,
         )
-        _active_pn = gs.get(f"{current_gene}_color_preset", "Classic")
+        _active_pn = gs.get(f"{current_gene}_color_preset", DEFAULT_GRAPH_PRESET)
         _cp_key = f"cp_{current_gene}_{condition}"
         _desired_key = f"_desired_{_cp_key}"
         if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
@@ -1389,14 +1391,23 @@ def render_gene_editor(current_gene):
     with t_style:
         c1, c2, c3 = st.columns(3)
         with c1:
-            preset_names = list(GRAPH_PRESETS.keys()) + ["Custom"]
+            # Offer the curated set, but never drop the preset this gene is
+            # ALREADY on: an option list that omits the stored value makes
+            # Streamlit reset the widget to options[0] and repaint the gene
+            # silently. Legacy presets stay selectable while selected.
+            _current_preset = gs.get(f"{current_gene}_color_preset")
+            preset_names = list(GRAPH_PRESET_CHOICES)
+            if _current_preset not in preset_names + ["Custom", None]:
+                preset_names.append(_current_preset)
+            preset_names.append("Custom")
             # Settings-backed: picking a colour by hand in the Colors tab sets the
             # preset to "Custom", and this has to show that instead of snapping the
             # bars back to the old preset on the next interaction.
             _settings_backed_selectbox(
                 "Color preset", preset_names,
                 settings_key=f"{current_gene}_color_preset",
-                widget_key=f"preset_{current_gene}", default="Classic")
+                widget_key=f"preset_{current_gene}",
+                default=DEFAULT_GRAPH_PRESET)
             gs[f"{current_gene}_bar_opacity"] = st.slider(
                 "Bar opacity", 0.3, 1.0,
                 value=float(gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.85))),
