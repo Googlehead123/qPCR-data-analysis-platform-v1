@@ -151,9 +151,16 @@ class GraphGenerator:
 
         fig = go.Figure()
 
-        # Error bars — selectable mode; default is Livak fold-change-domain +/-SD.
-        # Modes: 'livak_sd' (FC_Error), 'ci95' (FC_CI), 'sem', 'sd' (Ct domain).
-        # error_caption documents which is shown (reviewers require this to be stated).
+        # Error bars — selectable mode. Every mode plots in the FOLD-CHANGE
+        # domain, because that is the axis: the 'sem' and 'sd' modes used to put
+        # the raw Ct-domain SEM/SD onto a fold-change bar, which is dimensionally
+        # meaningless and inverts the comparison (a bar at FC 4.59 was given its
+        # Ct SEM of 0.23 while its true fold-domain interval is 0.79, so the tall
+        # bar drew a TIGHTER whisker than a short one).
+        # error_caption documents which is shown (reviewers require this to be
+        # stated) and now also states that the spread is of the target
+        # replicates only — the housekeeping SD is deliberately not propagated,
+        # so calling it plain "Livak" overstated it.
         cols = set(gene_data_indexed.columns)
         error_bar_mode = (settings.get("error_bar_mode")
                           or st.session_state.get("error_bar_mode")
@@ -161,19 +168,19 @@ class GraphGenerator:
         if error_bar_mode == "ci95" and {"FC_CI_Upper", "FC_CI_Lower"} <= cols:
             _eu, _el = "FC_CI_Upper", "FC_CI_Lower"
             error_caption = "Error bars: 95% CI (fold-change domain, target replicates)"
-        elif error_bar_mode == "sem" and "SEM" in cols:
-            _eu = _el = "SEM"
-            error_caption = "Error bars: ±SEM (Ct domain)"
-        elif error_bar_mode == "sd" and "SD" in cols:
-            _eu = _el = "SD"
-            error_caption = "Error bars: ±SD (Ct domain)"
+        elif error_bar_mode == "sem" and {"FC_SEM_Upper", "FC_SEM_Lower"} <= cols:
+            _eu, _el = "FC_SEM_Upper", "FC_SEM_Lower"
+            error_caption = "Error bars: ±SEM of target replicates (fold-change domain)"
         elif {"FC_Error_Upper", "FC_Error_Lower"} <= cols:
+            # 'sd' resolves here too: the Livak bars ARE the SD, transformed.
             _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
-            error_caption = "Error bars: ±SD (Livak fold-change domain)"
+            error_caption = "Error bars: ±SD of target replicates (fold-change domain)"
         else:
+            # Last resort for a frame without the transformed columns (e.g. an
+            # older stored result). State the domain honestly.
             _col = "SD" if error_bar_mode == "sd" else "SEM"
             _eu = _el = _col if _col in cols else "SEM"
-            error_caption = f"Error bars: ±{_eu} (Ct domain)"
+            error_caption = f"Error bars: ±{_eu} (Ct domain — not fold-change scaled)"
         error_upper_array = gene_data_indexed[_eu].fillna(0).values
         error_lower_array = gene_data_indexed[_el].fillna(0).values
 

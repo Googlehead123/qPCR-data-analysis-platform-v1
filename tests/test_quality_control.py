@@ -320,8 +320,8 @@ class TestAnalysisEngineSEMCalculation:
         assert "SEM" in result.columns
         assert (result["SEM"] >= 0).all()
 
-    def test_sem_zero_for_single_replicate(self, mock_streamlit, sample_mapping):
-        """SEM should be 0 when there's only a single replicate."""
+    def test_sem_undefined_for_single_replicate(self, mock_streamlit, sample_mapping):
+        """SEM is undefined (NaN), not 0, when there is a single replicate."""
         from importlib import import_module
 
         spec = import_module("streamlit qpcr analysis v1")
@@ -346,9 +346,13 @@ class TestAnalysisEngineSEMCalculation:
             sample_mapping=sample_mapping,
         )
 
-        # SEM should be 0 for single replicates
+        # SEM must be UNDEFINED (NaN) for a single replicate, not 0. Reporting
+        # 0.000 drew a zero-length error bar — the visual signature of the
+        # tightest measurement in the panel — for a lone surviving well, and
+        # exported "SD 0.000" next to an honestly-NaN Target_Ct_SD.
         assert "SEM" in result.columns
-        assert (result["SEM"] == 0).all()
+        assert result["SEM"].isna().all()
+        assert result["SD"].isna().all()
 
     def test_sem_scales_with_expression(
         self, mock_streamlit, sample_qpcr_raw_data, sample_mapping

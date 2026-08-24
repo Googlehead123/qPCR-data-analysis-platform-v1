@@ -157,9 +157,15 @@ class AnalysisEngine:
 
                 target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else np.nan
 
-                # Convert NaN to 0 for graph rendering (NaN would break Plotly error bars)
-                sd = target_sd if pd.notna(target_sd) else 0
-                sem = target_sem if pd.notna(target_sem) else 0
+                # Keep NaN when the SD is undefined (n=1) instead of coercing
+                # to 0. The old coercion reported SD 0.000 / SEM 0.000 and drew a
+                # zero-length error bar — the visual signature of the TIGHTEST
+                # measurement in the panel — for the single well left after QC
+                # dropped the other two. graph.py already does .fillna(0) on both
+                # error arrays, so NaN never reached Plotly in the first place;
+                # the stated reason for the coercion did not hold.
+                sd = target_sd
+                sem = target_sem
 
                 original_sample = cond_data["Sample"].iloc[0]
                 group = sample_mapping.get(original_sample, {}).get(
@@ -176,12 +182,13 @@ class AnalysisEngine:
                 # same asymmetric 2^-x transform as the Livak ±SD bars). Target-
                 # only, matching SD/SEM by design; 0 when n<2. Offered as an
                 # alternative to the ±SD bars (reviewers often prefer CIs).
-                if sem > 0 and n_target >= 2:
+                if pd.notna(sem) and sem > 0 and n_target >= 2:
                     _ci = float(stats.t.ppf(0.975, n_target - 1)) * sem
                     fc_ci_upper = 2 ** (-(np.clip(ddct - _ci, -50, 50))) - rel_expr
                     fc_ci_lower = rel_expr - 2 ** (-(np.clip(ddct + _ci, -50, 50)))
                 else:
-                    fc_ci_upper = fc_ci_lower = 0
+                    # NaN, not 0: "no CI could be computed" is not "a CI of zero".
+                    fc_ci_upper = fc_ci_lower = np.nan
 
                 results.append(
                     {
@@ -205,8 +212,29 @@ class AnalysisEngine:
                         "Fold_Change": rel_expr,
                         # Fold-change domain error bars (Livak method)
                         # Upper/lower bounds account for nonlinear 2^x transform
-                        "FC_Error_Upper": (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr) if sd > 0 else 0,
-                        "FC_Error_Lower": (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50)))) if sd > 0 else 0,
+                        "FC_Error_Upper": (
+                            (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr)
+                            if pd.notna(sd) and sd > 0 else np.nan
+                        ),
+                        "FC_Error_Lower": (
+                            (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50))))
+                            if pd.notna(sd) and sd > 0 else np.nan
+                        ),
+                        # Fold-change-domain SEM, same asymmetric transform as
+                        # FC_Error_*. Without these the "SEM" error-bar mode
+                        # plotted the Ct-domain SEM straight onto a fold-change
+                        # axis, which is dimensionally meaningless and inverts the
+                        # comparison: a bar at FC 4.59 got its Ct SEM of 0.23
+                        # while its true fold-domain interval is 0.79, so the tall
+                        # bar looked TIGHTER than a short one.
+                        "FC_SEM_Upper": (
+                            (2 ** (-(np.clip(ddct - sem, -50, 50))) - rel_expr)
+                            if pd.notna(sem) and sem > 0 else np.nan
+                        ),
+                        "FC_SEM_Lower": (
+                            (rel_expr - 2 ** (-(np.clip(ddct + sem, -50, 50))))
+                            if pd.notna(sem) and sem > 0 else np.nan
+                        ),
                         "FC_CI_Upper": fc_ci_upper,
                         "FC_CI_Lower": fc_ci_lower,
                     }
@@ -482,6 +510,7 @@ class AnalysisEngine:
         ref_sample: str,
         sample_mapping: dict,
         excluded_wells=None,
+        excluded_samples=None,
     ) -> pd.DataFrame:
         """Compute per-replicate fold change values for data point overlay.
 
@@ -492,8 +521,17 @@ class AnalysisEngine:
 
         Uses per-condition HK mean (not per-replicate HK) to isolate
         target gene variability from housekeeping variability.
+
+        ``excluded_samples`` must be honoured here as well as ``excluded_wells``:
+        calculate_ddct and calculate_statistics both drop those samples, so
+        without it the scatter overlay plotted points for a sample the bar and
+        the p-value had excluded — and, worse, the excluded sample also shifted
+        the reference ΔCt that every point is normalised against.
         """
         data = raw_data.copy()
+
+        if excluded_samples:
+            data = data[~data["Sample"].isin(set(excluded_samples))]
 
         # Apply exclusions
         if isinstance(excluded_wells, dict):

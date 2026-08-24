@@ -67,16 +67,43 @@ def test_graph_default_mode_uses_livak_sd(mock_streamlit):
         _gene_df(), "COL1A1", {"show_error": True}, color_preset="Steel", ref_condition="Ctrl")
     up = list(_bar_trace(fig).error_y.array)
     assert up[1] == 0.30  # FC_Error_Upper
-    assert any("Livak" in (a.text or "") for a in fig.layout.annotations)
+    # The caption no longer says "Livak" on its own: Livak's SD propagation
+    # includes the housekeeping variance, and this pipeline deliberately uses the
+    # target replicates only, so the bare word overstated what is drawn.
+    caption = " ".join(a.text or "" for a in fig.layout.annotations)
+    assert "target replicates" in caption
+    assert "fold-change domain" in caption
 
 
-def test_graph_sd_mode_uses_ct_domain(mock_streamlit):
+def test_graph_sd_mode_resolves_to_fold_change_domain(mock_streamlit):
+    """'sd' must NOT plot the Ct-domain SD onto a fold-change axis.
+
+    It used to: a bar at fold change 2.0 was given an error bar of 0.17 Ct
+    units. That is dimensionally meaningless and inverts the comparison, since
+    the same Ct spread maps to a wider fold-change interval the taller the bar
+    is. 'sd' now resolves to the same transformed bars as the default.
+    """
     fig = GraphGenerator.create_gene_graph(
         _gene_df(), "COL1A1", {"show_error": True, "error_bar_mode": "sd"},
         color_preset="Steel", ref_condition="Ctrl")
     up = list(_bar_trace(fig).error_y.array)
-    assert up[1] == 0.17  # SD column
-    assert any("Ct domain" in (a.text or "") for a in fig.layout.annotations)
+    assert up[1] == 0.30  # FC_Error_Upper, not the raw SD of 0.17
+    caption = " ".join(a.text or "" for a in fig.layout.annotations)
+    assert "fold-change domain" in caption
+
+
+def test_graph_sem_mode_uses_transformed_sem(mock_streamlit):
+    """'sem' uses the fold-change-domain SEM columns when present."""
+    df = _gene_df()
+    df["FC_SEM_Upper"] = [0.0, 0.16]
+    df["FC_SEM_Lower"] = [0.0, 0.14]
+    fig = GraphGenerator.create_gene_graph(
+        df, "COL1A1", {"show_error": True, "error_bar_mode": "sem"},
+        color_preset="Steel", ref_condition="Ctrl")
+    up = list(_bar_trace(fig).error_y.array)
+    assert up[1] == 0.16
+    caption = " ".join(a.text or "" for a in fig.layout.annotations)
+    assert "SEM" in caption and "fold-change domain" in caption
 
 
 def test_graph_n_annotation_optin(mock_streamlit):

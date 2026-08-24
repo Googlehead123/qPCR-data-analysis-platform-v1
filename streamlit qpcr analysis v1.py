@@ -268,6 +268,7 @@ def _cached_replicate_fold_changes(
     ref_sample: str,
     sample_mapping: dict,
     excluded_wells,
+    excluded_samples=(),
 ) -> pd.DataFrame:
     """Content-hash-memoized per-replicate fold changes (data-point overlay).
 
@@ -280,11 +281,13 @@ def _cached_replicate_fold_changes(
     now pays for the full replicate table once instead of N times per rerun.
     """
     return _CoreAnalysisEngine.compute_replicate_fold_changes(
-        raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+        raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells,
+        excluded_samples=excluded_samples,
     )
 
 
-def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells):
+def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping,
+                               excluded_wells, excluded_samples=None):
     """Cache-fronted access to per-replicate fold changes with a live fallback.
 
     Normal inputs (str/bool mapping values, ``dict[(Target, Sample) -> set]``
@@ -293,12 +296,16 @@ def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping, ex
     analysis — the fallback preserves the exact pre-cache behaviour.
     """
     try:
+        # Sorted tuple: excluded_samples is a set, whose iteration order is not
+        # stable, and an unstable cache key would miss on every rerun.
+        _excl_s = tuple(sorted(str(s) for s in (excluded_samples or ())))
         return _cached_replicate_fold_changes(
-            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells, _excl_s
         )
     except Exception:
         return _CoreAnalysisEngine.compute_replicate_fold_changes(
-            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells,
+            excluded_samples=excluded_samples,
         )
 
 
@@ -402,7 +409,10 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     if raw is None or not hk or not ref or not processed_data:
         return recs
     try:
-        reps = get_replicate_fold_changes(raw, hk, ref, mapping, excluded)
+        reps = get_replicate_fold_changes(
+            raw, hk, ref, mapping, excluded,
+            st.session_state.get("excluded_samples", set()),
+        )
     except Exception:
         return recs
 
@@ -854,9 +864,12 @@ def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
         hk = st.session_state.get("hk_gene")
         ref = st.session_state.get("analysis_ref_condition")
         mapping = st.session_state.get("sample_mapping", {})
-        excl = st.session_state.get("excluded_wells", set())
+        # {} not set(): excluded_wells is a per-(gene,sample) dict everywhere
+        # else, and a bare set would silently take the wrong branch.
+        excl = st.session_state.get("excluded_wells", {})
+        excl_s = st.session_state.get("excluded_samples", set())
         if raw is not None and hk and ref:
-            reps = get_replicate_fold_changes(raw, hk, ref, mapping, excl)
+            reps = get_replicate_fold_changes(raw, hk, ref, mapping, excl, excl_s)
             replicate_df = reps[reps["Target"] == gene]
     return GraphGenerator.create_gene_graph(
         gene_data, gene, cs, efficacy_config,
@@ -988,6 +1001,9 @@ def _shared_figure_context(efficacy_config: dict, any_data_points: bool):
             "raw": raw_fp,
             "hk": st.session_state.get("hk_gene"),
             "excluded": st.session_state.get("excluded_wells"),
+            # The overlay now honours excluded_samples, so it has to be part of
+            # the fingerprint or excluding a sample would leave a stale scatter.
+            "excluded_samples": st.session_state.get("excluded_samples"),
         }
     return ctx
 
@@ -1286,7 +1302,9 @@ def render_gene_editor(current_gene):
     _ensure_bar_settings(current_gene, gene_data)
 
     label_modes = ["Auto-wrap", "Angled 45°", "Angled 90°", "Horizontal"]
-    _EB_LABELS = {"Livak ±SD": "livak_sd", "95% CI": "ci95", "SEM": "sem", "SD": "sd"}
+    # "SD" is gone: it resolved to the very same transformed bars as
+    # "Livak ±SD", so the menu offered one thing twice under two names.
+    _EB_LABELS = {"Livak ±SD": "livak_sd", "SEM": "sem", "95% CI": "ci95"}
 
     t_style, t_labels, t_colors, t_axis, t_stats = st.tabs(
         ["Style", "Labels", "Colors", "Axis", "Stats"])
@@ -3346,6 +3364,7 @@ def export_to_excel(
                         ref_sample,
                         mapping,
                         excluded_wells,
+                        st.session_state.get("excluded_samples", set()),
                     )
                     if not replicate_fc.empty:
                         replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)
@@ -5225,11 +5244,15 @@ with tab2:
                 - Symbols: `*` p<0.05, `**` p<0.01, `***` p<0.001
                 - Respects QC exclusions (uses only included wells)
                 
-                **📏 Error Bars**  
-                - **SEM** (Standard Error of Mean): Shows precision of mean estimate = `SD / √n`
-                - **SD** (Standard Deviation): Shows data spread/variability
-                - Choose SEM for publication (smaller bars, shows reliability)
-                - Choose SD to show full data variation
+                **📏 Error Bars** (chosen in Graphs -> Stats)
+                - All options are plotted in the **fold-change domain**, matching
+                  the axis: the Ct-domain spread is transformed through the same
+                  asymmetric `2^-x` as the bar itself.
+                - **Livak ±SD**: spread of the target replicates.
+                - **±SEM**: `SD / √n` — precision of the mean.
+                - **95% CI**: t-based, `n-1` degrees of freedom.
+                - Spread comes from the **target** replicates only; housekeeping
+                  variability is not propagated into it.
                 """)
 
             stat_col1, stat_col2 = st.columns(2)
@@ -5248,17 +5271,17 @@ with tab2:
                 # Note: Widget with key="ttest_type" auto-syncs to session state
 
             with stat_col2:
-                error_bar_type = st.radio(
-                    "Error Bar Type",
-                    ["sem", "sd"],
-                    format_func=lambda x: "SEM (Standard Error of Mean)"
-                    if x == "sem"
-                    else "SD (Standard Deviation)",
-                    index=0,
-                    key="error_bar_type",
-                    help="SEM shows precision of mean estimate; SD shows data variability",
+                # The "Error Bar Type" radio that used to live here wrote
+                # st.session_state["error_bar_type"], which NOTHING read — while
+                # the help text above told the user to pick SEM for publication.
+                # They picked SEM, exported, and got the default bars with a
+                # caption saying so. The live control is "Error bar type" in the
+                # Graphs tab's Stats sub-tab (graph_settings["error_bar_mode"]).
+                st.info(
+                    "Error bars are chosen in **Graphs -> Stats -> Error bar "
+                    "type** (Livak +/-SD, +/-SEM, or 95% CI). The choice applies "
+                    "to every gene and is printed under each chart."
                 )
-                # Note: Widget with key="error_bar_type" auto-syncs to session state
 
             # Visual summary
             col_sum1, col_sum2, col_sum3 = st.columns([1, 2, 1])
