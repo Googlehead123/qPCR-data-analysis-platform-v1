@@ -2131,15 +2131,11 @@ class AnalysisEngine(_CoreAnalysisEngine):
                         excluded_wells=st.session_state.get("excluded_wells", {}),
                     )
 
-                # FIX-16: Display warning when one-sample t-test was used
-                _onesamp = processed_with_stats.attrs.get("_onesamp_warnings", [])
-                if _onesamp:
-                    st.info(
-                        f"ℹ️ One-sample t-test used for {len(_onesamp)} comparison(s) "
-                        f"(one group has n=1 replicate): "
-                        + ", ".join(_onesamp[:5])
-                        + (f" ... and {len(_onesamp) - 5} more" if len(_onesamp) > 5 else "")
-                    )
+                # The one-sample-t-test notice that used to sit here is gone with
+                # the fallback itself (2026-08-24): a group with n=1 now yields
+                # no p-value and no marker, and _stats_skipped_warnings below
+                # reports it as a test that could not run. An info box saying a
+                # one-sample test "was used" could not repair a shipped result.
 
                 # calculate_statistics also records the comparisons it could not
                 # run at all, and nothing read it. When the comparison condition
@@ -3330,19 +3326,28 @@ def export_to_excel(
                 )
                 gene_export["Target"] = display
             if "p_value" in gene_export.columns:
-                ttest_type = params.get("ttest_type", "welch")
+                # Report the test that actually ran, from stat_test_used, rather
+                # than reconstructing it. The old reconstruction read only the
+                # treatment row's n_replicates, so a comparison whose REFERENCE
+                # had n=1 was labelled "Welch t-test (n=3)" while the call was
+                # really ttest_1samp. That fallback is gone (n<2 now yields no
+                # p-value at all), but the label must not be re-derived either.
                 gene_export["Stat_Test"] = ""
-                for idx, row in gene_export.iterrows():
-                    n_rep = row.get("n_replicates", 0)
-                    if pd.notna(row.get("p_value")) and row.get("p_value") is not np.nan:
-                        if n_rep >= 2:
+                if "stat_test_used" in gene_export.columns:
+                    gene_export["Stat_Test"] = (
+                        gene_export["stat_test_used"].fillna("").astype(str)
+                    )
+                else:
+                    # Older stored result with no stat_test_used column.
+                    ttest_type = params.get("ttest_type", "welch")
+                    _label = "Welch" if ttest_type == "welch" else "Student"
+                    for idx, row in gene_export.iterrows():
+                        n_rep = row.get("n_replicates", 0)
+                        if pd.notna(row.get("p_value")):
                             gene_export.loc[idx, "Stat_Test"] = (
-                                f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test (n={n_rep})"
+                                f"{_label} t-test (n={n_rep})" if n_rep >= 2
+                                else "N/A"
                             )
-                        elif n_rep == 1:
-                            gene_export.loc[idx, "Stat_Test"] = f"One-sample t-test (n={n_rep})"
-                        else:
-                            gene_export.loc[idx, "Stat_Test"] = "N/A"
             gene_export.to_excel(writer, sheet_name=sheet_name, index=False)
 
         # Summary sheet

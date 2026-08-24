@@ -251,6 +251,48 @@ class AnalysisEngine:
         return result_df
 
     @staticmethod
+    def _two_group_ttest(ref_vals, vals, ttest_type):
+        """One comparison's p-value, or NaN when no valid test exists.
+
+        Returns ``(p_value, test_used, skip_reason)`` — ``skip_reason`` is None
+        when a test ran.
+
+        A group holding a single well has no estimable within-group variance,
+        so there is no two-group t-test to run. The previous code substituted
+        ``stats.ttest_1samp``, which treats the singleton's measured ΔCt as a
+        KNOWN population mean. That is a different hypothesis, and it
+        manufactured significance: a lone treatment well returned p=0.0335
+        ('*'), and p=0.0027 ('**') with the groups reversed. The exporter then
+        reconstructed the method from the treatment row's n alone and labelled
+        those results "Welch t-test", which was simply untrue.
+
+        Decision (Min, 2026-08-24): if either group has fewer than two wells,
+        report no p-value and no marker. Rationale for treating this
+        differently from the uncorrected-p-value decision: uncorrected versus
+        BH-corrected is a defensible choice between two valid tests, whereas
+        n=1 has no valid two-group test at all, so there is nothing to be
+        consistent with. `n_reference` / `stat_test_used` are recorded per
+        comparison so no consumer has to infer the method again.
+        """
+        n_ref, n_cond = int(getattr(ref_vals, "size", 0)), int(getattr(vals, "size", 0))
+        if n_ref < 2 or n_cond < 2:
+            return (
+                np.nan,
+                f"none (n={n_cond} vs ref n={n_ref})",
+                f"no p-value (n={n_cond} vs ref n={n_ref}); a two-group "
+                "t-test needs at least 2 wells in both groups",
+            )
+        equal_var = ttest_type == "student"
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=equal_var)
+        except (ValueError, TypeError) as exc:
+            return (np.nan, "none (test error)", f"t-test failed: {exc}")
+        label = "Student t-test" if equal_var else "Welch t-test"
+        return (float(p_val), f"{label} (n={n_cond} vs ref n={n_ref})", None)
+
+    @staticmethod
     def calculate_statistics(
         processed: pd.DataFrame,
         compare_condition: str,
@@ -291,8 +333,6 @@ class AnalysisEngine:
         results = processed.copy()
         results["p_value"] = np.nan
         results["significance"] = ""
-        # FIX-16: Track one-sample t-test usage
-        _onesamp_warnings = []
         _stats_skipped = []
 
         # Add second/third p-value columns if compare conditions are provided
@@ -375,37 +415,18 @@ class AnalysisEngine:
                     if cond == compare_condition or vals.size == 0:
                         continue
 
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", RuntimeWarning)
-                            equal_var = ttest_type == "student"
-                            if ref_vals.size >= 2 and vals.size >= 2:
-                                _, p_val = stats.ttest_ind(
-                                    ref_vals, vals, equal_var=equal_var
-                                )
-                            elif vals.size == 1 and ref_vals.size >= 2:
-                                # FIX-16: Track one-sample t-test usage
-                                _onesamp_warnings.append(f"{target}/{cond} (n=1 vs ref n={ref_vals.size})")
-                                _, p_val = stats.ttest_1samp(ref_vals, vals[0])
-                            elif ref_vals.size == 1 and vals.size >= 2:
-                                # FIX-16: Track one-sample t-test usage
-                                _onesamp_warnings.append(f"{target}/{cond} (ref n=1 vs n={vals.size})")
-                                _, p_val = stats.ttest_1samp(vals, ref_vals[0])
-                            else:
-                                # n=1 vs ref n=1: no t-test is possible. Record it so
-                                # the blank significance column has an explanation
-                                # instead of silently showing nothing.
-                                p_val = np.nan
-                                if vals.size == 1 and ref_vals.size == 1:
-                                    _stats_skipped.append(
-                                        f"{target}/{cond}: no p-value (n=1 vs ref n=1)")
-                    except (ValueError, TypeError) as e:
-                        p_val = np.nan
+                    p_val, _test_used, _skip = AnalysisEngine._two_group_ttest(
+                        ref_vals, vals, ttest_type
+                    )
+                    if _skip:
+                        _stats_skipped.append(f"{target}/{cond}: {_skip}")
 
                     mask = (results["Target"] == target) & (
                         results["Condition"] == cond
                     )
                     results.loc[mask, "p_value"] = p_val
+                    results.loc[mask, "n_reference"] = int(ref_vals.size)
+                    results.loc[mask, "stat_test_used"] = _test_used
 
                     if not np.isnan(p_val):
                         if p_val < 0.001:
@@ -423,38 +444,22 @@ class AnalysisEngine:
                         if cond == compare_condition_2 or vals.size == 0:
                             continue
 
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore", RuntimeWarning)
-                                equal_var = ttest_type == "student"
-                                if ref_vals_2.size >= 2 and vals.size >= 2:
-                                    _, p_val_2 = stats.ttest_ind(
-                                        ref_vals_2, vals, equal_var=equal_var
-                                    )
-                                elif vals.size == 1 and ref_vals_2.size >= 2:
-                                    # Record it like the primary comparison does.
-                                    # Only comparison 1 was reported, so the user
-                                    # was told n=1 affected the asterisks and then
-                                    # trusted the hashes, which came from the same
-                                    # anti-conservative one-sample test.
-                                    _onesamp_warnings.append(
-                                        f"{target}/{cond} vs {compare_condition_2} "
-                                        f"(n=1 vs ref n={ref_vals_2.size})")
-                                    _, p_val_2 = stats.ttest_1samp(ref_vals_2, vals[0])
-                                elif ref_vals_2.size == 1 and vals.size >= 2:
-                                    _onesamp_warnings.append(
-                                        f"{target}/{cond} vs {compare_condition_2} "
-                                        f"(ref n=1 vs n={vals.size})")
-                                    _, p_val_2 = stats.ttest_1samp(vals, ref_vals_2[0])
-                                else:
-                                    p_val_2 = np.nan
-                        except (ValueError, TypeError) as e:
-                            p_val_2 = np.nan
+                        p_val_2, _test_used_2, _skip_2 = (
+                            AnalysisEngine._two_group_ttest(
+                                ref_vals_2, vals, ttest_type
+                            )
+                        )
+                        if _skip_2:
+                            _stats_skipped.append(
+                                f"{target}/{cond} vs {compare_condition_2}: {_skip_2}"
+                            )
 
                         mask = (results["Target"] == target) & (
                             results["Condition"] == cond
                         )
                         results.loc[mask, "p_value_2"] = p_val_2
+                        results.loc[mask, "n_reference_2"] = int(ref_vals_2.size)
+                        results.loc[mask, "stat_test_used_2"] = _test_used_2
 
                         if not np.isnan(p_val_2):
                             if p_val_2 < 0.001:
@@ -472,33 +477,22 @@ class AnalysisEngine:
                         if cond == compare_condition_3 or vals.size == 0:
                             continue
 
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore", RuntimeWarning)
-                                equal_var = ttest_type == "student"
-                                if ref_vals_3.size >= 2 and vals.size >= 2:
-                                    _, p_val_3 = stats.ttest_ind(
-                                        ref_vals_3, vals, equal_var=equal_var
-                                    )
-                                elif vals.size == 1 and ref_vals_3.size >= 2:
-                                    _onesamp_warnings.append(
-                                        f"{target}/{cond} vs {compare_condition_3} "
-                                        f"(n=1 vs ref n={ref_vals_3.size})")
-                                    _, p_val_3 = stats.ttest_1samp(ref_vals_3, vals[0])
-                                elif ref_vals_3.size == 1 and vals.size >= 2:
-                                    _onesamp_warnings.append(
-                                        f"{target}/{cond} vs {compare_condition_3} "
-                                        f"(ref n=1 vs n={vals.size})")
-                                    _, p_val_3 = stats.ttest_1samp(vals, ref_vals_3[0])
-                                else:
-                                    p_val_3 = np.nan
-                        except (ValueError, TypeError):
-                            p_val_3 = np.nan
+                        p_val_3, _test_used_3, _skip_3 = (
+                            AnalysisEngine._two_group_ttest(
+                                ref_vals_3, vals, ttest_type
+                            )
+                        )
+                        if _skip_3:
+                            _stats_skipped.append(
+                                f"{target}/{cond} vs {compare_condition_3}: {_skip_3}"
+                            )
 
                         mask = (results["Target"] == target) & (
                             results["Condition"] == cond
                         )
                         results.loc[mask, "p_value_3"] = p_val_3
+                        results.loc[mask, "n_reference_3"] = int(ref_vals_3.size)
+                        results.loc[mask, "stat_test_used_3"] = _test_used_3
 
                         if not np.isnan(p_val_3):
                             if p_val_3 < 0.001:
@@ -520,8 +514,6 @@ class AnalysisEngine:
                 results, "p_value_3", "p_value_fdr_3", "significance_fdr_3", "\u2020"
             )
 
-        # FIX-16: Attach one-sample t-test warnings for caller to display
-        results.attrs["_onesamp_warnings"] = _onesamp_warnings
         results.attrs["_stats_skipped_warnings"] = _stats_skipped
         return results
 

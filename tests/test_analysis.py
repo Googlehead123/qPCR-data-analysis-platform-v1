@@ -345,3 +345,80 @@ class TestReplicateFoldChanges:
             excluded_wells=excluded,
         )
         assert len(result) == 8  # 9 - 1 excluded COL1A1 well
+
+
+class TestSingletonComparisons:
+    """A group with n=1 must not produce a p-value or a significance marker.
+
+    The old code substituted stats.ttest_1samp when either group had a single
+    well, treating that singleton's measured ΔCt as a KNOWN population mean.
+    That is a different hypothesis and it manufactured significance: these
+    fixtures returned p=0.0335 ('*') and, with the groups reversed, p=0.0027
+    ('**'), for data with no estimable within-group variance.
+    Decision (Min, 2026-08-24): report nothing instead.
+    """
+
+    @staticmethod
+    def _run(rows):
+        import pandas as pd
+        from qpcr.analysis import AnalysisEngine
+        raw = pd.DataFrame(rows, columns=["Well", "Sample", "Target", "CT"])
+        mapping = {s: {"condition": s} for s in raw["Sample"].unique()}
+        processed = AnalysisEngine.calculate_ddct(
+            raw, "HK", "R", {}, set(), mapping
+        )
+        return AnalysisEngine.calculate_statistics(
+            processed, "R", raw_data=raw, hk_gene="HK",
+            sample_mapping=mapping, excluded_wells={},
+        )
+
+    def test_treatment_n1_gets_no_marker(self, mock_streamlit):
+        import pandas as pd
+        result = self._run([
+            ("R1", "R", "HK", 20), ("R2", "R", "HK", 20),
+            ("R1", "R", "G", 20), ("R2", "R", "G", 21),
+            ("T1", "T", "HK", 20), ("T1", "T", "G", 30),
+        ])
+        row = result[result["Condition"] == "T"].iloc[0]
+        assert pd.isna(row["p_value"]), (
+            "n=1 has no estimable variance, so there is no valid two-group "
+            f"t-test; got p={row['p_value']}"
+        )
+        assert row["significance"] == ""
+
+    def test_reference_n1_gets_no_marker(self, mock_streamlit):
+        import pandas as pd
+        result = self._run([
+            ("R1", "R", "HK", 20), ("R1", "R", "G", 20),
+            ("T1", "T", "HK", 20), ("T2", "T", "HK", 20), ("T3", "T", "HK", 20),
+            ("T1", "T", "G", 25), ("T2", "T", "G", 25), ("T3", "T", "G", 26),
+        ])
+        row = result[result["Condition"] == "T"].iloc[0]
+        assert pd.isna(row["p_value"])
+        assert row["significance"] == ""
+
+    def test_reference_n1_is_not_labelled_welch(self, mock_streamlit):
+        """The exporter read the treatment n alone and printed "Welch t-test
+        (n=3)" for a comparison actually run by ttest_1samp."""
+        result = self._run([
+            ("R1", "R", "HK", 20), ("R1", "R", "G", 20),
+            ("T1", "T", "HK", 20), ("T2", "T", "HK", 20), ("T3", "T", "HK", 20),
+            ("T1", "T", "G", 25), ("T2", "T", "G", 25), ("T3", "T", "G", 26),
+        ])
+        row = result[result["Condition"] == "T"].iloc[0]
+        assert "Welch" not in row["stat_test_used"]
+        assert "none" in row["stat_test_used"]
+        assert row["n_reference"] == 1
+
+    def test_valid_two_group_test_still_runs_and_is_labelled(self, mock_streamlit):
+        import pandas as pd
+        result = self._run([
+            ("R1", "R", "HK", 20), ("R2", "R", "HK", 20), ("R3", "R", "HK", 20),
+            ("R1", "R", "G", 20), ("R2", "R", "G", 21), ("R3", "R", "G", 20.5),
+            ("T1", "T", "HK", 20), ("T2", "T", "HK", 20), ("T3", "T", "HK", 20),
+            ("T1", "T", "G", 25), ("T2", "T", "G", 25.2), ("T3", "T", "G", 24.8),
+        ])
+        row = result[result["Condition"] == "T"].iloc[0]
+        assert pd.notna(row["p_value"]), "n=3 vs n=3 must still produce a p-value"
+        assert "Welch t-test" in row["stat_test_used"]
+        assert row["n_reference"] == 3
