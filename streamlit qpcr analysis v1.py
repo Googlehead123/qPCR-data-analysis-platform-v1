@@ -181,21 +181,30 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
         "software": app_version,
         "method": "Livak 2^-ddCt, single reference gene",
         # This said "Benjamini-Hochberg" flatly, which was a false claim in the
-        # record that goes out with the report: BH q-values ARE computed
-        # (p_value_fdr / significance_fdr, and the implementation is correct),
-        # but no consumer reads them. Every asterisk on every chart, slide,
-        # summary sheet and results table is an UNCORRECTED p-value. Say that,
-        # until a switch exists to choose which one is reported.
+        # record that goes out with the report. Reporting UNCORRECTED p-values is
+        # a deliberate choice (Min, 2026-08-24); BH q-values are still computed
+        # and carried into the per-gene Excel sheets as p_value_fdr /
+        # significance_fdr, so the corrected view is available to anyone who
+        # asks for it. State both, so no reviewer has to guess which is which.
         "fdr_correction": (
-            "Benjamini-Hochberg q-values computed and reported per gene in the "
-            "Excel export; the significance markers shown on charts and slides "
-            "are uncorrected p-values"
+            "none applied to the reported markers — significance shown on charts, "
+            "slides and summary sheets is the uncorrected p-value. "
+            "Benjamini-Hochberg q-values are computed and included per gene in "
+            "the Excel export (p_value_fdr / significance_fdr)."
         ),
         "efficacy_type": efficacy or None,
         "reference_gene": hk_gene or None,
         "reference_condition": ref_condition or None,
         "comparison_conditions": [c for c in (cmp_conditions or []) if c],
-        "statistical_test": "Welch t-test" if ttest_type == "welch" else "Student t-test",
+        # The replicate unit is part of the test description, not a footnote:
+        # n counts technical wells pooled across the samples mapped to a
+        # condition (deliberate — Min, 2026-08-24), which MIQE requires be
+        # declared because it sets the degrees of freedom.
+        "statistical_test": (
+            f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test on ΔCt, "
+            f"n = technical replicate wells pooled per condition"
+        ),
+        "replicate_unit": "technical wells (pooled across samples per condition)",
         "n_genes": int(n_genes),
         "n_samples": int(n_samples),
         "excluded_samples": sorted(excluded_samples) if excluded_samples else [],

@@ -23,12 +23,16 @@ def build_miqe_checklist(prov: dict) -> str:
         f"- **Calibrator / reference condition:** {prov.get('reference_condition') or '—'}",
         f"- **Comparison condition(s):** {cmps}",
         f"- **Statistical test:** {prov.get('statistical_test', '—')}",
+        # MIQE item: the replicate unit sets the degrees of freedom, so it has to
+        # be declared rather than inferred from the n.
+        f"- **Replicate unit for the test:** "
+        f"{prov.get('replicate_unit') or 'not stated'}",
         # No "Benjamini-Hochberg" default: the reported markers are uncorrected
         # p-values, so asserting a correction the caller did not state would put
         # a false claim into the MIQE checklist.
         f"- **Multiple-testing correction:** {prov.get('fdr_correction') or 'not applied to the reported markers'}",
         f"- **Genes analysed:** {prov.get('n_genes', '—')}; "
-        f"**biological/technical samples:** {prov.get('n_samples', '—')}",
+        f"**distinct samples on the plate:** {prov.get('n_samples', '—')}",
         f"- **Excluded wells (QC):** {prov.get('excluded_wells_count', 0)} "
         "(itemised in the provenance record)",
     ]

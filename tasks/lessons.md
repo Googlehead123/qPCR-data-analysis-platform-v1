@@ -88,11 +88,13 @@ Root cause: the editor was written assuming that writing `graph_settings` would 
 
 ---
 
-## 2026-08-24: Open questions for Min (found in the platform-wide audit)
+## 2026-08-24: Two statistical choices, now DECIDED (Min)
 
-Both change published numbers, so neither was changed unilaterally.
+Both affect published numbers. Both were surfaced by the platform-wide audit and
+decided deliberately rather than drifted into — record them here so a future
+reader does not "fix" either one.
 
-### 1. The t-test's n is technical wells, not biological samples
+### 1. DECIDED: the t-test's n is technical wells — keep it that way
 
 `qpcr/analysis.py::calculate_statistics` flattens every well of every Sample
 mapped to a condition and feeds them to the t-test. Nothing aggregates to
@@ -111,24 +113,46 @@ is manufactured by the current choice. Note the pooling is deliberate elsewhere:
 "Samples sharing a condition name are treated as biological replicates" is the
 Mapping tab's stated contract, and the ΔΔCt bar means are computed the same way.
 
-Suggested shape if Min wants it changed: a `replicate_unit` argument defaulting
-to `"technical"` (so no published number moves without an explicit choice) plus a
-radio where the dead SEM/SD one used to be. Until then `build_provenance`'s
-`statistical_test` string should say which unit was used.
+**Decision (Min, 2026-08-24): keep technical wells.** No code change to the
+maths. Rationale for keeping it: the pooling is already the app's stated
+contract — "Samples sharing a condition name are treated as biological
+replicates" in the Mapping tab — and the ΔΔCt bar means are computed the same
+way, so aggregating only inside the t-test would have made the bars and the
+p-values describe different units.
 
-### 2. Which significance source should be displayed
+What DID change: the choice is now declared instead of implied.
+`build_provenance` reports `statistical_test` as "<Welch|Student> t-test on ΔCt,
+n = technical replicate wells pooled per condition" and adds a `replicate_unit`
+field, and the MIQE checklist prints "Replicate unit for the test" as its own
+item — MIQE requires it, because the replicate unit is what sets the degrees of
+freedom. A reviewer can now see the n's meaning without reading the source.
+
+If this is ever revisited, the shape to use is a `replicate_unit` argument
+defaulting to `"technical"` so no existing number moves silently.
+
+### 2. DECIDED: display uncorrected p-values
 
 BH q-values (`p_value_fdr` / `significance_fdr`) are computed correctly but have
 no display consumer — every asterisk on every chart, slide, summary sheet,
 Overview matrix and results table is an uncorrected p-value. The provenance
 record and MIQE checklist now state this plainly rather than claiming BH.
 
-The proper fix is a single `graph_settings["sig_source"]` toggle next to the
-error-bar selector, read by `graph.py`, the PPT writer, the Overview matrix and
-the results table. **Which way it should default is Min's call** — corrected is
-the defensible default for a multi-gene panel, uncorrected is what every number
-shipped so far has used, so flipping it silently would change conclusions in
-past-comparable reports.
+**Decision (Min, 2026-08-24): the displayed markers stay uncorrected.** This is
+what every number shipped so far has used, so flipping it would have changed
+conclusions relative to past-comparable reports. No display code changed.
+
+What DID change: the record no longer claims otherwise. `fdr_correction` now
+reads "none applied to the reported markers ... Benjamini-Hochberg q-values are
+computed and included per gene in the Excel export (p_value_fdr /
+significance_fdr)", and the MIQE checklist prints the same. So the corrected view
+remains available in the workbook for anyone who asks, and nothing asserts a
+correction it does not apply.
+
+Do NOT delete `_apply_fdr_correction` or the `p_value_fdr` /
+`significance_fdr` columns as "unused" — they are the corrected view the
+provenance promises. If a reviewer ever wants corrected markers on the charts,
+the shape is one `graph_settings["sig_source"]` toggle read by `graph.py`, the
+PPT writer, the Overview matrix and the results table.
 
 ### 3. Not investigated
 

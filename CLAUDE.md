@@ -60,13 +60,18 @@ Repository: Googlehead123/qPCR-data-analysis-platform-v1
   re-verified 2026-08-24: ΔΔCt, the asymmetric fold-change error transform and
   the Benjamini-Hochberg implementation all match hand/reference computation.
 - Significance markers shown on charts, slides and summary sheets are
-  **uncorrected** p-values. BH q-values are computed and reach the per-gene
-  Excel sheets, but nothing reads them for display — the provenance record says
-  so explicitly.
+  **uncorrected** p-values — a deliberate choice (2026-08-24), since that is what
+  every report shipped so far has used. BH q-values are still computed and reach
+  the per-gene Excel sheets as `p_value_fdr` / `significance_fdr`, so the
+  corrected view is available; the provenance record and MIQE checklist state
+  both. Do not delete those columns as "unused".
 - Error-bar spread is computed from the **target** replicates only; housekeeping
   variability is not propagated into it. All error-bar modes are plotted in the
   fold-change domain.
-- The t-test's n is **technical wells**, not biological samples — see the open
-  question in `tasks/lessons.md`.
+- The t-test's n is **technical wells** pooled per condition, not biological
+  samples — deliberate (2026-08-24), and consistent with the Mapping tab's stated
+  contract that samples sharing a condition name are replicates. Declared in the
+  provenance record and as its own MIQE item, since the replicate unit sets the
+  degrees of freedom. Rationale in `tasks/lessons.md`.
 - Uses streamlit-sortables for drag-and-drop sample ordering
 - python-pptx for automated PowerPoint report generation
