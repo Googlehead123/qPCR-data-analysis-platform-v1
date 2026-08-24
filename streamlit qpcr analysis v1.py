@@ -18,6 +18,7 @@ import io
 import warnings
 import json
 import re
+import statistics
 import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
@@ -5242,9 +5243,19 @@ with tab_ov:
                     return c
             return None
 
-        bench_default = _match(controls.get("positive"))
+        bench_default = _match(controls.get("positive")) or _match(
+            controls.get("positive_display")
+        )
+        # "baseline" is not a key in any EFFICACY_CONFIG entry, so that lookup was
+        # dead; the real keys are negative / negative_display / positive /
+        # compare_to. Missing negative_display is what let the INDUCER (e.g. the
+        # condition named "UVB 40 mj/cm2" while the config says "UVB only") fall
+        # through into `treatments` — where, being by construction the biggest
+        # mover vs the untreated control, it was auto-selected as the highlighted
+        # test article and graded as if it were the sample.
         control_conditions = {ref_condition} | {
-            _match(controls.get(r)) for r in ("negative", "positive", "baseline")
+            _match(controls.get(r))
+            for r in ("negative", "negative_display", "positive", "positive_display")
         }
         control_conditions.discard(None)
         treatments = [c for c in conditions if c not in control_conditions] or [
@@ -5354,7 +5365,16 @@ with tab_ov:
             pct = None
             if benchmark and highlight:
                 bf = _fold(g, benchmark)
-                if bf is not None and hl_fold is not None and abs(bf - 1) > 1e-6:
+                # Guarding only against bf == 1 made this meaningless whenever the
+                # benchmark barely moved: a positive control at 1.01x turned a
+                # sample at 1.50x into "+4999%". And when the two moved in
+                # OPPOSITE directions the ratio came out negative, which then
+                # cancelled a genuine positive in the flat mean below. Require the
+                # benchmark to have moved at least 10% and in the same direction
+                # as the sample for the ratio to mean anything.
+                if (bf is not None and hl_fold is not None
+                        and abs(bf - 1) >= 0.10
+                        and (bf - 1) * (hl_fold - 1) > 0):
                     pct = (hl_fold - 1) / (bf - 1) * 100
                     bench_pcts.append(pct)
             row = {"Gene": g}
@@ -5368,34 +5388,70 @@ with tab_ov:
             rows.append(row)
         matrix = pd.DataFrame(rows)
 
+        # Genes with no expected_direction entry for this category contributed to
+        # neither `passes` nor `graded`, so they vanished from the headline
+        # entirely — a panel where two markers matched and two moved the WRONG way
+        # still read "2/2 markers moved in the expected direction" behind a green
+        # tick. Name them instead of dropping them.
+        ungraded = [g for g in gene_list if not expected_map.get(g)]
+
         # verdict banner
         if graded:
-            allpass = passes == graded
+            allpass = passes == graded and not ungraded
             color = "#2f7d5b" if allpass else "#B8860B"
-            avg_bench = (f" · reaches ~{sum(bench_pcts)/len(bench_pcts):.0f}% of {benchmark}"
+            # Median: these are ratios, so one gene with a small benchmark
+            # denominator dominates a mean.
+            avg_bench = (f" · reaches ~{statistics.median(bench_pcts):.0f}% of {benchmark}"
                          if bench_pcts else "")
+            _ungraded_note = (
+                f" · {len(ungraded)} not graded: {', '.join(ungraded)}"
+                if ungraded else ""
+            )
             st.markdown(
                 "<div style='display:flex;gap:14px;align-items:center;background:var(--surface,#fff);"
                 "border:1px solid var(--line,#e6e1db);border-left:4px solid " + color + ";"
                 "border-radius:12px;padding:14px 18px;margin:14px 0'>"
                 "<div style='font-size:18px;font-weight:700;color:" + color + "'>"
                 + ("✓" if allpass else "!") + "</div><div>"
-                f"<div style='font-weight:700'>{passes}/{graded} markers moved in the expected direction</div>"
-                f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active <b>{highlight}</b>{avg_bench}.</div>"
+                f"<div style='font-weight:700'>{passes}/{graded} graded markers moved "
+                f"in the expected direction "
+                f"<span style='font-weight:400;color:var(--ink-faint)'>"
+                f"(of {len(gene_list)} analysed)</span></div>"
+                f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active "
+                f"<b>{highlight}</b>{avg_bench}{_ungraded_note}.</div>"
                 "</div></div>",
                 unsafe_allow_html=True,
             )
-        else:
+            if ungraded:
+                st.caption(
+                    f"⚠️ No expected direction is defined for {', '.join(ungraded)} "
+                    f"in **{st.session_state.selected_efficacy}**, so they are not "
+                    f"part of the verdict — check their fold changes in the matrix "
+                    f"below before concluding."
+                )
+        elif not expected_map:
             st.info(
                 f"{sig_count}/{len(gene_list)} genes significant vs control "
                 "(no expected-direction defined for this category)."
+            )
+        else:
+            # The category DOES define expected directions — none of these gene
+            # names are in it. Saying "none defined for this category" here was
+            # simply false, and hid a spelling mismatch.
+            st.warning(
+                f"{sig_count}/{len(gene_list)} genes significant vs control. "
+                f"No verdict was graded: none of these marker names "
+                f"({', '.join(gene_list)}) appear in "
+                f"**{st.session_state.selected_efficacy}**'s expected-direction "
+                f"list ({', '.join(sorted(expected_map))}) — likely a spelling "
+                f"difference between the plate and the catalog."
             )
 
         m1, m2, m3 = st.columns(3)
         m1.metric("Markers as expected", f"{passes}/{graded}" if graded else "—")
         m2.metric("Significant vs control", f"{sig_count}/{len(gene_list)}")
-        m3.metric("Avg % of benchmark",
-                  f"{sum(bench_pcts)/len(bench_pcts):.0f}%" if bench_pcts else "—")
+        m3.metric("Median % of benchmark",
+                  f"{statistics.median(bench_pcts):.0f}%" if bench_pcts else "—")
 
         # gene panel (auto-styled small multiples, consistent with Graphs)
         st.markdown("##### Gene panel")

@@ -113,7 +113,9 @@ CM_TO_EMU = 360000
 # Dict order = auto-suggest priority (mainstream assays first, niche last).
 EFFICACY_CONFIG = {
     "탄력": {
-        "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN"],
+        # "FBN-1" is the hyphenated spelling that appears in real plate
+        # exports; without it the marker is silently ungraded in the Overview.
+        "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN-1", "FBN"],
         "cell": "HS68 fibroblast",
         "treatment_time": "24 h",
         # Positive control confirmed by Min (2026-07-31): TGF-beta at 10 ng/ml.
@@ -125,7 +127,8 @@ EFFICACY_CONFIG = {
         #   2. it lists two further actives (Retinoic acid 5 μM, Niacinamide
         #      10 μg/ml) that are not used as the 탄력 benchmark.
         "controls": {"negative": "Non-treated", "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
-        "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up", "FBN1": "up", "FBN": "up"},
+        "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up",
+                               "FBN1": "up", "FBN-1": "up", "FBN": "up"},
     },
     "광노화": {
         "genes": ["MMP1", "MMP-1", "COL1A1", "COL1"],
@@ -143,12 +146,13 @@ EFFICACY_CONFIG = {
         "expected_direction": {"HAS3": "up", "AQP3": "up"},
     },
     "장벽": {
-        "genes": ["FLG", "CLDN1", "CLDN", "IVL"],
+        "genes": ["FLG", "CLDN1", "CLDN", "IVL", "ABCA12"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "24 h",
         # Positive control kept as Retinoic acid per Min (file listed Calcium 1.2mM).
         "controls": {"negative": "Non-treated", "positive": "Retinoic acid", "compare_to": "negative"},
-        "expected_direction": {"FLG": "up", "CLDN1": "up", "CLDN": "up", "IVL": "up"},
+        "expected_direction": {"FLG": "up", "CLDN1": "up", "CLDN": "up",
+                               "IVL": "up", "ABCA12": "up"},
     },
     "속보습": {
         "genes": ["HAS2", "AQP1"],
