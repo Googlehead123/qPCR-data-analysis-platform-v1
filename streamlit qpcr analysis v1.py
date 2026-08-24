@@ -598,6 +598,13 @@ def maybe_autorun_analysis() -> None:
                 "Settings changed but the analysis could not be re-run, so the "
                 "results below are out of date. Re-run it from the Mapping tab."
             )
+    else:
+        # The inputs now match the ones that produced the results on screen, so
+        # nothing is out of date. Without this the flag could never clear: an
+        # undo that restores the original state takes this branch and never
+        # re-runs, so a True set on an earlier rerun survived forever and any
+        # gate reading it would be a permanent false positive.
+        st.session_state.analysis_stale = False
 
 
 def _ensure_bar_settings(gene, gene_data) -> None:
@@ -6226,6 +6233,11 @@ with tab5:
                 g: st.session_state.get(f"{g}_bar_settings")
                 for g in st.session_state.processed_data
             },
+            # Staleness is part of the identity of a generated file. Without it
+            # an export built from superseded results fingerprints that same
+            # superseded state and therefore matches itself, so _get_export
+            # vouched for it. A file made while stale must never look current.
+            "stale": bool(st.session_state.get("analysis_stale")),
         })
 
         def _put_export(slot: str, data) -> None:
@@ -6242,6 +6254,24 @@ with tab5:
                 return None, True
             return entry["data"], False
 
+        # A deliverable must never be built from results the app already knows
+        # are superseded. analysis_stale was written in one place and read in
+        # none, so an export generated after a change that could not be re-run
+        # carried the OLD numbers while _current_provenance() reported the NEW
+        # QC state beside them: the reproducibility record asserted a state that
+        # never produced those values, and nothing on the artifact said so.
+        # Generation is blocked until the analysis matches its inputs again.
+        _stale = bool(st.session_state.get("analysis_stale"))
+        if _stale:
+            st.error(
+                "**These results are out of date.** The inputs changed and the "
+                "analysis could not be re-run, so the numbers below no longer "
+                "match the current QC, mapping and settings. Report generation "
+                "is disabled until you re-run the analysis from the **Mapping** "
+                "tab — otherwise the report would carry the old numbers beside "
+                "a provenance record describing the new state."
+            )
+
         # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")
 
@@ -6249,7 +6279,11 @@ with tab5:
         with rpt_cols[0]:
             # Gated behind a button + spinner: export_to_excel post-processes chart
             # XML per gene, so running it on every rerun would be wasteful.
-            if st.button("Generate Excel report", key="gen_excel", width='stretch'):
+            # `and not _stale` as well as `disabled`: disabled is only a UI
+            # affordance, and a programmatic or already-queued click still
+            # reaches the handler. The banner above says why nothing happened.
+            if st.button("Generate Excel report", key="gen_excel", width='stretch',
+                         disabled=_stale) and not _stale:
                 with st.spinner("Building Excel report..."):
                     try:
                         _qc, _rep, _excl = _build_export_extras()
@@ -6276,7 +6310,8 @@ with tab5:
                 )
 
         with rpt_cols[1]:
-            if st.button("Generate PowerPoint", key="gen_ppt", width='stretch'):
+            if st.button("Generate PowerPoint", key="gen_ppt", width='stretch',
+                         disabled=_stale) and not _stale:
                 with st.spinner("Generating PPT..."):
                     try:
                         ppt_bytes = PPTGenerator.generate_presentation(
@@ -6321,7 +6356,8 @@ with tab5:
             scale = 3 if fmt == "png" else 1
             # Rendering each figure launches headless Chrome (~seconds each), so gate
             # it behind an explicit button instead of re-rendering on every rerun.
-            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images", width='stretch'):
+            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images",
+                         width='stretch', disabled=_stale) and not _stale:
                 rendered, failed = {}, []
                 prog = st.progress(0.0, text="Rendering images...")
                 genes = list(st.session_state.graphs.items())
