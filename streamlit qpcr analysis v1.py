@@ -28,6 +28,7 @@ from qpcr.constants import (
     PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
+from qpcr.utils import natural_sort_key
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
@@ -44,14 +45,18 @@ except ImportError:
 
 
 # ==================== UTILITY FUNCTIONS ====================
-def natural_sort_key(sample_name):
-    """Extract numbers from sample name for natural sorting (e.g., Sample2 < Sample10)"""
-    parts = re.split(r"(\d+)", str(sample_name))
-    # `part.isascii()` guards int(): "²".isdigit() is True but int("²")
-    # raises, so a sample named e.g. "20 mJ/cm²" used to abort the whole
-    # script run from the upload sort, with no way to load the file.
-    return [int(part) if part.isascii() and part.isdigit() else part.lower()
-            for part in parts]
+# natural_sort_key is imported from qpcr.utils above. It was defined here too,
+# byte-identically, with the package copy having no consumer inside qpcr/ at all
+# — it existed only to be re-exported and tested. Two copies of one function is
+# the dual-copy hazard tasks/lessons.md is about, and it is how fixes have
+# shipped into a dead copy here before.
+#
+# Six MORE qpcr/utils.py functions are still duplicated in this file
+# (get_well_exclusion_key, get_grid_cell_key, get_selected_cell,
+# set_selected_cell, clear_selected_cell, is_cell_selected). Do NOT simply add
+# them to the import above: four of them are defined BELOW it and would shadow
+# the import, leaving the duplication in place while looking fixed. Each needs
+# its local def deleted in the same edit.
 
 
 # Third verdict for the PPT gene slide, used when a marker IS significant but
