@@ -741,6 +741,12 @@ def _clear_non_gene_widget_state() -> None:
             st.session_state.pop(key, None)
 
 
+def _safe_image_stem(gene: str) -> str:
+    """Filename stem for an exported gene image: display name, path-safe."""
+    name = str(st.session_state.get("gene_display_names", {}).get(gene, gene))
+    return re.sub(r'[\\/:*?"<>|]+', "_", name).strip() or str(gene)
+
+
 def _push_qc_history() -> None:
     """Snapshot the whole QC decision state before changing it.
 
@@ -1101,7 +1107,16 @@ def build_all_figures(gene_list, efficacy_config: dict) -> None:
     Genes whose inputs are unchanged since the last run keep their existing
     figure instead of being rebuilt (see the fingerprint note above).
     """
-    figures_for_genes(gene_list, efficacy_config)
+    _figs, _errs = figures_for_genes(gene_list, efficacy_config)
+    # The errors used to be discarded here, so a gene whose chart failed to build
+    # was simply missing from st.session_state.graphs — and the exports then
+    # placed a blank white picture (or silently shipped N-1 images) with nothing
+    # anywhere saying why. This is the point every export is driven from.
+    for _gene, _err in _errs.items():
+        st.warning(
+            f"{_gene}: chart could not be built ({_err}). It will be missing or "
+            f"blank in the Excel, PowerPoint and image exports."
+        )
 
 
 def _render_per_bar_table(current_gene, gene_data):
@@ -1351,7 +1366,25 @@ def render_gene_editor(current_gene):
                 value=st.session_state.gene_display_names.get(current_gene, current_gene),
                 key=f"gene_display_{current_gene}", placeholder=current_gene)
             gds = (gene_display.strip() if gene_display else "")[:50]
-            if gds and gds != current_gene:
+            # Two genes sharing a display name silently collapse to one in the
+            # Excel export: _disp overwrites Target before both the Summary
+            # groupby (which averages them together) and the FC_Matrix pivot,
+            # whose aggfunc="first" keeps one gene's numbers and discards the
+            # other's — on the sheet people paste into reports. Refuse the
+            # collision here rather than losing data there.
+            _taken = {
+                v for k, v in st.session_state.gene_display_names.items()
+                if k != current_gene
+            } | {
+                g for g in st.session_state.processed_data if g != current_gene
+            }
+            if gds and gds in _taken:
+                st.error(
+                    f"'{gds}' is already used by another gene. Excel would merge "
+                    f"the two into one row, so this rename was not applied."
+                )
+                st.session_state.gene_display_names.pop(current_gene, None)
+            elif gds and gds != current_gene:
                 st.session_state.gene_display_names[current_gene] = gds
             elif current_gene in st.session_state.gene_display_names:
                 del st.session_state.gene_display_names[current_gene]
@@ -2669,12 +2702,15 @@ class PPTGenerator:
             extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
             img_bytes = ReportGenerator._fig_to_image(fig, format="png", scale=2, width=fb_w, height=fb_h + extra_b)
             image_stream = io.BytesIO(img_bytes)
+            # Width only: passing both width and height forced every chart into
+            # a fixed 1.5 aspect ratio unrelated to what was rendered (17%
+            # stretch at the defaults). python-pptx derives the missing dimension
+            # from the image, so the bitmap is never distorted.
             slide.shapes.add_picture(
                 image_stream,
                 Inches(0.5),
                 Inches(1.5),
                 width=Inches(6.0),
-                height=Inches(4.0),
             )
         except Exception as e:
             err_box = slide.shapes.add_textbox(
@@ -2889,8 +2925,32 @@ class PPTGenerator:
             elif "Results" in full_text or "효능 有" in full_text:
                 has_efficacy = False
                 if gene_data is not None and not gene_data.empty:
-                    sig_vals = gene_data.get("significance", pd.Series())
-                    has_efficacy = sig_vals.str.len().gt(0).any() if not sig_vals.empty else False
+                    # Judge efficacy on the TEST ARTICLE only. This tested the
+                    # whole significance column, and calculate_statistics marks
+                    # every condition except the comparison one — including the
+                    # assay's positive control. So a run where the positive
+                    # control worked and the sample did nothing still stamped
+                    # "Results: 효능 有" on the client slide, next to a chart
+                    # saying the opposite.
+                    _ctl = EFFICACY_CONFIG.get(
+                        analysis_params.get("Efficacy_Type", ""), {}
+                    ).get("controls", {})
+                    _skip = {
+                        analysis_params.get("Reference_Sample"),
+                        analysis_params.get("Compare_To"),
+                        _ctl.get("positive"), _ctl.get("positive_display"),
+                        _ctl.get("negative"), _ctl.get("negative_display"),
+                    } - {None, ""}
+                    _rows = gene_data
+                    if "Condition" in gene_data.columns and _skip:
+                        _norm = gene_data["Condition"].astype(str).str.strip().str.lower()
+                        _skip_norm = {str(s).strip().lower() for s in _skip}
+                        _rows = gene_data[~_norm.isin(_skip_norm)]
+                    sig_vals = _rows.get("significance", pd.Series(dtype=object))
+                    has_efficacy = (
+                        bool(sig_vals.astype(str).str.len().gt(0).any())
+                        if len(sig_vals) else False
+                    )
                 result_text = f"Results: 효능 {'有' if has_efficacy else '無'}"
                 for para in shape.text_frame.paragraphs:
                     runs = list(para.runs)
@@ -2941,18 +3001,46 @@ class PPTGenerator:
         w_cm = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
         h_cm = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
 
+        # go.Figure(None) is a VALID empty figure, so a gene whose chart failed
+        # to build used to be placed as a blank white picture and the except
+        # branch below — which writes the visible "Graph Error" box — never ran.
+        if fig is None:
+            raise ValueError(
+                f"No chart could be built for {gene}, so it cannot be placed on "
+                f"the slide."
+            )
+
+        # Render at the figure's OWN pixel size where it has one. graph.py
+        # auto-widens the figure for many bars (max(configured, n_bars*1.4) cm),
+        # and re-rendering at the configured width squeezed labels that had been
+        # wrapped for the wider canvas.
+        _px_w = int(getattr(fig.layout, "width", 0) or int(w_cm * CM_TO_PX))
+        _px_h = int(getattr(fig.layout, "height", 0) or int(h_cm * CM_TO_PX))
+        _px_w = max(_px_w, 1)
+        _px_h = max(_px_h, 1)
+        # The 800x500 floors are what made the frame and the bitmap disagree:
+        # when a floor bound, the rendered aspect ratio no longer matched the
+        # frame computed from the raw cm, and python-pptx stretched the image to
+        # fit (32.5% vertically for the Square preset, 14.3% for PPT Half).
+        # Raise the short side but keep the aspect ratio.
+        if _px_w < 800:
+            _px_h = int(round(_px_h * 800 / _px_w))
+            _px_w = 800
+        if _px_h < 500:
+            _px_w = int(round(_px_w * 500 / _px_h))
+            _px_h = 500
+
         fig_copy = go.Figure(fig)
-        fig_copy.update_layout(
-            width=max(int(w_cm * CM_TO_PX), 800),
-            height=max(int(h_cm * CM_TO_PX), 500),
-        )
+        fig_copy.update_layout(width=_px_w, height=_px_h)
 
         try:
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
             img_stream = io.BytesIO(img_bytes)
 
+            # Frame follows the rendered aspect ratio so the bitmap is never
+            # stretched; width still honours the user's cm setting.
             w_emu = int(w_cm * CM_TO_EMU)
-            h_emu = int(h_cm * CM_TO_EMU)
+            h_emu = int(round(w_emu * _px_h / _px_w))
             # Available area: ~1.0" to ~6.6" vertically, ~12" wide
             max_w_emu = int(11.5 * 914400)
             max_h_emu = int(5.2 * 914400)
@@ -3020,15 +3108,15 @@ class PPTGenerator:
                 gene_data_local = processed_data.get(gene)
                 if gene_data_local is None or gene_data_local.empty:
                     return None
-                disp = gene_display_names.get(gene, gene)
-                return GraphGenerator.create_gene_graph(
-                    gene_data_local,
+                # Rebuild through build_gene_figure so a lazily-built figure
+                # carries the SAME resolved per-gene settings as the on-screen
+                # chart. Passing the raw graph_settings here dropped this gene's
+                # overrides, colour preset, reference line and data-point overlay,
+                # so the slide silently disagreed with the screen.
+                return build_gene_figure(
                     gene,
-                    gs or {},
+                    gene_data_local,
                     EFFICACY_CONFIG.get(analysis_params.get("Efficacy_Type", ""), {}),
-                    sample_order=st.session_state.get("sample_order"),
-                    display_gene_name=disp,
-                    ref_condition=st.session_state.get("analysis_ref_condition"),
                 )
             except Exception:
                 return None
@@ -3092,15 +3180,30 @@ class PPTGenerator:
 
 
 # ==================== EXPORT FUNCTIONS ====================
-def _sanitize_sheet_name(name: str, used_names: set) -> str:
-    """Sanitize Excel sheet name: remove invalid chars, truncate, deduplicate."""
+def _sanitize_sheet_name(name: str, used_names: set, suffix: str = "") -> str:
+    """Sanitize Excel sheet name: remove invalid chars, truncate, deduplicate.
+
+    ``suffix`` (e.g. "_Analysis", "_Chart") is kept whole and the NAME is
+    truncated to fit around it. Concatenating first and truncating afterwards cut
+    the suffix off entirely for any display name of 22 characters or more, so the
+    data sheet and the chart sheet for one gene ended up as indistinguishable
+    "…", "…_1", "…_2" pairs.
+    """
     import re
-    safe = re.sub(r'[\\/*\[\]:?]', '_', name)[:31]
-    base = safe
+    # Excel also rejects a sheet name that starts or ends with an apostrophe, and
+    # an embedded one has to be doubled inside a quoted sheet reference. The
+    # error-bar formulas below are hand-built and did not escape it, so a target
+    # like 5'-NT produced a chart XML that Excel refuses to open. Replacing it
+    # keeps every reference builder in agreement.
+    bad = r"[\\/*\[\]:?']"
+    safe_suffix = re.sub(bad, "_", str(suffix or ""))
+    limit = 31 - len(safe_suffix)
+    body = re.sub(bad, "_", str(name))[:max(limit, 1)]
+    safe = base = (body + safe_suffix) or "Sheet"
     counter = 1
     while safe in used_names:
-        suffix = f"_{counter}"
-        safe = base[: 31 - len(suffix)] + suffix
+        tail = f"_{counter}"
+        safe = base[: 31 - len(tail)] + tail
         counter += 1
     used_names.add(safe)
     return safe
@@ -3157,7 +3260,7 @@ def export_to_excel(
         _used_sheet_names = {"Analysis_Parameters", "Raw_Data"}
         for gene, gene_data in processed_data.items():
             display = _disp(gene)
-            sheet_name = _sanitize_sheet_name(f"{display}_Analysis", _used_sheet_names)
+            sheet_name = _sanitize_sheet_name(display, _used_sheet_names, "_Analysis")
             gene_export = gene_data.copy()
             # Preserve raw gene name so an exported sheet can be cross-referenced
             # to raw_data["Target"] even when the user has renamed the gene.
@@ -3328,7 +3431,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
 
         display = _disp(gene)
         display_for_chart_order.append(display)
-        sheet_name = _sanitize_sheet_name(f"{display}_Chart", _used_sheet_names)
+        sheet_name = _sanitize_sheet_name(display, _used_sheet_names, "_Chart")
         ws = wb.create_sheet(sheet_name)
 
         # Build data columns
@@ -3486,7 +3589,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         )
         chart.y_axis.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(yax_sp_xml))
 
-        ws.add_chart(chart, "I3")
+        # Anchor clear of the data block. "I3" was hardcoded while the block runs
+        # to column K once a 2nd/3rd comparison exists, so a full-width chart sat
+        # on top of significance_2, FC_Err_Upper and FC_Err_Lower — the values
+        # were intact but hidden underneath.
+        ws.add_chart(chart, f"{get_column_letter(err_minus_col + 2)}3")
 
     # ---- Phase 1 complete: save workbook to bytes ----
     phase1_buf = io.BytesIO()
@@ -3498,6 +3605,10 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     nsmap = {"c": C, "a": A}
 
     phase1_buf.seek(0)
+    # try/finally rather than bare handles: the XML rewriting loop between the
+    # two ZipFile objects can raise, and export_to_excel surfaces that as
+    # "Excel generation failed" — leaving both handles and their BytesIO open for
+    # the life of the session, once per retry.
     zf_in = zipfile.ZipFile(phase1_buf, "r")
 
     # Identify which chart files are gene charts (the ones we just added).
@@ -3524,52 +3635,54 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     result = io.BytesIO()
     zf_out = zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED)
 
-    for item in zf_in.infolist():
-        data = zf_in.read(item.filename)
+    try:
+        for item in zf_in.infolist():
+            data = zf_in.read(item.filename)
 
-        if item.filename in gene_for_chart:
-            gene = gene_for_chart[item.filename]
-            root = etree.fromstring(data)
+            if item.filename in gene_for_chart:
+                gene = gene_for_chart[item.filename]
+                root = etree.fromstring(data)
 
-            cat_ax = root.find(".//c:catAx", nsmap)
-            val_ax = root.find(".//c:valAx", nsmap)
+                cat_ax = root.find(".//c:catAx", nsmap)
+                val_ax = root.find(".//c:valAx", nsmap)
 
-            # X-axis: add txPr for 9pt gray Arial labels
-            if cat_ax is not None:
-                cat_ax.append(_build_axis_txpr(C, A))
+                # X-axis: add txPr for 9pt gray Arial labels
+                if cat_ax is not None:
+                    cat_ax.append(_build_axis_txpr(C, A))
 
-            if val_ax is not None:
-                # Hidden gridlines (noFill)
-                mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
-                mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
-                mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
-                etree.SubElement(mg_ln, f"{{{A}}}noFill")
+                if val_ax is not None:
+                    # Hidden gridlines (noFill)
+                    mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
+                    mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
+                    mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
+                    etree.SubElement(mg_ln, f"{{{A}}}noFill")
 
-                # Y-axis tick label font
-                val_ax.append(_build_axis_txpr(C, A))
+                    # Y-axis tick label font
+                    val_ax.append(_build_axis_txpr(C, A))
 
-                # Rich text Y-axis title
-                _build_yaxis_title(val_ax, gene, hk_gene, C, A)
+                    # Rich text Y-axis title
+                    _build_yaxis_title(val_ax, gene, hk_gene, C, A)
 
-            # Chart area: white fill, light gray border
-            chart_space = root
-            cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
-            sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
-            etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
-            ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
-            ln_cs.set("w", "9525")
-            sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
-            sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
-            sc_ln.set("val", "tx1")
-            etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
-            etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
+                # Chart area: white fill, light gray border
+                chart_space = root
+                cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
+                sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
+                etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
+                ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
+                ln_cs.set("w", "9525")
+                sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
+                sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
+                sc_ln.set("val", "tx1")
+                etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
+                etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
 
-            data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
-        zf_out.writestr(item, data)
+            zf_out.writestr(item, data)
 
-    zf_in.close()
-    zf_out.close()
+    finally:
+        zf_out.close()
+        zf_in.close()
     result.seek(0)
     return result
 
@@ -5833,6 +5946,11 @@ with tab5:
             "params": {k: v for k, v in analysis_params.items() if k != "Date"},
             "settings": st.session_state.get("graph_settings"),
             "display_names": st.session_state.get("gene_display_names"),
+            # Reordering samples is a drag-and-drop that changes every chart's
+            # bar order, but it is deliberately kept out of the analysis
+            # snapshot, so without it here a reordered panel still served the
+            # previously generated deck.
+            "order": st.session_state.get("sample_order"),
             "genes": {
                 g: _df_fingerprint(df)
                 for g, df in st.session_state.processed_data.items()
@@ -5970,15 +6088,21 @@ with tab5:
                 today = datetime.now().strftime("%Y%m%d")
                 st.download_button(
                     f"⬇️ Download All Images (.zip, {len(cached['images'])})",
-                    data=build_zip({f"{g}.{_cfmt}": b for g, b in cached["images"].items()}),
+                    # Display name, not the raw target: Excel and PPT honour the
+                    # rename and only the images did not. Sanitised because a
+                    # target containing "/" became a directory inside the zip.
+                    data=build_zip({
+                        f"{_safe_image_stem(g)}.{_cfmt}": b
+                        for g, b in cached["images"].items()
+                    }),
                     file_name=f"qPCR_images_{efficacy}_{today}.zip",
                     mime="application/zip", width='stretch', key="dl_images_zip",
                 )
                 img_cols = st.columns(min(len(cached["images"]), 4))
                 for idx, (gene, img_bytes) in enumerate(cached["images"].items()):
                     with img_cols[idx % len(img_cols)]:
-                        st.download_button(label=f"{gene}.{_cfmt}", data=img_bytes,
-                            file_name=f"{gene}_{today}.{_cfmt}",
+                        st.download_button(label=f"{_safe_image_stem(gene)}.{_cfmt}", data=img_bytes,
+                            file_name=f"{_safe_image_stem(gene)}_{today}.{_cfmt}",
                             mime=_cmime, key=f"img_{gene}", width='stretch')
     else:
         st.warning("Complete analysis first.")
