@@ -202,6 +202,88 @@ class TestGraphGeneratorBugFixes:
         assert fig.layout is not None
 
 
+class TestSlideLegibilityAndFraming:
+    """Chart text is sized in figure pixels but read on a slide.
+
+    The PPT writer places the image 9.11in wide, so on a 28cm (1058px) figure
+    one figure pixel is 0.620pt: the 9px captions landed at 5.6pt and the 12px
+    ticks at 7.4pt, against slide chrome of 11-16pt. Meanwhile 40% of every
+    exported PNG was blank and the plot area was 44% of the image.
+    """
+
+    def _fig(self, **overrides):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+
+        conds = ["Non-treated", "EGF 25 ng/ml", "Test article 1 ppm",
+                 "Test article 10 ppm", "Test article 100 ppm"]
+        data = pd.DataFrame({
+            "Target": ["KI67"] * 5,
+            "Condition": conds,
+            "Relative_Expression": [1.0, 0.52, 0.46, 0.65, 0.45],
+            "Fold_Change": [1.0, 0.52, 0.46, 0.65, 0.45],
+            "FC_Error_Upper": [0.25, 0.04, 0.01, 0.27, 0.05],
+            "FC_Error_Lower": [0.25, 0.04, 0.01, 0.27, 0.05],
+            "n_replicates": [3] * 5,
+            "significance": ["", "***", "***", "*", "***"],
+        })
+        settings = {"show_error": True, "show_significance": True,
+                    "figure_width": 28, "figure_height": 16}
+        settings.update(overrides)
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67", settings=settings, sample_order=None
+        )
+
+    def _pt_per_px(self, width_cm=28):
+        from qpcr.constants import CM_TO_PX
+        from qpcr.graph import PPT_PLACEMENT_WIDTH_IN
+        return (PPT_PLACEMENT_WIDTH_IN * 72.0) / int(width_cm * CM_TO_PX)
+
+    def test_no_chart_text_falls_below_the_slide_floor(self, mock_streamlit):
+        from qpcr.graph import MIN_SLIDE_PT
+        fig = self._fig()
+        ppx = self._pt_per_px()
+        sizes = [fig.layout.xaxis.tickfont.size, fig.layout.yaxis.title.font.size]
+        sizes += [a.font.size for a in fig.layout.annotations
+                  if a.font and a.font.size]
+        worst = min(sizes)
+        assert worst * ppx >= MIN_SLIDE_PT - 1e-6, (
+            f"smallest chart text is {worst}px = {worst * ppx:.1f}pt on the "
+            f"slide, below the {MIN_SLIDE_PT}pt floor"
+        )
+
+    def test_the_size_hierarchy_survives_scaling(self, mock_streamlit):
+        """Clamping each size to the floor would flatten these into one value."""
+        fig = self._fig()
+        tick = fig.layout.xaxis.tickfont.size
+        ytitle = fig.layout.yaxis.title.font.size
+        caps = [a.font.size for a in fig.layout.annotations
+                if a.font and a.font.size and a.yref == "paper"]
+        assert caps, "expected the error/significance captions"
+        assert min(caps) < tick < ytitle, (
+            f"captions {min(caps)} < ticks {tick} < y-title {ytitle} expected"
+        )
+
+    def test_the_plot_area_is_most_of_the_figure(self, mock_streamlit):
+        from qpcr.constants import CM_TO_PX
+        fig = self._fig()
+        fig_h = int(16 * CM_TO_PX)
+        m = fig.layout.margin
+        plot_h = fig_h - (m.b or 0) - (m.t or 0)
+        assert plot_h / fig_h >= 0.60, (
+            f"plot area is {plot_h / fig_h:.0%} of the figure; it was 44% when "
+            f"the margins were floors rather than measurements"
+        )
+
+    def test_bottom_margin_tracks_the_label_block(self, mock_streamlit):
+        """One line of labels must cost less than three."""
+        one = self._fig(label_mode="Horizontal")
+        wrapped = self._fig(label_mode="Auto-wrap")
+        assert (one.layout.margin.b or 0) < (wrapped.layout.margin.b or 0), (
+            "a single-line label row should reserve less than a wrapped one"
+        )
+
+
 class TestStackedSignificanceSpacing:
     """Stacked significance symbols must clear each other in PIXELS.
 
