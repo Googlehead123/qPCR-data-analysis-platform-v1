@@ -1,8 +1,8 @@
 """Guards for the cache-fronted QC helpers in the monolith.
 
-`st.tabs` executes every tab body on every rerun, so the QC dashboard's summary,
-replicate table and plate heatmaps used to recompute on each widget interaction
-anywhere in the app. They are now memoized.
+`st.tabs` executes every tab body on every rerun, so the QC dashboard's summary
+and replicate table used to recompute on each widget interaction anywhere in the
+app. They are now memoized.
 
 Two things have to hold:
 
@@ -93,17 +93,11 @@ def test_replicate_stats_wrapper_matches_direct_call(app, qc_data):
     )
 
 
-def test_plate_heatmap_wrapper_returns_a_figure(app, qc_data):
-    fig = app.get_plate_heatmap(qc_data, value_col="CT", excluded_wells=set())
-    assert fig.data, "heatmap should carry at least one trace"
-
-
-def test_plate_heatmap_caller_can_mutate_the_result(app, qc_data):
-    """Call sites apply update_layout(title=...); that must not corrupt the memo."""
-    first = app.get_plate_heatmap(qc_data, value_col="CT", excluded_wells=set())
-    first.update_layout(title="Plate Heatmap — COL1A1")
-    second = app.get_plate_heatmap(qc_data, value_col="CT", excluded_wells=set())
-    assert second.layout.title.text != "Plate Heatmap — COL1A1"
+def test_plate_heatmap_is_gone(app):
+    """The 96-well heatmap was removed: an 8x12 grid cannot represent the
+    concatenated multi-plate frames every real export produces."""
+    assert not hasattr(app, "get_plate_heatmap")
+    assert not hasattr(app.QualityControl, "create_plate_heatmap")
 
 
 # ---- cache-key completeness ----------------------------------------------

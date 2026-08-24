@@ -394,10 +394,10 @@ def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping,
 
 # ==================== QC MEMOIZATION ====================
 # st.tabs renders EVERY tab body on EVERY rerun — Streamlit does not lazily skip
-# the tabs you aren't looking at. So the QC dashboard's summary, replicate table
-# and up to three plate heatmaps used to recompute on every widget interaction
-# anywhere in the app. All three helpers are pure (qpcr/quality_control.py reads
-# no session_state), so memoizing them is exact.
+# the tabs you aren't looking at. So the QC dashboard's summary and replicate
+# table used to recompute on every widget interaction anywhere in the app. Both
+# helpers are pure (qpcr/quality_control.py reads no session_state), so
+# memoizing them is exact.
 
 
 # The QC Settings widgets ARE the store: a widget key is session state, so the
@@ -520,14 +520,6 @@ def _cached_replicate_stats(data: pd.DataFrame, thresholds: tuple) -> pd.DataFra
     )
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
-def _cached_plate_heatmap(data: pd.DataFrame, value_col: str, excluded_key: tuple,
-                          thresholds: tuple) -> go.Figure:
-    return QualityControl.create_plate_heatmap(
-        data, value_col=value_col, excluded_wells=_unkey_excluded(excluded_key)
-    )
-
-
 def get_qc_summary_stats(data, excluded_wells=None) -> dict:
     """Cache-fronted QC summary with a live fallback (see the caching note above)."""
     try:
@@ -545,22 +537,6 @@ def get_replicate_stats(data) -> pd.DataFrame:
     except Exception:
         return QualityControl.get_replicate_stats(
             data, thresholds=qc_thresholds()
-        )
-
-
-def get_plate_heatmap(data, value_col: str = "CT", excluded_wells=None) -> go.Figure:
-    """Cache-fronted plate heatmap with a live fallback.
-
-    ``st.cache_data`` hands every caller its own copy, so the call sites that
-    then apply ``update_layout(title=...)`` cannot corrupt the cached figure.
-    """
-    try:
-        return _cached_plate_heatmap(
-            data, value_col, _excluded_key(excluded_wells), _qc_threshold_key()
-        )
-    except Exception:
-        return QualityControl.create_plate_heatmap(
-            data, value_col=value_col, excluded_wells=excluded_wells
         )
 
 
@@ -911,7 +887,6 @@ _RESET_WIDGET_KEYS = frozenset({
     # wrong control.
     "overview_benchmark", "overview_highlight",
     # Display-only, but pointing at genes/samples that no longer exist.
-    "heatmap_gene_select", "heatmap_sample_select",
     "qc_gene_filter", "qc_sample_filter", "qc_grid_selected_cell",
     # Auto-QC review state for the previous file's triplicates.
     "qc_sd_threshold_input", "auto_qc_audit_editor",
@@ -1413,58 +1388,6 @@ def _render_per_bar_table(current_gene, gene_data):
                     label_visibility="collapsed",
                 )
         bs["show_sig"] = bs["show_sig_1"] or bs["show_sig_2"] or bs["show_sig_3"]
-
-
-@st.fragment
-def render_plate_heatmaps(data, excluded_wells) -> None:
-    """Plate heatmaps plus their two filter selectboxes.
-
-    A fragment: the gene/sample filters are display-only, so changing one should
-    redraw this block rather than re-execute the whole script (Streamlit renders
-    every one of the seven top-level tabs on each full rerun, so an app-scope
-    rerun from a filter click was paying for all of them).
-
-    Exclusions arrive as an argument rather than being read live: Streamlit
-    replays a fragment with its last arguments, and anything that can change the
-    exclusions lives outside this fragment and triggers a full rerun anyway.
-    """
-    plate_fig = get_plate_heatmap(data, value_col="CT", excluded_wells=excluded_wells)
-    st.plotly_chart(plate_fig, width='stretch')
-    st.caption(
-        "Red = High CT (low expression) | Green = Low CT (high expression) | X = Excluded"
-    )
-
-    # Per-gene heatmap
-    all_genes = sorted(data["Target"].dropna().unique().tolist())
-    if all_genes:
-        selected_gene = st.selectbox(
-            "Filter heatmap by gene",
-            options=["(All)"] + all_genes,
-            key="heatmap_gene_select",
-        )
-        if selected_gene != "(All)":
-            gene_fig = get_plate_heatmap(
-                data[data["Target"] == selected_gene],
-                value_col="CT", excluded_wells=excluded_wells,
-            )
-            gene_fig.update_layout(title=f"Plate Heatmap — {selected_gene}")
-            st.plotly_chart(gene_fig, width='stretch')
-
-    # Per-sample heatmap
-    all_samples = sorted(data["Sample"].dropna().unique().tolist(), key=natural_sort_key)
-    if all_samples:
-        selected_sample = st.selectbox(
-            "Filter heatmap by sample",
-            options=["(All)"] + all_samples,
-            key="heatmap_sample_select",
-        )
-        if selected_sample != "(All)":
-            sample_fig = get_plate_heatmap(
-                data[data["Sample"] == selected_sample],
-                value_col="CT", excluded_wells=excluded_wells,
-            )
-            sample_fig.update_layout(title=f"Plate Heatmap — {selected_sample}")
-            st.plotly_chart(sample_fig, width='stretch')
 
 
 @st.fragment
@@ -5149,46 +5072,43 @@ with tab_qc:
         # ==================== TAB 2: QC OVERVIEW (CONSOLIDATED) ====================
         with qc_tab2:
             st.subheader("QC Overview")
-            st.caption("Plate heatmap, auto-flagged wells, and pre-analysis summary at a glance.")
+            st.caption("Replicate statistics, auto-flagged wells, and pre-analysis summary at a glance.")
 
-            # ---- Section 1: Plate Heatmap ----
-            st.markdown("### Plate Heatmap")
-            heatmap_col1, heatmap_col2 = st.columns([2, 1])
+            # ---- Section 1: Replicate Statistics ----
+            # The 96-well plate heatmap that used to head this tab was removed:
+            # the app concatenates every uploaded file into one frame, so a
+            # plate coordinate like "A1" recurs once per plate and per target,
+            # and an 8x12 grid can only draw one reaction per cell. Every real
+            # export here concatenates, so the grid silently hid most of the
+            # reactions it appeared to summarise. The replicate table below is
+            # keyed by (Sample, Target) and has no such ceiling.
+            st.markdown("### Replicate Statistics")
 
-            with heatmap_col1:
-                # The dict, not get_all_excluded_wells(): flattening excludes a
-                # plate coordinate for every gene and sample sharing it, so the
-                # heatmap marked wells that DDCt still used, and disagreed with
-                # the QC summary directly above it (which passes the dict).
-                render_plate_heatmaps(
-                    data, st.session_state.get("excluded_wells", {})
-                )
+            # Exclusions have to be applied here: get_replicate_stats takes
+            # no exclusion argument, and the Excel export pre-filters before
+            # calling it. The same "Replicate Statistics" table was therefore
+            # showing n=3 / High CV on screen while the workbook said n=2 /
+            # OK for the very same triplicate.
+            _rs_mask = QualityControl.excluded_mask(
+                data, st.session_state.get("excluded_wells", {})
+            )
+            rep_stats = get_replicate_stats(
+                data[~_rs_mask] if _rs_mask.any() else data
+            )
+            if not rep_stats.empty:
+                def highlight_status(row):
+                    if row["Status"] == "High CV":
+                        return ["background-color: #fff3cd"] * len(row)
+                    elif row["Status"] == "Low Expression":
+                        return ["background-color: #f8d7da"] * len(row)
+                    elif row["Status"] == "Check Signal":
+                        return ["background-color: #cce5ff"] * len(row)
+                    return [""] * len(row)
 
-            with heatmap_col2:
-                st.markdown("**Replicate Statistics**")
-                # Exclusions have to be applied here: get_replicate_stats takes
-                # no exclusion argument, and the Excel export pre-filters before
-                # calling it. The same "Replicate Statistics" table was therefore
-                # showing n=3 / High CV on screen while the workbook said n=2 /
-                # OK for the very same triplicate.
-                _rs_mask = QualityControl.excluded_mask(
-                    data, st.session_state.get("excluded_wells", {})
-                )
-                rep_stats = get_replicate_stats(
-                    data[~_rs_mask] if _rs_mask.any() else data
-                )
-                if not rep_stats.empty:
-                    def highlight_status(row):
-                        if row["Status"] == "High CV":
-                            return ["background-color: #fff3cd"] * len(row)
-                        elif row["Status"] == "Low Expression":
-                            return ["background-color: #f8d7da"] * len(row)
-                        elif row["Status"] == "Check Signal":
-                            return ["background-color: #cce5ff"] * len(row)
-                        return [""] * len(row)
-
-                    styled_stats = rep_stats.style.apply(highlight_status, axis=1)
-                    st.dataframe(styled_stats, height=400, width='stretch')
+                styled_stats = rep_stats.style.apply(highlight_status, axis=1)
+                st.dataframe(styled_stats, height=400, width='stretch')
+            else:
+                st.info("No replicate statistics to show for the current data.")
 
             # ---- Section 2: Flagged Wells (SD-based, matches Triplicate Browser) ----
             st.markdown("### Flagged Wells")

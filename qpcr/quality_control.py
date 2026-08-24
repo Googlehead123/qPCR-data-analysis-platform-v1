@@ -1,12 +1,11 @@
 """QualityControl — QC checks, outlier detection, and triplicate statistics.
 
-Provides Grubbs test, plate heatmap, replicate stats, and well-level diagnostics.
+Provides Grubbs test, replicate stats, and well-level diagnostics.
 No Streamlit dependency — all methods are pure computation.
 """
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 from scipy import stats
 from typing import Tuple
 
@@ -717,118 +716,3 @@ class QualityControl:
         rep_stats["n"] = rep_stats["n"].astype(int)
 
         return rep_stats[["Sample", "Target", "n", "Mean CT", "SD", "CV%", "Status"]]
-
-    @staticmethod
-    def create_plate_heatmap(
-        data: pd.DataFrame, value_col: str = "CT", excluded_wells: set = None
-    ) -> go.Figure:
-        if data is None or data.empty:
-            return go.Figure()
-
-        # Coordinate-aware exclusion. Flattening a per-(gene, sample) dict to
-        # bare well IDs marks that plate position excluded for every gene and
-        # sample sharing it, so the heatmap crossed out wells DDCt still used.
-        # Multi-file uploads are concatenated (the app tells operators to upload
-        # plates together when the reference gene is in another file), so one
-        # well ID legitimately recurs across plates. Keep the coordinate.
-        excluded_scoped: set = set()
-        excluded_flat: set = set()
-        if isinstance(excluded_wells, dict):
-            for _k, _ws in excluded_wells.items():
-                if isinstance(_k, tuple) and len(_k) == 2:
-                    _gene, _sample = _k
-                    excluded_scoped.update(
-                        (str(_gene), str(_sample), str(_w)) for _w in (_ws or ())
-                    )
-                else:
-                    # Unrecognised key shape: fall back to a bare well match
-                    # rather than silently dropping the exclusion.
-                    excluded_flat.update(str(_w) for _w in (_ws or ()))
-        else:
-            excluded_flat = {str(_w) for _w in (excluded_wells or ())}
-
-        rows = list("ABCDEFGH")
-        cols = list(range(1, 13))
-
-        plate_values = np.full((8, 12), np.nan)
-        plate_text = [["" for _ in range(12)] for _ in range(8)]
-        plate_colors = [[0 for _ in range(12)] for _ in range(8)]
-        # Grid positions to cross out. Collected here, where the row's (Target,
-        # Sample) is known, so the red X agrees with the "[X]" hover marker and
-        # inherits the same scoping. The annotation loop below has no row
-        # context of its own, which is why it used to need a flat well set.
-        excluded_positions: set = set()
-
-        for _, row in data.iterrows():
-            well = row["Well"]
-            if len(well) >= 2:
-                well_row = well[0].upper()
-                try:
-                    well_col = int(well[1:])
-                except ValueError:
-                    continue
-
-                if well_row in rows and 1 <= well_col <= 12:
-                    r_idx = rows.index(well_row)
-                    c_idx = well_col - 1
-
-                    ct_val = row[value_col]
-                    plate_values[r_idx, c_idx] = ct_val
-
-                    sample_short = str(row["Sample"])[:10]
-                    target_short = str(row["Target"])[:8]
-                    # Match padded and unpadded forms alike ("A1" / "A01"):
-                    # the old annotation loop accepted both and the exclusion
-                    # source is not guaranteed to use the same form as the file.
-                    _aliases = {
-                        str(well),
-                        f"{well_row}{well_col}",
-                        f"{well_row}{well_col:02d}",
-                    }
-                    _tgt, _smp = str(row["Target"]), str(row["Sample"])
-                    is_excluded = bool(
-                        _aliases & excluded_flat
-                        or any((_tgt, _smp, a) in excluded_scoped for a in _aliases)
-                    )
-                    excluded_marker = " [X]" if is_excluded else ""
-                    plate_text[r_idx][c_idx] = (
-                        f"{well}{excluded_marker}<br>{sample_short}<br>{target_short}<br>CT: {ct_val:.1f}"
-                    )
-
-                    if is_excluded:
-                        plate_colors[r_idx][c_idx] = -1
-                        excluded_positions.add((r_idx, c_idx))
-
-        fig = go.Figure(
-            data=go.Heatmap(
-                z=plate_values,
-                x=[str(c) for c in cols],
-                y=rows,
-                text=plate_text,
-                hoverinfo="text",
-                colorscale=[[0, "#2ecc71"], [0.5, "#f1c40f"], [1, "#e74c3c"]],
-                zmin=15,
-                zmax=40,
-                colorbar=dict(title="CT Value"),
-            )
-        )
-
-        for r_idx, c_idx in sorted(excluded_positions):
-            fig.add_annotation(
-                x=str(cols[c_idx]),
-                y=rows[r_idx],
-                text="X",
-                showarrow=False,
-                font=dict(size=20, color="red"),
-                opacity=0.8,
-            )
-
-        fig.update_layout(
-            title="96-Well Plate Overview",
-            xaxis=dict(title="Column", side="top", dtick=1),
-            yaxis=dict(title="Row", autorange="reversed"),
-            height=400,
-            width=800,
-        )
-
-        return fig
