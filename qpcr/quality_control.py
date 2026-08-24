@@ -53,6 +53,24 @@ class QualityControl:
             "Wells",
         ]
 
+        # Restore the (Sample, Target) groups that lost every well to exclusions.
+        # Grouping only the survivors dropped them entirely instead of leaving an
+        # n=0 row that trips the "Low n" check below — so excluding a whole bad
+        # triplicate RAISED the health score (2 groups / 50% healthy became
+        # 1 group / 100%).
+        all_groups = df[["Sample", "Target"]].drop_duplicates()
+        if len(all_groups) > len(group_stats):
+            group_stats = all_groups.merge(
+                group_stats, on=["Sample", "Target"], how="left"
+            ).reset_index(drop=True)
+            group_stats["n"] = group_stats["n"].fillna(0).astype(int)
+            group_stats["CT_Values"] = group_stats["CT_Values"].apply(
+                lambda v: v if isinstance(v, list) else []
+            )
+            group_stats["Wells"] = group_stats["Wells"].apply(
+                lambda v: v if isinstance(v, list) else []
+            )
+
         # FIX-17: Return NaN instead of 0 when mean CT is non-positive (invalid)
         group_stats["CV_pct"] = np.where(
             group_stats["Mean_CT"] > 0,
@@ -588,8 +606,18 @@ class QualityControl:
             rep_stats["Mean CT"] > 0, (rep_stats["SD"] / rep_stats["Mean CT"]) * 100, np.nan
         )
 
+        # Use the configured thresholds, not literals. These were hardcoded to
+        # 10 / 35 / 5, so the QC Settings sliders moved the summary counts but
+        # never this table's Status column — raising CT_HIGH to 40 took the
+        # "high CT" count to zero while these rows still read "Low Expression".
+        # (_cached_replicate_stats also puts the threshold tuple in its cache key,
+        # which advertised a dependency that did not exist until now.)
         rep_stats["Status"] = np.select(
-            [rep_stats["Mean CT"] < 10, rep_stats["Mean CT"] > 35, rep_stats["CV%"] > 5],
+            [
+                rep_stats["Mean CT"] < QualityControl.CT_LOW_THRESHOLD,
+                rep_stats["Mean CT"] > QualityControl.CT_HIGH_THRESHOLD,
+                rep_stats["CV%"] > QualityControl.CV_THRESHOLD * 100,
+            ],
             ["Check Signal", "Low Expression", "High CV"],
             default="OK",
         )

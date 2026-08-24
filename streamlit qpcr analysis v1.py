@@ -3393,8 +3393,13 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         rows.append({"Metric": "CT Mean", "Value": qc_stats.get("ct_mean", "")})
         rows.append({"Metric": "CT SD", "Value": qc_stats.get("ct_std", "")})
         rows.append({"Metric": "CT Range", "Value": f"{qc_stats.get('ct_min', '')}-{qc_stats.get('ct_max', '')}"})
-        rows.append({"Metric": "High CT Wells (>35)", "Value": qc_stats.get("high_ct_count", "")})
-        rows.append({"Metric": "Low CT Wells (<10)", "Value": qc_stats.get("low_ct_count", "")})
+        # Interpolate the configured thresholds: the COUNTS honour QC Settings
+        # but these labels were hardcoded to 35/10, and this sheet goes to
+        # clients, so a re-thresholded run shipped a mislabelled row.
+        rows.append({"Metric": f"High CT Wells (>{QualityControl.CT_HIGH_THRESHOLD:g})",
+                     "Value": qc_stats.get("high_ct_count", "")})
+        rows.append({"Metric": f"Low CT Wells (<{QualityControl.CT_LOW_THRESHOLD:g})",
+                     "Value": qc_stats.get("low_ct_count", "")})
         rows.append({"Metric": "Total Triplicates", "Value": qc_stats.get("total_triplicates", "")})
         rows.append({"Metric": "Healthy Triplicates", "Value": qc_stats.get("healthy_triplicates", "")})
         rows.append({"Metric": "Warning Triplicates", "Value": qc_stats.get("warning_triplicates", "")})
@@ -4194,7 +4199,7 @@ with tab_qc:
                 f"{qc_stats.get('ct_min', 0):.1f} - {qc_stats.get('ct_max', 0):.1f}",
             )
             dist_cols[2].metric(
-                "High CT (>35)",
+                f"High CT (>{QualityControl.CT_HIGH_THRESHOLD:g})",
                 qc_stats.get("high_ct_count", 0),
                 delta="check" if qc_stats.get("high_ct_count", 0) > 0 else None,
                 delta_color="off",
