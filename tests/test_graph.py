@@ -154,7 +154,52 @@ class TestGraphGeneratorBugFixes:
         
         bar_trace = fig.data[0]
         error_values = bar_trace.error_y.array
-        assert all(v == 0 for v in error_values)
+        # Expectation updated 2026-08-24: a switched-off bar is now None, not 0.
+        # A 0-length error bar still draws its cap, so "disabled" looked
+        # identical to "measured a spread of exactly zero". Plotly omits the
+        # bar entirely for None, which is what this test is really asserting.
+        assert all(v is None for v in error_values)
+
+    def test_n1_undefined_spread_draws_no_error_bar(
+        self, mock_streamlit, processed_gene_data, graph_settings
+    ):
+        """n=1 has no estimable variance, so it must get NO error bar.
+
+        Regression test for the defect where calculate_ddct correctly stored
+        undefined spread as NaN and the graph then coerced it back to 0 with
+        .fillna(0) — drawing a zero-length bar, the visual signature of the
+        most precise measurement in the panel, on the single well QC left.
+        """
+        import numpy as np
+        from importlib import import_module
+        spec = import_module('streamlit qpcr analysis v1')
+        GraphGenerator = spec.GraphGenerator
+
+        data = processed_gene_data.copy()
+        # Middle condition is a lone well: NaN spread, as calculate_ddct stores.
+        data.loc[1, "n_replicates"] = 1
+        for col in ("FC_Error_Upper", "FC_Error_Lower"):
+            data[col] = [0.3, np.nan, 0.2]
+
+        graph_settings["show_error"] = True
+        fig = GraphGenerator.create_gene_graph(
+            data=data, gene='COL1A1', settings=graph_settings, sample_order=None
+        )
+
+        # Assert on the SERIALISED figure: that is what Plotly renders, and it
+        # is where NaN becomes null (the in-memory array keeps NaN).
+        import json
+        rendered = json.loads(fig.to_json())["data"][0]["error_y"]["array"]
+        assert rendered[1] is None, (
+            "the n=1 bar must render no error bar; a 0 would read as a "
+            f"measured spread of exactly zero (got {rendered[1]!r})"
+        )
+        assert rendered[0] is not None and rendered[2] is not None, (
+            "suppressing the undefined bar must not suppress its neighbours"
+        )
+        # And the significance marker must still lay out (it does arithmetic
+        # on this array, so a None here used to raise TypeError).
+        assert fig.layout is not None
 
 
 class TestGraphGeneratorWrapText:

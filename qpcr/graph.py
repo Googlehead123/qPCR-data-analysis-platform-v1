@@ -181,8 +181,13 @@ class GraphGenerator:
             _col = "SD" if error_bar_mode == "sd" else "SEM"
             _eu = _el = _col if _col in cols else "SEM"
             error_caption = f"Error bars: ±{_eu} (Ct domain — not fold-change scaled)"
-        error_upper_array = gene_data_indexed[_eu].fillna(0).values
-        error_lower_array = gene_data_indexed[_el].fillna(0).values
+        # NaN is kept, NOT filled with 0. calculate_ddct stores undefined spread
+        # (n=1: no estimable variance) as NaN; filling it with 0 drew a
+        # zero-length bar, which reads as "measured, perfectly precise" — the
+        # opposite of the truth. Plotly serialises NaN in an error array to
+        # null and omits that point's bar, leaving the others intact.
+        error_upper_array = gene_data_indexed[_eu].values
+        error_lower_array = gene_data_indexed[_el].values
 
         # Every trace used to be hardcoded showlegend=False, so the "Legend"
         # toggle switched on a legend with nothing in it. Name the traces and let
@@ -209,7 +214,9 @@ class GraphGenerator:
             if show_error_global and bar_config.get("show_err", True):
                 error_visible_upper.append(error_upper_array[idx])
             else:
-                error_visible_upper.append(0)
+                # None, not 0: a 0 still draws the cap, so a bar the user
+                # switched off looked like a measured zero spread.
+                error_visible_upper.append(None)
             error_visible_lower.append(0)  # top-only error bars
 
         fig.add_trace(
@@ -298,7 +305,14 @@ class GraphGenerator:
                 sig_3 = row.get("significance_3", "")
 
                 bar_height = row["Relative_Expression"]
-                error_bar_height = error_visible_upper[idx]
+                # None (bar switched off) and NaN (undefined spread at n=1) both
+                # mean "no error bar is drawn", so the marker sits at the bar
+                # top. Only the LAYOUT coerces to 0 — the plotted array keeps
+                # None/NaN so Plotly omits those bars.
+                _err = error_visible_upper[idx]
+                error_bar_height = (
+                    0.0 if _err is None or pd.isna(_err) else float(_err)
+                )
                 base_y_position = bar_height + error_bar_height
 
                 asterisk_font_size = 16

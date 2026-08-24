@@ -182,7 +182,7 @@ class AnalysisEngine:
                 # same asymmetric 2^-x transform as the Livak ±SD bars). Target-
                 # only, matching SD/SEM by design; 0 when n<2. Offered as an
                 # alternative to the ±SD bars (reviewers often prefer CIs).
-                if pd.notna(sem) and sem > 0 and n_target >= 2:
+                if pd.notna(sem) and n_target >= 2:
                     _ci = float(stats.t.ppf(0.975, n_target - 1)) * sem
                     fc_ci_upper = 2 ** (-(np.clip(ddct - _ci, -50, 50))) - rel_expr
                     fc_ci_lower = rel_expr - 2 ** (-(np.clip(ddct + _ci, -50, 50)))
@@ -212,13 +212,18 @@ class AnalysisEngine:
                         "Fold_Change": rel_expr,
                         # Fold-change domain error bars (Livak method)
                         # Upper/lower bounds account for nonlinear 2^x transform
+                        # pd.notna alone is the right guard: NaN already means
+                        # "undefined" (n=1, no estimable variance). The old
+                        # `sd > 0` also rejected a GENUINE zero — n>=2 identical
+                        # replicates — and exported it as undefined, when the
+                        # correct transformed error there is exactly 0.
                         "FC_Error_Upper": (
                             (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr)
-                            if pd.notna(sd) and sd > 0 else np.nan
+                            if pd.notna(sd) else np.nan
                         ),
                         "FC_Error_Lower": (
                             (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50))))
-                            if pd.notna(sd) and sd > 0 else np.nan
+                            if pd.notna(sd) else np.nan
                         ),
                         # Fold-change-domain SEM, same asymmetric transform as
                         # FC_Error_*. Without these the "SEM" error-bar mode
@@ -229,11 +234,11 @@ class AnalysisEngine:
                         # bar looked TIGHTER than a short one.
                         "FC_SEM_Upper": (
                             (2 ** (-(np.clip(ddct - sem, -50, 50))) - rel_expr)
-                            if pd.notna(sem) and sem > 0 else np.nan
+                            if pd.notna(sem) else np.nan
                         ),
                         "FC_SEM_Lower": (
                             (rel_expr - 2 ** (-(np.clip(ddct + sem, -50, 50))))
-                            if pd.notna(sem) and sem > 0 else np.nan
+                            if pd.notna(sem) else np.nan
                         ),
                         "FC_CI_Upper": fc_ci_upper,
                         "FC_CI_Lower": fc_ci_lower,
