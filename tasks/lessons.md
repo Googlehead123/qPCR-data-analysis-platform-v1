@@ -2,6 +2,20 @@
 
 ## 2026-03-18: Monolith + Package Dual-Class Architecture
 
+> **Partly superseded 2026-08-24.** The line numbers and the "inline copies
+> exist" claim below are no longer true, but the RULE still is — keep reading it
+> as a hazard, not as a map. Verified current state: `QPCRParser`,
+> `QualityControl` and `GraphGenerator` are imported from `qpcr/` and defined
+> nowhere else; the monolith's `AnalysisEngine` *subclasses*
+> `qpcr.analysis.AnalysisEngine` and adds only `run_full_analysis`, so the ΔΔCt
+> maths has one home; `qpcr/report.py` and `qpcr/export.py` were deleted, so
+> `ReportGenerator` / `PPTGenerator` / `export_to_excel` live only in the
+> monolith. The last real duplicates — `PLOTLY_FONT_FAMILY`, `CM_TO_PX`,
+> `CM_TO_EMU`, declared byte-identically in both places with `qpcr/graph.py`
+> reading one copy and the PPT/report writers the other — were removed the same
+> day. `natural_sort_key` is still duplicated (monolith + `qpcr/utils.py`),
+> byte-identical, and `tests/test_package.py` compares them.
+
 **What went wrong:** Applied changes only to `qpcr/` package modules (graph.py, quality_control.py) but the Streamlit app uses INLINE copies of those classes defined in the monolith file (`streamlit qpcr analysis v1.py`). Tests passed because they import from `qpcr/` directly, masking the runtime failure.
 
 **Rule:** ANY change to a class in `qpcr/*.py` MUST also be applied to the corresponding inline class in the monolith file. The classes exist in both locations:
@@ -71,3 +85,54 @@ Root cause: the editor was written assuming that writing `graph_settings` would 
 **Rule — the repo-root `conftest.py` makes widget behaviour invisible to the test suite.** It replaces `sys.modules["streamlit"]` with a `MagicMock` whose widgets return canned values, so no test could observe a widget ignoring its argument — all four defects above shipped with 250 tests passing. To test real widget behaviour, drive the app with `streamlit.testing.v1.AppTest` **in a subprocess** (the mock is installed at conftest import time and would otherwise defeat it). `AppTest.from_file("streamlit qpcr analysis v1.py")` works on the whole app: inject `data`, `raw_data`, `processed_data`, `selected_efficacy`, `hk_gene`, `analysis_ref_condition`, `analysis_cmp_condition`, `sample_mapping`, `sample_order`, `excluded_wells`, `excluded_samples`, `gene_display_names`, `selected_gene_idx` into `at.session_state`, then `.run()` lands you on a fully populated Graphs tab. See `tests/test_gene_editor_state.py`. Note `at.session_state` has no `.get()` — index it.
 
 **Rule — figure-memo fingerprints must be stable AND minimal.** Two entries moved on their own: `bar_colors_per_sample` was absent from the fingerprint until some *other* gene created the dict and then appeared as `{}`, and the whole `<gene>_bar_settings` dict was hashed including each bar's `color`, which `graph.py` never reads from there. Always emit a key rather than omitting it conditionally, and hash only the fields the renderer actually consumes. Counting `create_gene_graph` calls under AppTest is the way to check this: steady state must be 0 rebuilds, and a one-gene edit exactly 1.
+
+---
+
+## 2026-08-24: Open questions for Min (found in the platform-wide audit)
+
+Both change published numbers, so neither was changed unilaterally.
+
+### 1. The t-test's n is technical wells, not biological samples
+
+`qpcr/analysis.py::calculate_statistics` flattens every well of every Sample
+mapped to a condition and feeds them to the t-test. Nothing aggregates to
+biological-sample level first, so the degrees of freedom are inflated by the
+technical replication.
+
+Measured on a standard 3 biological x 3 technical design:
+
+| n used | p-value | marker |
+|---|---|---|
+| 9 wells (current) | 2.6965e-06 | *** |
+| 3 biological samples | 2.1229e-03 | ** |
+
+Three orders of magnitude. A real effect survives either way, but a marginal one
+is manufactured by the current choice. Note the pooling is deliberate elsewhere:
+"Samples sharing a condition name are treated as biological replicates" is the
+Mapping tab's stated contract, and the ΔΔCt bar means are computed the same way.
+
+Suggested shape if Min wants it changed: a `replicate_unit` argument defaulting
+to `"technical"` (so no published number moves without an explicit choice) plus a
+radio where the dead SEM/SD one used to be. Until then `build_provenance`'s
+`statistical_test` string should say which unit was used.
+
+### 2. Which significance source should be displayed
+
+BH q-values (`p_value_fdr` / `significance_fdr`) are computed correctly but have
+no display consumer — every asterisk on every chart, slide, summary sheet,
+Overview matrix and results table is an uncorrected p-value. The provenance
+record and MIQE checklist now state this plainly rather than claiming BH.
+
+The proper fix is a single `graph_settings["sig_source"]` toggle next to the
+error-bar selector, read by `graph.py`, the PPT writer, the Overview matrix and
+the results table. **Which way it should default is Min's call** — corrected is
+the defensible default for a multi-gene panel, uncorrected is what every number
+shipped so far has used, so flipping it silently would change conclusions in
+past-comparable reports.
+
+### 3. Not investigated
+
+The whole-platform health agent (dependency pinning, Cloud-vs-local drift,
+per-rerun cost) was stopped before reporting. `requirements.txt` pinning and the
+Cloud Python-version trap are covered by the 2026-04-01 and 2026-08-07 entries
+above; the rest of that sweep is still open.

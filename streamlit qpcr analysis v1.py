@@ -427,7 +427,12 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
         others = [c for c in gdf["Condition"].tolist() if c != ref]
         if not others:
             continue
-        cmp_cond = others[0]
+        # Advise on the comparison the USER actually selected. This took
+        # others[0] — whatever condition happened to come first — while the
+        # docstring claimed the primary comparison and the caption invites the
+        # user to sanity-check that choice against this recommendation.
+        _user_cmp = st.session_state.get("analysis_cmp_condition")
+        cmp_cond = _user_cmp if _user_cmp in others else others[0]
         g = reps[reps["Target"] == gene] if not reps.empty else reps
         ref_vals = _log(g[g["Condition"] == ref]["Replicate_FC"].values) if not g.empty else []
         cmp_vals = _log(g[g["Condition"] == cmp_cond]["Replicate_FC"].values) if not g.empty else []
@@ -5526,8 +5531,11 @@ with tab_ov:
 
         # experiment header
         cell = cfg.get("cell", "—")
-        desc = cfg.get("description", "") or ""
-        eng = desc.split(" - ")[0].split(" – ")[0].strip()
+        # No EFFICACY_CONFIG entry defines "description", so this subtitle was
+        # always an empty span. Show the treatment time instead, which every
+        # entry does define and which this tab displayed nowhere.
+        _tt = cfg.get("treatment_time", "")
+        eng = f"{_tt} treatment" if _tt else ""
         st.markdown(
             "<div style='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap'>"
             f"<span style='font-size:22px;font-weight:700'>{eff or 'Results'}</span>"

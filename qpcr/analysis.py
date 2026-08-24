@@ -427,8 +427,19 @@ class AnalysisEngine:
                                         ref_vals_2, vals, equal_var=equal_var
                                     )
                                 elif vals.size == 1 and ref_vals_2.size >= 2:
+                                    # Record it like the primary comparison does.
+                                    # Only comparison 1 was reported, so the user
+                                    # was told n=1 affected the asterisks and then
+                                    # trusted the hashes, which came from the same
+                                    # anti-conservative one-sample test.
+                                    _onesamp_warnings.append(
+                                        f"{target}/{cond} vs {compare_condition_2} "
+                                        f"(n=1 vs ref n={ref_vals_2.size})")
                                     _, p_val_2 = stats.ttest_1samp(ref_vals_2, vals[0])
                                 elif ref_vals_2.size == 1 and vals.size >= 2:
+                                    _onesamp_warnings.append(
+                                        f"{target}/{cond} vs {compare_condition_2} "
+                                        f"(ref n=1 vs n={vals.size})")
                                     _, p_val_2 = stats.ttest_1samp(vals, ref_vals_2[0])
                                 else:
                                     p_val_2 = np.nan
@@ -465,8 +476,14 @@ class AnalysisEngine:
                                         ref_vals_3, vals, equal_var=equal_var
                                     )
                                 elif vals.size == 1 and ref_vals_3.size >= 2:
+                                    _onesamp_warnings.append(
+                                        f"{target}/{cond} vs {compare_condition_3} "
+                                        f"(n=1 vs ref n={ref_vals_3.size})")
                                     _, p_val_3 = stats.ttest_1samp(ref_vals_3, vals[0])
                                 elif ref_vals_3.size == 1 and vals.size >= 2:
+                                    _onesamp_warnings.append(
+                                        f"{target}/{cond} vs {compare_condition_3} "
+                                        f"(ref n=1 vs n={vals.size})")
                                     _, p_val_3 = stats.ttest_1samp(vals, ref_vals_3[0])
                                 else:
                                     p_val_3 = np.nan
