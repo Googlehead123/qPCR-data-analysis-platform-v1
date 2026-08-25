@@ -15,12 +15,10 @@ import streamlit as st
 
 from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX
 from qpcr.text_metrics import (EM_PER_LATIN_CHAR, EM_PER_WIDE_CHAR,
-                               fit_label_block, label_block_px,
-                               text_em_width)
+                               effective_wrap_chars, fit_label_block,
+                               label_block_px, text_em_width)
 from qpcr.slide_geometry import points_per_figure_px
 
-# Where a chart image ends up. PPTGenerator places it 9.11in wide on a 13.33in
-# slide, which is what turns figure pixels into points the reader actually sees.
 # Where a chart image ends up is DERIVED per figure — see qpcr/slide_geometry.
 # The constant that used to live here (9.11in) described only the 28x16cm
 # default, and two of the four size presets shipped text at under half the
@@ -524,7 +522,16 @@ class GraphGenerator:
                 n_bars, effective_fig_width, _fs(gene_tick_size)
             )
             wrapped_labels = [
-                GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
+                # The wrap budget is in ADVANCE, not codepoints. textwrap counts
+                # characters, so a Hangul label — one em per codepoint against
+                # Latin's 0.58 — was allowed ~1.7x the width intended and ran
+                # into the next bar (measured: 247px of label on a 188px bar).
+                # effective_wrap_chars returns wrap_w unchanged for text with no
+                # wide glyph, so Latin labels break exactly where they did.
+                GraphGenerator._wrap_text(
+                    str(cond), effective_wrap_chars(str(cond), wrap_w)
+                )
+                for cond in condition_names
             ]
         elif label_mode == "Angled 45\u00b0":
             wrapped_labels = [str(c) for c in condition_names]
