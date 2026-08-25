@@ -1,0 +1,29 @@
+# Direct dependencies — the only file to hand-edit.
+#
+# requirements.txt is COMPILED from this and pins every transitive dependency
+# too. Streamlit Community Cloud installs from requirements.txt, so the lock has
+# to live there to reach production; editing it by hand loses the lock.
+#
+# Regenerate after any change here (see the header of requirements.txt):
+#   uv pip compile requirements.in --universal --python-version 3.12 \
+#       --output-file requirements.txt
+#
+# Then verify on BOTH interpreters — dev runs 3.12, Cloud runs 3.13, and a pin
+# that resolves is not the same as a pin that installs (tasks/lessons.md,
+# 2026-08-07):
+#   uv venv /tmp/v312 --python 3.12
+#   VIRTUAL_ENV=/tmp/v312 uv pip install -r requirements.txt pytest pytest-mock pytest-timeout
+#   /tmp/v312/bin/python -m pytest tests/
+#   (repeat with --python 3.13)
+
+streamlit==1.53.1
+pandas==2.3.3
+numpy==2.4.1
+scipy==1.17.0
+plotly==6.5.2
+openpyxl==3.1.5
+xlsxwriter==3.2.9
+kaleido==1.2.0
+lxml==6.0.2
+python-pptx==1.0.2
+streamlit-sortables==0.3.1
