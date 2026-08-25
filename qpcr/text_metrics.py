@@ -137,22 +137,46 @@ def label_block_px(labels, label_mode: str, tick_px: float,
     return n_lines * line_px
 
 
+def _limit_lines(text: str, max_lines: int) -> str:
+    """Keep at most ``max_lines`` wrapped lines, marking anything dropped."""
+    lines = str(text).split("<br>")
+    if len(lines) <= max_lines:
+        return str(text)
+    kept = lines[:max_lines]
+    kept[-1] = kept[-1].rstrip() + "…"
+    return "<br>".join(kept)
+
+
 def fit_label_block(labels, label_mode: str, tick_px: float, line_px: float,
                     budget_px: float):
     """``(labels, block_px)`` with ``block_px <= budget_px``, by shortening.
 
-    Only the ANGLED modes are shortened. Auto-wrap and Horizontal keep the
-    arithmetic they had before, which is what makes decks already exported in
-    those modes provably unaffected.
-
-    Ellipsising rather than letting it run: an over-long angled label used to eat
-    the plot area until Plotly clipped the text at the image edge. A visible "…"
+    Ellipsising rather than letting it run: an over-long label used to eat the
+    plot area until Plotly clipped the text at the image edge. A visible "…"
     tells the operator to widen the figure; silent truncation does not.
+
+    The two modes shorten differently because they grow differently. An angled
+    label grows by ADVANCE — one long line projecting further down — so it is
+    ellipsized. A wrapped label grows by LINE COUNT, so its lines are capped
+    instead. Auto-wrap was left unbounded until the wrap budget started using
+    the plot width: narrower lines mean more of them, and a 6cm figure went to
+    four lines, 327px of margin on a 452px canvas and 19% of the image left for
+    the data.
+
+    Neither path engages until the block exceeds the budget, so ordinary figures
+    are untouched.
     """
     labels = [str(l) for l in labels]
     block = label_block_px(labels, label_mode, tick_px, line_px)
-    if block <= budget_px or label_mode not in _ANGLED_MODES or tick_px <= 0:
+    if block <= budget_px or tick_px <= 0:
         return labels, block
+
+    if label_mode not in _ANGLED_MODES:
+        if line_px <= 0:
+            return labels, block
+        max_lines = max(int(budget_px // line_px), 1)
+        fitted = [_limit_lines(l, max_lines) for l in labels]
+        return fitted, label_block_px(fitted, label_mode, tick_px, line_px)
     # Invert the projection to get the advance budget the labels may use.
     if label_mode == "Angled 45°":
         n_lines = max((l.count("<br>") + 1 for l in labels), default=1)
