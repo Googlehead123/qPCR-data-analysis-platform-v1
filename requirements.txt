@@ -46,7 +46,7 @@ logistro==2.0.1
     # via
     #   choreographer
     #   kaleido
-lxml==6.0.2
+lxml==6.1.2
     # via
     #   -r requirements.in
     #   python-pptx
@@ -56,7 +56,7 @@ narwhals==2.25.0
     # via
     #   altair
     #   plotly
-numpy==2.4.1
+numpy==2.5.2
     # via
     #   -r requirements.in
     #   pandas
@@ -116,7 +116,7 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-scipy==1.17.0
+scipy==1.18.1
     # via -r requirements.in
 simplejson==4.1.1
     # via choreographer
