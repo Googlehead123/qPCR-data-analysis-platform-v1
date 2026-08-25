@@ -284,6 +284,189 @@ class TestSlideLegibilityAndFraming:
         )
 
 
+class TestTextWidthModel:
+    """Label width must be measured in em, not codepoints.
+
+    The margin code did `len(label) * 0.50em`. That is a Latin assumption:
+    Hangul, Han and Kana are one em per codepoint, so "미처리 대조군" reserved
+    3.5 em for 6.5 em of text and the labels were drawn through the caption
+    below them. Pure-Latin labels measured correctly, which is why this went
+    unseen.
+    """
+
+    def test_latin_is_the_narrow_advance(self):
+        from qpcr.text_metrics import text_em_width, EM_PER_LATIN_CHAR
+        assert text_em_width("abcdef") == pytest.approx(
+            6 * EM_PER_LATIN_CHAR)
+
+    def test_hangul_is_one_em_per_codepoint(self):
+        from qpcr.text_metrics import text_em_width, EM_PER_WIDE_CHAR
+        assert text_em_width("한글다섯글자") == pytest.approx(
+            6 * EM_PER_WIDE_CHAR)
+
+    def test_a_korean_label_is_wider_than_its_length_suggests(self):
+        from qpcr.text_metrics import text_em_width
+        kor = text_em_width("미처리 대조군")
+        lat = text_em_width("abcdefg")   # same codepoint count
+        assert len("미처리 대조군") == len("abcdefg")
+        assert kor > lat * 1.5, "Hangul must not be measured as Latin"
+
+    def test_combining_marks_add_no_advance(self):
+        from qpcr.text_metrics import text_em_width
+        assert (text_em_width("e\u0301")
+                == text_em_width("e"))
+
+    def test_empty_text_is_zero(self):
+        from qpcr.text_metrics import text_em_width
+        assert text_em_width("") == 0.0
+
+    def test_ellipsize_respects_the_budget(self):
+        from qpcr.text_metrics import ellipsize_to_em, text_em_width
+        out = ellipsize_to_em("Recombinant human EGF 25 ng/ml", 6.0)
+        assert text_em_width(out) <= 6.0 + 1e-9
+        assert "…" in out
+
+    def test_ellipsize_keeps_the_tail_where_the_dose_lives(self):
+        from qpcr.text_metrics import ellipsize_to_em, text_em_width
+        out = ellipsize_to_em("Test article 100 ppm", 8.0)
+        assert out.endswith("m"), f"tail dropped: {out!r}"
+
+    def test_ellipsize_is_a_no_op_when_it_already_fits(self):
+        from qpcr.text_metrics import ellipsize_to_em
+        assert ellipsize_to_em("Ctrl", 50.0) == "Ctrl"
+
+
+class TestAngledLabelGeometry:
+    """Angled x-axis labels must not print through the captions below them.
+
+    The bottom margin grew with label length while the caption anchor used the
+    line COUNT and the angled branches pinned that at 1. Measured before the
+    fix: the caption sat a constant 58.9px below the axis in EVERY mode and at
+    EVERY label length, so a 30-char label at 45° reserved 234px of margin and
+    then drew its labels straight through both captions.
+    """
+
+    LABELS = {
+        "latin_short": ["Ctrl", "EGF", "A 1ppm", "A 10ppm", "A 100ppm"],
+        "latin_long": ["Non-treated control", "Recombinant human EGF 25 ng/ml",
+                       "Test article 1 ppm", "Test article 10 ppm",
+                       "Test article 100 ppm"],
+        "korean": ["미처리 대조군", "양성대조군 TGFβ 10 ng/ml", "시험물질 1 ppm 처리",
+                   "시험물질 10 ppm 처리", "시험물질 100 ppm 처리"],
+    }
+    MODES = ["Auto-wrap", "Horizontal", "Angled 45°", "Angled 90°"]
+
+    def _fig(self, conds, **overrides):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+        n = len(conds)
+        data = pd.DataFrame({
+            "Target": ["KI67"] * n,
+            "Condition": conds,
+            "Relative_Expression": [1.0, 1.85, 0.62, 0.88, 1.34][:n],
+            "Fold_Change": [1.0, 1.85, 0.62, 0.88, 1.34][:n],
+            "FC_Error_Upper": [0.12, 0.20, 0.08, 0.10, 0.15][:n],
+            "FC_Error_Lower": [0.12, 0.20, 0.08, 0.10, 0.15][:n],
+            "n_replicates": [3] * n,
+            "significance": ["", "***", "*", "", "**"][:n],
+        })
+        settings = {"show_error": True, "show_significance": True,
+                    "figure_width": 28, "figure_height": 16}
+        settings.update(overrides)
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67", settings=settings, sample_order=None)
+
+    @staticmethod
+    def _geometry(fig, mode):
+        """(plot_h_px, label_block_px, [caption offsets in px])."""
+        from qpcr.text_metrics import label_block_px
+        L = fig.layout
+        plot_h = (L.height or 0) - (L.margin.b or 0) - (L.margin.t or 0)
+        tick = L.xaxis.tickfont.size
+        block = label_block_px(
+            list(L.xaxis.ticktext or ()), mode, tick, tick * 1.45)
+        offs = [-a.y * plot_h for a in L.annotations
+                if a.yref == "paper" and a.y is not None and a.y < 0]
+        return plot_h, block, offs
+
+    def test_a_longer_angled_label_pushes_the_caption_further_down(self,
+                                                                   mock_streamlit):
+        """The direct regression. Before the fix both were 58.9px."""
+        short = self._fig(self.LABELS["latin_short"], label_mode="Angled 45°")
+        long_ = self._fig(self.LABELS["latin_long"], label_mode="Angled 45°")
+        _, _, off_s = self._geometry(short, "Angled 45°")
+        _, _, off_l = self._geometry(long_, "Angled 45°")
+        assert off_l[0] > off_s[0] + 50, (
+            f"caption did not track label length: {off_s[0]:.1f} -> {off_l[0]:.1f}")
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("labels", sorted(LABELS))
+    @pytest.mark.parametrize("preset", ["PPT Full", "PPT Half", "Square", "Wide"])
+    def test_the_caption_clears_the_label_block(self, mock_streamlit, mode,
+                                                labels, preset):
+        from qpcr.constants import FIGURE_SIZE_PRESETS
+        dims = FIGURE_SIZE_PRESETS[preset]
+        fig = self._fig(self.LABELS[labels], label_mode=mode,
+                        figure_width=dims["width"], figure_height=dims["height"])
+        plot_h, block, offs = self._geometry(fig, mode)
+        assert offs, "no paper-anchored caption found"
+        for off in offs:
+            assert off >= block - 1.0, (
+                f"{mode}/{labels}/{preset}: caption at {off:.1f}px is inside a "
+                f"{block:.1f}px label block")
+
+    @pytest.mark.parametrize("mode", ["Angled 45°", "Angled 90°"])
+    def test_korean_reserves_more_than_its_codepoint_count(self, mock_streamlit,
+                                                           mode):
+        kor = ["미처리 대조군"] * 5           # 7 codepoints, 6.5 em
+        lat = ["abcdefg"] * 5              # 7 codepoints, 4.06 em
+        b_kor = self._fig(kor, label_mode=mode).layout.margin.b
+        b_lat = self._fig(lat, label_mode=mode).layout.margin.b
+        assert b_kor > b_lat, (
+            f"{mode}: Hangul reserved {b_kor} vs Latin {b_lat} for the same "
+            "codepoint count")
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("height", [6, 10, 16, 25])
+    def test_the_plot_area_never_collapses(self, mock_streamlit, mode, height):
+        from qpcr.graph import MIN_PLOT_HEIGHT_FRAC, PLOT_HEIGHT_FLOOR_PX
+        fig = self._fig(self.LABELS["latin_long"], label_mode=mode,
+                        figure_height=height)
+        plot_h, _, _ = self._geometry(fig, mode)
+        frac = plot_h / fig.layout.height
+        assert plot_h >= PLOT_HEIGHT_FLOOR_PX, (
+            f"{mode}@{height}cm: plot {plot_h}px is under the floor, so the "
+            "caption denominator is fiction")
+        assert frac >= MIN_PLOT_HEIGHT_FRAC - 0.01, (
+            f"{mode}@{height}cm: plot is {frac:.0%} of the figure")
+
+    def test_an_unfittable_label_is_ellipsized_not_clipped(self, mock_streamlit):
+        long_labels = ["Recombinant human epidermal growth factor 25 ng/ml"] * 5
+        fig = self._fig(long_labels, label_mode="Angled 90°", figure_height=6)
+        drawn = list(fig.layout.xaxis.ticktext or ())
+        assert any("…" in d for d in drawn), (
+            f"expected an ellipsis when the label cannot fit: {drawn!r}")
+
+    def test_auto_wrap_and_horizontal_geometry_is_frozen(self, mock_streamlit):
+        """The deck guard: the default modes must not move by one pixel.
+
+        Verified against a 48-figure render matrix — all 24 Auto-wrap and
+        Horizontal cases were pixel-identical across this change.
+        """
+        for mode in ("Auto-wrap", "Horizontal"):
+            fig = self._fig(self.LABELS["latin_short"], label_mode=mode)
+            L = fig.layout
+            assert L.height == 604, mode
+            assert L.margin.b == 92, mode
+            assert L.margin.t == 28, mode
+            caps = [a.y for a in L.annotations
+                    if a.yref == "paper" and a.y is not None and a.y < 0]
+            assert caps, mode
+            for y in caps:
+                assert y == -0.12169421487603306, (
+                    f"{mode}: caption moved to {y!r}")
+
+
 class TestReferenceLine:
     """The reference line must not take the chart down with it.
 

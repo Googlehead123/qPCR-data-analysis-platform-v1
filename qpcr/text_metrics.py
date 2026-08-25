@@ -1,0 +1,134 @@
+"""Text measurement for chart labels — pure, no Plotly and no Streamlit.
+
+Split out of ``qpcr/graph.py`` because it is arithmetic about text, not about
+charts, and because ``graph.py`` was past the ~800-line ceiling. Everything here
+is a pure function of its arguments, so it is testable without building a figure.
+
+The reason this module exists at all: the label geometry used ``len(label)`` and
+a fixed 0.50 em advance. That is a Latin assumption. Hangul, Han and Kana are one
+em per codepoint, so a Korean condition name reserved roughly half the space it
+needed and the x-axis labels were drawn straight through the caption beneath
+them.
+"""
+
+import math
+import unicodedata
+
+# Mean horizontal advance per character, in em, for the chart font stack. 0.58
+# is the value the auto-wrap width has always used; the bottom-margin code used
+# 0.50 for the same quantity, so two estimates of one thing disagreed by 16%.
+EM_PER_LATIN_CHAR = 0.58
+# Hangul, Han, Kana and full-width punctuation are square by definition: one
+# codepoint is one em, nearly twice the Latin advance.
+EM_PER_WIDE_CHAR = 1.0
+
+_SIN45 = math.sin(math.radians(45.0))
+_ANGLED_MODES = ("Angled 45°", "Angled 90°")
+
+
+def text_em_width(text: str) -> float:
+    """Advance width of ``text`` in em, honouring East-Asian full-width glyphs.
+
+    ``len()`` is the wrong unit for a mixed Korean/English/digit label:
+    "미처리 대조군" is 7 codepoints but 6.5 em wide, while "abcdefg" is also 7
+    codepoints and 4.06 em. Combining marks add no advance of their own.
+    """
+    total = 0.0
+    for ch in str(text):
+        if unicodedata.combining(ch):
+            continue
+        total += (EM_PER_WIDE_CHAR
+                  if unicodedata.east_asian_width(ch) in ("W", "F")
+                  else EM_PER_LATIN_CHAR)
+    return total
+
+
+def ellipsize_to_em(text: str, max_em: float) -> str:
+    """Shorten ``text`` to ``max_em`` em of advance with a MIDDLE ellipsis.
+
+    Middle, not tail: what distinguishes two condition names is usually the
+    concentration at the END ("시험물질 1 ppm" vs "시험물질 100 ppm"), so a tail
+    ellipsis would render several ticks that read identically.
+    """
+    text = str(text)
+    if max_em <= 0:
+        return ""
+    if text_em_width(text) <= max_em:
+        return text
+    ell = "…"
+    budget = max_em - text_em_width(ell)
+    if budget <= 0 or len(text) <= 2:
+        return ell
+    head, tail = [], []
+    head_em = tail_em = 0.0
+    i, j = 0, len(text) - 1
+    # Grow from both ends, taking the tail first so the dose survives.
+    while i <= j:
+        w = text_em_width(text[j])
+        if head_em + tail_em + w > budget:
+            break
+        tail.append(text[j])
+        tail_em += w
+        j -= 1
+        if i > j:
+            break
+        w = text_em_width(text[i])
+        if head_em + tail_em + w > budget:
+            break
+        head.append(text[i])
+        head_em += w
+        i += 1
+    return "".join(head) + ell + "".join(reversed(tail))
+
+
+def label_block_px(labels, label_mode: str, tick_px: float,
+                   line_px: float) -> float:
+    """Height of the drawn tick-label block below the axis, in figure pixels.
+
+    THE single definition. The bottom margin and the caption anchor are both
+    derived from one call to this, because computing them separately is exactly
+    how a 30-char label at 45° came to reserve 234px of margin while the captions
+    stayed anchored a constant 58.9px down and printed through the labels.
+    """
+    labels = [str(l) for l in labels]
+    n_lines = max((l.count("<br>") + 1 for l in labels), default=1)
+    if label_mode in _ANGLED_MODES:
+        widest_em = max((text_em_width(l) for l in labels),
+                        default=5 * EM_PER_LATIN_CHAR)
+        text_px = widest_em * tick_px
+        if label_mode == "Angled 45°":
+            # A rotated line projects BOTH its advance and its line height onto
+            # the vertical. The previous formula omitted the second term.
+            return (text_px + n_lines * line_px) * _SIN45
+        # At 90° extra lines stack sideways, so they add width, not height.
+        return text_px
+    return n_lines * line_px
+
+
+def fit_label_block(labels, label_mode: str, tick_px: float, line_px: float,
+                    budget_px: float):
+    """``(labels, block_px)`` with ``block_px <= budget_px``, by shortening.
+
+    Only the ANGLED modes are shortened. Auto-wrap and Horizontal keep the
+    arithmetic they had before, which is what makes decks already exported in
+    those modes provably unaffected.
+
+    Ellipsising rather than letting it run: an over-long angled label used to eat
+    the plot area until Plotly clipped the text at the image edge. A visible "…"
+    tells the operator to widen the figure; silent truncation does not.
+    """
+    labels = [str(l) for l in labels]
+    block = label_block_px(labels, label_mode, tick_px, line_px)
+    if block <= budget_px or label_mode not in _ANGLED_MODES or tick_px <= 0:
+        return labels, block
+    # Invert the projection to get the advance budget the labels may use.
+    if label_mode == "Angled 45°":
+        n_lines = max((l.count("<br>") + 1 for l in labels), default=1)
+        max_text_px = (budget_px / _SIN45) - n_lines * line_px
+    else:
+        max_text_px = budget_px
+    max_em = max(max_text_px / tick_px, 1.0)
+    fitted = [ellipsize_to_em(l, max_em) for l in labels]
+    # Recompute FROM THE SHORTENED LABELS so the margin and the caption anchor
+    # can never describe text that is not the text being drawn.
+    return fitted, label_block_px(fitted, label_mode, tick_px, line_px)

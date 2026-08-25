@@ -4,7 +4,9 @@ Creates per-gene relative expression bar charts with error bars,
 significance annotations, and customizable styling.
 """
 
+import math
 import textwrap
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX
+from qpcr.text_metrics import (EM_PER_LATIN_CHAR, EM_PER_WIDE_CHAR,
+                               fit_label_block, label_block_px,
+                               text_em_width)
 
 # Where a chart image ends up. PPTGenerator places it 9.11in wide on a 13.33in
 # slide, which is what turns figure pixels into points the reader actually sees.
@@ -20,6 +25,25 @@ PPT_PLACEMENT_WIDTH_IN = 9.11
 MIN_SLIDE_PT = 10.0
 # The smallest hardcoded font in this module (the captions and n= labels).
 SMALLEST_CHART_FONT_PX = 9
+
+# The plot must keep at least this share of the figure height. Below it the
+# chart stops being a chart: a 30-char label at 90° left 22% of the image for
+# the data, and a 6cm-tall figure left 42px.
+MIN_PLOT_HEIGHT_FRAC = 0.40
+# The floor plot_h_px has always had. Once it engages, legend_y_frac's
+# denominator stops describing the real plot and the captions land anywhere
+# (measured: the caption offset changed from 58.9px to 24.7px purely because
+# the denominator became fiction). The label budget below is derived so this
+# can no longer be reached.
+PLOT_HEIGHT_FLOOR_PX = 100
+# How far the canvas may grow beyond the configured height to hold its own
+# furniture. A short figure with a three-line significance legend cannot fit
+# labels, legend and a usable plot at all — 6cm with three comparisons spends
+# 94px of 226px on the legend alone — so something has to give. Growing the
+# CANVAS is the honest answer: the operator asked for a 6cm-tall chart, not a
+# 6cm-tall chart with 27% of it plot. Beyond this multiple the labels are
+# ellipsized instead, so growth stays bounded.
+MAX_CANVAS_GROWTH = 1.6
 
 
 def _darken_hex(hex_color: str, factor: float = 0.3) -> str:
@@ -57,7 +81,7 @@ class GraphGenerator:
         advance for this font stack at these sizes.
         """
         px_per_bar = (fig_width_cm * 37.8) / max(n_bars, 1)
-        char_px = max(float(tick_px) * 0.58, 4.0)
+        char_px = max(float(tick_px) * EM_PER_LATIN_CHAR, 4.0)
         chars_per_bar = max(int(px_per_bar / char_px), 10)
         return min(chars_per_bar, 30)
 
@@ -476,66 +500,18 @@ class GraphGenerator:
             wrapped_labels = [str(c) for c in condition_names]
 
         # Bottom margin, measured from the LABEL BLOCK rather than a floor.
-        # The old floors (180 / 140+len*4 / 120+len*6) were set independently of
-        # the text they had to hold, and they over-reserved badly: on a default
-        # 28x16cm figure the bottom margin resolved to 238px plus a 38px legend
-        # reserve on a 604px figure, leaving a 268px plot area \u2014 44% of the
-        # image, with 40% of every exported PNG blank (measured: ink rows
-        # 117-849 of 1208, so 9.7% blank on top and 29.6% on the bottom). On the
-        # slide that became a 1.54in empty band between the chart and the
-        # "Results: \ud6a8\ub2a5" line.
         #
-        # Now: one line of ticks costs one line of ticks. Measured after the
-        # change on a 5-condition default figure: bottom blank 29.6% -> 0.0% for
-        # Auto-wrap and Horizontal, and the plot area went from 44% to 75% of
-        # the image.
+        # ORDER MATTERS HERE. The label block is now fitted to a BUDGET, and the
+        # budget needs the figure height, the top margin and the legend reserve,
+        # so all three are computed first. None of them depends on the labels.
         #
-        # The angled modes need the label's PROJECTED height, so they still
-        # scale with length: sin(45 deg) ~= 0.71 of an estimated glyph advance,
-        # and the full advance at 90 deg. Those two keep ~9% bottom slack
-        # (down from 12-17%) because the real projected height depends on glyph
-        # metrics this code cannot measure without rendering first. That slack
-        # is deliberate \u2014 under-reserving CLIPS the labels, which is worse than
-        # white space. If it ever matters, xaxis automargin would let Plotly
-        # measure it properly, at the cost of the caption anchoring below, which
-        # is expressed as a fraction of the plot height.
+        # The previous arrangement computed the block first and let it grow
+        # without limit against a fixed canvas: a 30-char label at 90 deg left
+        # 22% of the image for the data, and a 6cm figure left 42px -- at which
+        # point plot_h_px hit its floor and the caption anchor, a fraction of
+        # that height, started describing a plot that did not exist.
         _line_px = _fs(gene_tick_size) * 1.45  # tick line height incl. leading
         _pad_px = _fs(10)                      # breathing room under the axis
-        if label_mode == "Auto-wrap":
-            max_label_lines = max(
-                (label.count("<br>") + 1 for label in wrapped_labels), default=1
-            )
-            dynamic_b_margin = int(max_label_lines * _line_px + _pad_px)
-        elif label_mode == "Angled 45\u00b0":
-            max_label_len = max((len(str(c)) for c in condition_names), default=5)
-            _glyph_px = _fs(gene_tick_size) * 0.50
-            dynamic_b_margin = int(max_label_len * _glyph_px * 0.71 + _pad_px)
-            max_label_lines = 1
-        elif label_mode == "Angled 90\u00b0":
-            max_label_len = max((len(str(c)) for c in condition_names), default=5)
-            _glyph_px = _fs(gene_tick_size) * 0.50
-            dynamic_b_margin = int(max_label_len * _glyph_px + _pad_px)
-            max_label_lines = 1
-        else:  # Horizontal
-            dynamic_b_margin = int(_line_px + _pad_px)
-            max_label_lines = 1
-
-        # Use the measured value, do not merely floor it. The old code only ever
-        # RAISED b towards dynamic_b_margin, so the {"b": 200} default won
-        # whenever the labels needed less — which is every ordinary chart. An
-        # explicit per-gene margin from the operator still wins over both.
-        _has_explicit_margins = settings.get(f"{gene}_margins") is not None
-        default_margins = gene_margins.copy()
-        if not _has_explicit_margins:
-            default_margins["b"] = dynamic_b_margin
-            # No chart title is drawn (the gene name lives on the y-axis), so
-            # the 60px top reserve was holding space for nothing. The
-            # significance stack sits INSIDE the plot area — the y-range is
-            # extended to contain it — so it does not need margin either.
-            default_margins["t"] = int(_pad_px * 1.6)
-        elif default_margins.get("b", 200) < dynamic_b_margin:
-            default_margins["b"] = dynamic_b_margin
-        gene_margins = default_margins
 
         # P-VALUE LEGEND - Support dual/triple comparison with reference names
         cmp_ref_name = st.session_state.get("analysis_cmp_condition", "")
@@ -568,9 +544,61 @@ class GraphGenerator:
         legend_extra_px = int(legend_line_count * _fs(9) * 1.5 + _pad_px)
 
         fig_h_px = int(settings.get("figure_height", 16) * CM_TO_PX)
+
+        _has_explicit_margins = settings.get(f"{gene}_margins") is not None
+        # No chart title is drawn (the gene name lives on the y-axis), so the
+        # 60px top reserve was holding space for nothing. The significance stack
+        # sits INSIDE the plot area -- the y-range is extended to contain it --
+        # so it does not need margin either.
+        _t_margin_px = (gene_margins.get("t", 60) if _has_explicit_margins
+                        else int(_pad_px * 1.6))
+
+        # Grow the CANVAS before starving the plot. The labels, the legend and
+        # the top margin are all fixed costs; if the configured height cannot
+        # carry them and still leave a usable plot, the honest move is a taller
+        # image, not a 27%-plot chart. Bounded by MAX_CANVAS_GROWTH, after which
+        # the labels are ellipsized instead.
+        _natural_block_px = label_block_px(
+            wrapped_labels, label_mode, _fs(gene_tick_size), _line_px
+        )
+        _fixed_px = _t_margin_px + legend_extra_px + _pad_px
+        _needed_px = int(math.ceil(
+            (_natural_block_px + _fixed_px) / (1.0 - MIN_PLOT_HEIGHT_FRAC)
+        ))
+        fig_h_px = max(fig_h_px, min(_needed_px,
+                                     int(fig_h_px * MAX_CANVAS_GROWTH)))
+
+        # What the labels may occupy without starving the plot, on the height
+        # actually being used.
+        _min_plot_px = max(fig_h_px * MIN_PLOT_HEIGHT_FRAC, PLOT_HEIGHT_FLOOR_PX)
+        _block_budget_px = max(
+            fig_h_px - _min_plot_px - _t_margin_px - legend_extra_px - _pad_px,
+            0.0,
+        )
+        wrapped_labels, label_block = fit_label_block(
+            wrapped_labels, label_mode, _fs(gene_tick_size), _line_px,
+            _block_budget_px,
+        )
+        dynamic_b_margin = int(label_block + _pad_px)
+
+        # Use the measured value, do not merely floor it. The old code only ever
+        # RAISED b towards dynamic_b_margin, so the {"b": 200} default won
+        # whenever the labels needed less -- which is every ordinary chart. An
+        # explicit per-gene margin from the operator still wins over both.
+        default_margins = gene_margins.copy()
+        if not _has_explicit_margins:
+            default_margins["b"] = dynamic_b_margin
+            default_margins["t"] = _t_margin_px
+        elif default_margins.get("b", 200) < dynamic_b_margin:
+            default_margins["b"] = dynamic_b_margin
+        gene_margins = default_margins
+
         b_margin_px = gene_margins.get("b", 200)
         t_margin_px = gene_margins.get("t", 60)
-        plot_h_px = max(fig_h_px - b_margin_px - legend_extra_px - t_margin_px, 100)
+        plot_h_px = max(
+            fig_h_px - b_margin_px - legend_extra_px - t_margin_px,
+            PLOT_HEIGHT_FLOOR_PX,
+        )
 
         # Emit the deferred significance symbols. The step between stacked
         # symbols is derived from the FONT SIZES in px and converted to data
@@ -653,12 +681,16 @@ class GraphGenerator:
         )
 
         # Place significance legend below the plot, beneath x-axis labels.
-        # label_px_est used a hardcoded 18px line height that predated the font
-        # scaling, so once the ticks grew the captions were anchored INSIDE the
-        # label block and the second line of a wrapped label ("...100 / ppm")
-        # printed straight through them. _line_px is the same value the bottom
-        # margin is computed from, so the two cannot drift apart again.
-        label_px_est = max_label_lines * _line_px + _pad_px
+        #
+        # label_block is the SAME value the bottom margin was measured from —
+        # one call to label_block_px feeds both — so the anchor and the margin
+        # cannot drift apart. They had: this line used the line COUNT while the
+        # angled branches sized the margin from the label's projected LENGTH and
+        # pinned the count at 1. The result was a caption parked a constant
+        # 58.9px below the axis no matter how long the label was, so a 30-char
+        # label at 45 deg reserved 234px of margin and then printed its labels
+        # straight through both captions.
+        label_px_est = label_block + _pad_px
         legend_y_frac = -((label_px_est + _pad_px * 0.5) / plot_h_px)
         fig.add_annotation(
             text=legend_text,
