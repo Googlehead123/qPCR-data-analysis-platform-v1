@@ -27,8 +27,16 @@ Thumbs.db
 # Ruff cache
 .ruff_cache/
 
-# Local test data (optional - uncomment if you don't want to track)
-# test data/
+# Local working files, kept on disk but out of git.
+#   test_data/ — raw QuantStudio plate exports for real studies. Nothing in the
+#     suite reads them (the tests build their own frames), so they are input for
+#     manual checks, not fixtures.
+#   docs/ — local write-ups. This ignores the WHOLE tree, so a doc that is meant
+#     to be tracked needs an explicit `git add -f`.
+# The previous entry here read "# test data/" with a space and never matched the
+# real directory name.
+docs/
+test_data/
 
 # Tool state (Claude Code / Playwright / Superpowers)
 .claude/
