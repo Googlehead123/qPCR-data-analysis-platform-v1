@@ -11,7 +11,10 @@ Primary use case: Cosmetics efficacy testing with gene-by-gene delta-delta Ct (D
 - Python 3.x with Streamlit
 - pandas, numpy, scipy for data processing
 - plotly for interactive visualizations
-- Single-file architecture: `streamlit qpcr analysis v1.py`
+- **Partially modularized**, and moving further that way. The computational
+  core lives in the `qpcr/` package; `streamlit qpcr analysis v1.py` holds the
+  UI plus the report/export writers, which are the remaining refactor target.
+  See CLAUDE.md, which is authoritative if the two ever disagree.
 
 ---
 
@@ -59,9 +62,14 @@ pytest tests/test_parser.py::TestQPCRParserDetectFormat::test_detect_format1_wit
 ### File Structure
 ```
 /
-  streamlit qpcr analysis v1.py  # Main application (all code)
-  requirements.txt               # Dependencies
-  README.md                      # Project docs
+  streamlit qpcr analysis v1.py  # UI + the report/export writers
+  qpcr/                          # Computational core -- the single definition
+                                 # of parser, quality_control, analysis, graph,
+                                 # constants, export_utils, utils, auto/
+  tests/                         # 20 modules
+  requirements.in                # Direct dependencies -- EDIT THIS ONE
+  requirements.txt               # GENERATED lock (all 63 pins); Cloud reads it
+  CLAUDE.md                      # Authoritative project instructions
   AGENTS.md                      # This file
 ```
 
@@ -248,5 +256,9 @@ Add to TAB 5 section. Use `io.BytesIO()` or `io.StringIO()` for buffers.
 - Add type suppressions (`# type: ignore`)
 - Use `st.experimental_*` deprecated APIs
 - Modify session state directly in callbacks without `st.rerun()`
-- Break the single-file architecture without discussion
+- Re-declare a `qpcr/` class or function inside the monolith. Import it. Keeping
+  two copies is a documented hazard here: fixes get applied to the copy nobody
+  runs (`tasks/lessons.md`).
+- Hand-edit `requirements.txt` -- it is generated. Edit `requirements.in` and
+  recompile, then verify on both 3.12 and 3.13.
 - Remove Korean text labels (internationalization in progress)

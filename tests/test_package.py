@@ -56,9 +56,13 @@ class TestPackageImports:
         from importlib import import_module
         spec = import_module("streamlit qpcr analysis v1")
 
-        assert hasattr(spec.ReportGenerator, 'create_presentation')
         assert hasattr(spec.PPTGenerator, 'generate_presentation')
         assert callable(spec.export_to_excel)
+
+        # ReportGenerator is now only the shared image renderer; its
+        # from-scratch slide builders were removed as dead and superseded.
+        assert hasattr(spec.ReportGenerator, '_fig_to_image')
+        assert not hasattr(spec.ReportGenerator, 'create_presentation')
 
         # And they must NOT come back as package modules.
         import pytest
