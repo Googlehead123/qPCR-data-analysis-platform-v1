@@ -21,7 +21,7 @@ Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/derma
 ## How to Run
 ```bash
 streamlit run "streamlit qpcr analysis v1.py"    # http://localhost:8501
-pytest tests/                                      # 275 tests
+pytest tests/                                      # 282 tests
 ```
 
 ## Key Files
@@ -39,7 +39,7 @@ pytest tests/                                      # 275 tests
   `auto/` (screening, test advice, MIQE).
   **Do not re-declare any of these in the monolith** — that dual-copy hazard is
   documented in `tasks/lessons.md` and has bitten this project repeatedly.
-- `tests/` — 20 modules, 275 tests. Note `conftest.py` replaces `streamlit` with
+- `tests/` — 20 modules, 282 tests. Note `conftest.py` replaces `streamlit` with
   a MagicMock, so widget behaviour is invisible to most of the suite; the tests
   that need real Streamlit drive the app through `AppTest` **in a subprocess**
   (see `tests/test_gene_editor_state.py`).

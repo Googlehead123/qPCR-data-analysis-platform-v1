@@ -577,9 +577,12 @@ class GraphGenerator:
         # units through the plot height, so each glyph clears the one below it
         # whatever the figure geometry or the data range. 1.25x the larger of the
         # two adjacent sizes gives a normal line's worth of leading.
+        # Top of the tallest significance stack, in DATA units. Initialised
+        # outside the block because the reference-line placement below reads it
+        # whether or not any symbols were drawn.
+        _stack_top = 0.0
         if pending_sig:
             _data_per_px = (y_max_auto / plot_h_px) if plot_h_px else 0.0
-            _stack_top = 0.0
             for _idx, _base_y, _syms in pending_sig:
                 _y = _base_y + max(_syms[0][1], 8) * 0.35 * _data_per_px
                 _prev_fs = None
@@ -674,12 +677,21 @@ class GraphGenerator:
         )
 
         if ref_line_value is not None and pd.notna(ref_line_value):
-            max_annotation_y = 0
+            # Tallest drawn element, in DATA units, so the label can sit clear of
+            # it. This used to add `fixed_symbol_spacing * 1.2` — a name that has
+            # not existed since the significance glyphs moved to `pending_sig`,
+            # so EVERY chart with a reference line raised NameError. The memo
+            # swallowed it (`_memoized_gene_figure`) and the gene then never
+            # reached `st.session_state["graphs"]`, which is what the PPT and
+            # image writers read: the gene vanished from the deck behind a
+            # transient "chart unavailable" warning. `_stack_top` is the real
+            # symbol-stack top computed above, already in these units.
+            max_annotation_y = _stack_top
             for _idx in range(n_bars):
                 _row = gene_data_indexed.iloc[_idx]
                 _bar_h = _row["Relative_Expression"]
                 _err_h = error_visible_upper[_idx] if _idx < len(error_visible_upper) else 0
-                _top_y = _bar_h + _err_h + (fixed_symbol_spacing * 1.2)
+                _top_y = _bar_h + _err_h
                 if _top_y > max_annotation_y:
                     max_annotation_y = _top_y
 

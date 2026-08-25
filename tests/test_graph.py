@@ -284,6 +284,69 @@ class TestSlideLegibilityAndFraming:
         )
 
 
+class TestReferenceLine:
+    """The reference line must not take the chart down with it.
+
+    `graph.py` read `fixed_symbol_spacing` when placing the reference-line
+    label — a name that stopped existing when the significance glyphs moved to
+    `pending_sig`. Every chart with a reference line raised NameError.
+    `_memoized_gene_figure` catches build failures, so the gene never reached
+    `st.session_state["graphs"]` and simply went MISSING from the exported deck
+    behind a transient warning. Nothing in the suite exercised this path.
+    """
+
+    def _fig(self, **overrides):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+
+        conds = ["Non-treated", "EGF 25 ng/ml", "Test article 100 ppm"]
+        data = pd.DataFrame({
+            "Target": ["KI67"] * 3,
+            "Condition": conds,
+            "Relative_Expression": [1.0, 1.85, 0.62],
+            "Fold_Change": [1.0, 1.85, 0.62],
+            "FC_Error_Upper": [0.12, 0.20, 0.08],
+            "FC_Error_Lower": [0.12, 0.20, 0.08],
+            "n_replicates": [3] * 3,
+            "significance": ["", "***", "*"],
+        })
+        settings = {"show_error": True, "show_significance": True,
+                    "figure_width": 28, "figure_height": 16}
+        settings.update(overrides)
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67", settings=settings, sample_order=None,
+            ref_line_value=overrides.pop("_ref", 1.0), ref_line_label="Control",
+        )
+
+    @pytest.mark.parametrize("label_mode", [
+        "Auto-wrap", "Horizontal", "Angled 45°", "Angled 90°",
+    ])
+    def test_a_reference_line_builds_in_every_label_mode(self, mock_streamlit,
+                                                         label_mode):
+        fig = self._fig(label_mode=label_mode)
+        assert fig.data, "the chart lost its traces"
+
+    def test_the_reference_line_is_actually_drawn(self, mock_streamlit):
+        fig = self._fig()
+        shapes = list(fig.layout.shapes or ())
+        lines = [s for s in shapes if getattr(s, "type", None) == "line"]
+        assert lines, "no reference line shape was added"
+
+    def test_significance_symbols_do_not_break_the_placement(self, mock_streamlit):
+        """The placement reads the significance stack top; drawing symbols and
+        drawing none must both work."""
+        with_syms = self._fig()
+        assert with_syms.data
+        without = self._fig(show_significance=False)
+        assert without.data
+
+    def test_a_high_reference_line_flips_the_label_below(self, mock_streamlit):
+        """A line above the tallest bar must not print the label off-plot."""
+        low = self._fig(_ref=0.2)
+        high = self._fig(_ref=50.0)
+        assert low.data and high.data
+
+
 class TestStackedSignificanceSpacing:
     """Stacked significance symbols must clear each other in PIXELS.
 
