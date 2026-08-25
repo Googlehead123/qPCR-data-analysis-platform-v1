@@ -102,4 +102,7 @@ def test_overview_verdict_and_benchmark():
     assert at.session_state["overview_benchmark"] == "TGFβ"   # auto-matched positive control
     metrics = {m.label: m.value for m in at.metric}
     assert metrics.get("Markers as expected") == "2/2"
-    assert metrics.get("Avg % of benchmark", "—") != "—"
+    # "Avg % of benchmark" until caca43e, which summarises with the MEDIAN
+    # instead: these are ratios, and a mean let a negative ratio from a marker
+    # moving the other way cancel a genuine positive.
+    assert metrics.get("Median % of benchmark", "—") != "—"
