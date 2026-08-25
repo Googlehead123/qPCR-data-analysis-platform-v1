@@ -366,6 +366,94 @@ class TestTextWidthModel:
         from qpcr.text_metrics import ellipsize_to_em
         assert ellipsize_to_em("Ctrl", 50.0) == "Ctrl"
 
+    def test_latin_keeps_its_wrap_budget_exactly(self):
+        """Not 'equal by arithmetic' — an early return, so decks cannot move."""
+        from qpcr.text_metrics import effective_wrap_chars
+        for text in ["Test article 100 ppm", "Non-treated control", "EGF", "",
+                     "UVB 40 mj/cm2", "a", "1234567890"]:
+            assert effective_wrap_chars(text, 17) == 17, repr(text)
+
+    def test_a_korean_label_gets_a_smaller_character_budget(self):
+        """One em per codepoint against Latin's 0.58, so ~0.58x the chars."""
+        from qpcr.text_metrics import effective_wrap_chars
+        assert effective_wrap_chars("시험물질 처리 대조군", 17) < 17
+
+    def test_a_mixed_label_lands_between_the_two(self):
+        from qpcr.text_metrics import effective_wrap_chars
+        pure_kor = effective_wrap_chars("시험물질처리대조군군", 17)
+        mixed = effective_wrap_chars("시험물질 100 ppm 처리", 17)
+        assert pure_kor < mixed < 17, (pure_kor, mixed)
+
+    def test_the_budget_never_collapses_to_single_glyphs(self):
+        from qpcr.text_metrics import effective_wrap_chars
+        assert effective_wrap_chars("시험물질처리", 3) >= 4
+
+    def test_has_wide_chars_separates_the_scripts(self):
+        from qpcr.text_metrics import has_wide_chars
+        assert has_wide_chars("미처리 대조군")
+        assert has_wide_chars("EGF 처리")
+        assert not has_wide_chars("Test article 100 ppm")
+        assert not has_wide_chars("TGFβ 10 ng/ml")   # Greek is narrow
+
+
+class TestKoreanLabelsFitTheirBar:
+    """Auto-wrap budgets are in ADVANCE, so a Korean label must not run into
+    the bar beside it.
+
+    textwrap counts codepoints. Measured before this was fixed on a default
+    28cm five-condition figure: the widest Korean line was 247px against 188px
+    of bar — 1.32x, overflowing four of the five labels — while the same
+    fixture in Latin was 1.09x.
+    """
+
+    KOREAN = ["미처리 대조군", "양성대조군 TGFβ 10 ng/ml", "시험물질 1 ppm 처리",
+              "시험물질 10 ppm 처리", "시험물질 100 ppm 처리"]
+    LATIN = ["Non-treated control", "Recombinant human EGF", "Test article 1 ppm",
+             "Test article 10 ppm", "Test article 100 ppm"]
+
+    def _fig(self, conds):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+        n = len(conds)
+        data = pd.DataFrame({
+            "Target": ["KI67"] * n, "Condition": conds,
+            "Relative_Expression": [1.0, 1.85, 0.62, 0.88, 1.34][:n],
+            "Fold_Change": [1.0, 1.85, 0.62, 0.88, 1.34][:n],
+            "FC_Error_Upper": [0.12] * n, "FC_Error_Lower": [0.12] * n,
+            "n_replicates": [3] * n, "significance": [""] * n,
+        })
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67",
+            settings={"label_mode": "Auto-wrap", "figure_width": 28,
+                      "figure_height": 16},
+            sample_order=None)
+
+    @staticmethod
+    def _worst_overflow(fig, n_bars):
+        from qpcr.text_metrics import text_em_width
+        L = fig.layout
+        per_bar = ((L.width or 0) - (L.margin.l or 0) - (L.margin.r or 0)) / n_bars
+        tick = L.xaxis.tickfont.size
+        worst = 0.0
+        for drawn in (L.xaxis.ticktext or ()):
+            for line in str(drawn).split("<br>"):
+                worst = max(worst, text_em_width(line) * tick)
+        return worst / per_bar
+
+    def test_korean_is_no_worse_than_latin(self, mock_streamlit):
+        """The defect was that Korean got ~1.7x the budget Latin did."""
+        kor = self._worst_overflow(self._fig(self.KOREAN), 5)
+        lat = self._worst_overflow(self._fig(self.LATIN), 5)
+        assert kor <= lat + 0.10, (
+            f"Korean labels overflow their bar by {kor:.2f}x against Latin's "
+            f"{lat:.2f}x — the wrap budget is still counting codepoints"
+        )
+
+    def test_korean_labels_actually_wrap(self, mock_streamlit):
+        drawn = list(self._fig(self.KOREAN).layout.xaxis.ticktext or ())
+        assert any("<br>" in d for d in drawn), (
+            f"no Korean label wrapped at all: {drawn!r}")
+
 
 class TestAngledLabelGeometry:
     """Angled x-axis labels must not print through the captions below them.
