@@ -415,10 +415,10 @@ class TestKoreanLabelsFitTheirBar:
         import pandas as pd
         from qpcr.graph import GraphGenerator
         n = len(conds)
+        vals = [1.0 + 0.2 * (i % 5) for i in range(n)]
         data = pd.DataFrame({
             "Target": ["KI67"] * n, "Condition": conds,
-            "Relative_Expression": [1.0, 1.85, 0.62, 0.88, 1.34][:n],
-            "Fold_Change": [1.0, 1.85, 0.62, 0.88, 1.34][:n],
+            "Relative_Expression": vals, "Fold_Change": vals,
             "FC_Error_Upper": [0.12] * n, "FC_Error_Lower": [0.12] * n,
             "n_replicates": [3] * n, "significance": [""] * n,
         })
@@ -453,6 +453,47 @@ class TestKoreanLabelsFitTheirBar:
         drawn = list(self._fig(self.KOREAN).layout.xaxis.ticktext or ())
         assert any("<br>" in d for d in drawn), (
             f"no Korean label wrapped at all: {drawn!r}")
+
+    @pytest.mark.parametrize("script", ["KOREAN", "LATIN"])
+    def test_no_label_overflows_its_bar(self, mock_streamlit, script):
+        """The wrap budget is the PLOT width, not the whole image.
+
+        Bars are laid out in the plot area, so budgeting from the figure width
+        handed every label ~13% more room than exists — 212px assumed against
+        188px real on a default five-condition figure. Measured before this was
+        fixed: Latin 1.09x and Korean 1.13x, both overflowing into the next bar.
+        """
+        ratio = self._worst_overflow(self._fig(getattr(self, script)), 5)
+        assert ratio <= 1.0, (
+            f"{script} labels are {ratio:.2f}x their bar — they run into the "
+            "one beside them"
+        )
+
+    @pytest.mark.parametrize("n_bars", [2, 3, 4, 5, 6])
+    def test_labels_fit_while_the_budget_is_not_floored(self, mock_streamlit,
+                                                        n_bars):
+        conds = [f"시험물질 {10 ** (i % 3)} ppm 처리" for i in range(n_bars)]
+        ratio = self._worst_overflow(self._fig(conds), n_bars)
+        assert ratio <= 1.0, f"{n_bars} bars: labels are {ratio:.2f}x their bar"
+
+    def test_a_crowded_axis_keeps_readable_labels_over_a_perfect_fit(
+            self, mock_streamlit):
+        """A DELIBERATE limit, not a gap in the fix.
+
+        _auto_wrap_width floors the budget at 10 characters so a crowded axis
+        does not wrap into a column of two-character fragments. Past roughly
+        eight bars that floor outranks the fit budget and labels do overlap —
+        the answer there is an angled mode, which is why they exist. Pinned so
+        the trade is visible rather than discovered.
+        """
+        conds = [f"시험물질 {10 ** (i % 3)} ppm 처리" for i in range(12)]
+        fig = self._fig(conds)
+        assert self._worst_overflow(fig, 12) > 1.0
+        shortest = min(len(line)
+                       for t in (fig.layout.xaxis.ticktext or ())
+                       for line in str(t).split("<br>") if line)
+        assert shortest >= 4, (
+            f"the readability floor stopped working: {shortest}-char lines")
 
 
 class TestAngledLabelGeometry:

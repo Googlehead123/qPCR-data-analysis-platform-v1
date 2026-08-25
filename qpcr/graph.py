@@ -78,8 +78,8 @@ class GraphGenerator:
 
     @staticmethod
     def _auto_wrap_width(n_bars: int, fig_width_cm: float = 28,
-                         tick_px: float = 12) -> int:
-        """Calculate optimal wrap width based on number of bars and figure width.
+                         tick_px: float = 12, side_margins_px: float = 0) -> int:
+        """Characters per line for an x-axis label, from the space a bar has.
 
         Adapts like Excel cell wrapping: more bars -> narrower wrap.
         Minimum 10 chars to keep labels readable even with 20+ bars.
@@ -90,8 +90,17 @@ class GraphGenerator:
         the wrap allowed for and adjacent labels ran into each other
         ("Test article 1 ppmTest article 10 ppm"). 0.58 em is a reasonable mean
         advance for this font stack at these sizes.
+
+        ``side_margins_px`` is the left plus right margin. Bars are laid out in
+        the PLOT area, not across the whole image, so budgeting from the full
+        figure width handed every label about 13% more room than exists: on a
+        default 28cm five-condition figure the plot is 938px, not 1058px, so a
+        bar has 188px rather than the 212px assumed. The widest Latin label came
+        out 204px — over its own bar and into the next one — and this was the
+        residual overflow left after the Korean advance fix.
         """
-        px_per_bar = (fig_width_cm * 37.8) / max(n_bars, 1)
+        usable_px = max(fig_width_cm * CM_TO_PX - max(side_margins_px, 0), 1.0)
+        px_per_bar = usable_px / max(n_bars, 1)
         char_px = max(float(tick_px) * EM_PER_LATIN_CHAR, 4.0)
         chars_per_bar = max(int(px_per_bar / char_px), 10)
         return min(chars_per_bar, 30)
@@ -518,8 +527,13 @@ class GraphGenerator:
         x_tick_angle = 0
 
         if label_mode == "Auto-wrap":
+            # Bars live in the PLOT area, so the budget is the figure width
+            # LESS the side margins. l/r are settled by this point — only the
+            # top and bottom are recomputed later from the label block.
             wrap_w = GraphGenerator._auto_wrap_width(
-                n_bars, effective_fig_width, _fs(gene_tick_size)
+                n_bars, effective_fig_width, _fs(gene_tick_size),
+                side_margins_px=(gene_margins.get("l", 80)
+                                 + gene_margins.get("r", 40)),
             )
             wrapped_labels = [
                 # The wrap budget is in ADVANCE, not codepoints. textwrap counts
