@@ -43,7 +43,14 @@ pytest tests/                                      # 290 tests
   a MagicMock, so widget behaviour is invisible to most of the suite; the tests
   that need real Streamlit drive the app through `AppTest` **in a subprocess**
   (see `tests/test_gene_editor_state.py`).
-- `requirements.txt` — exact pins; see `tasks/lessons.md` on Cloud Python drift.
+- `requirements.in` — the direct dependencies, and **the only one to hand-edit**.
+- `requirements.txt` — GENERATED from it by `uv pip compile --universal`, pinning
+  all 63 packages including transitives. Streamlit Cloud installs from this
+  filename, which is why the lock lives here rather than in a separate file;
+  editing it by hand silently loses the lock. Regenerate and then verify on
+  **both** 3.12 and 3.13 — the recipe is in `requirements.in`'s header, and
+  `tasks/lessons.md` explains why a pin that resolves is not a pin that
+  installs.
 
 ## Korean Efficacy Categories (21)
 Generated from `qpcr/constants.py::EFFICACY_CONFIG` — that dict is the source of
