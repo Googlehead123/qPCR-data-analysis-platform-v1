@@ -17,12 +17,25 @@ from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX
 from qpcr.text_metrics import (EM_PER_LATIN_CHAR, EM_PER_WIDE_CHAR,
                                fit_label_block, label_block_px,
                                text_em_width)
+from qpcr.slide_geometry import points_per_figure_px
 
 # Where a chart image ends up. PPTGenerator places it 9.11in wide on a 13.33in
 # slide, which is what turns figure pixels into points the reader actually sees.
-PPT_PLACEMENT_WIDTH_IN = 9.11
+# Where a chart image ends up is DERIVED per figure — see qpcr/slide_geometry.
+# The constant that used to live here (9.11in) described only the 28x16cm
+# default, and two of the four size presets shipped text at under half the
+# MIN_SLIDE_PT floor because of it.
 # Floor for the smallest chart text once placed on that slide.
 MIN_SLIDE_PT = 10.0
+# Ceiling on the compensation. An extreme aspect ratio drives the scale up
+# without bound — a 28x6cm figure is upscaled 1058->2341px by the writer's
+# short-side floor, so its text would need 3.28x to read at 10pt, and fonts that
+# large do not fit a 226px canvas at all. All four size presets land at or below
+# 2.4 (PPT Full 1.79, PPT Half 2.24, Square 2.37, Wide 1.62), so this bounds
+# only the pathological geometries. Past it MIN_SLIDE_PT is a target rather
+# than a guarantee, which is honest: no font size makes a 6cm-tall chart
+# readable once it has been stretched to four times its authored width.
+MAX_FONT_SCALE = 2.5
 # The smallest hardcoded font in this module (the captions and n= labels).
 SMALLEST_CHART_FONT_PX = 9
 
@@ -43,7 +56,7 @@ PLOT_HEIGHT_FLOOR_PX = 100
 # CANVAS is the honest answer: the operator asked for a 6cm-tall chart, not a
 # 6cm-tall chart with 27% of it plot. Beyond this multiple the labels are
 # ellipsized instead, so growth stays bounded.
-MAX_CANVAS_GROWTH = 1.6
+MAX_CANVAS_GROWTH = 2.0
 
 
 def _darken_hex(hex_color: str, factor: float = 0.3) -> str:
@@ -317,26 +330,49 @@ class GraphGenerator:
                 ))
 
         # ---- Font scale for the output medium -------------------------------
-        # Chart text is sized in FIGURE PIXELS but read on a slide. The PPT
-        # writer places the image 9.11in wide, so on a 28cm (1058px) figure one
-        # figure pixel is 0.620pt: the 9px captions landed at 5.6pt and the 12px
-        # ticks at 7.4pt, while the slide's own chrome is 11-16pt. The least
-        # important text on the slide was three times the size of the axis
-        # labels.
+        # Chart text is sized in FIGURE PIXELS but read on a slide, so the scale
+        # depends entirely on how wide the image ends up there. One scale is
+        # applied to every chart font so the SMALLEST text clears a 10pt floor
+        # (decision: Min, 2026-08-24, item 7a). Scaling rather than clamping each
+        # size individually is deliberate — clamping would raise the 9px captions
+        # and the 12px ticks to the same value and flatten the hierarchy. The
+        # size sliders keep working; they set RELATIVE size, which is what they
+        # were always really doing.
         #
-        # One scale is applied to every chart font so the SMALLEST text clears a
-        # 10pt floor on the slide (decision: Min, 2026-08-24, item 7a). Scaling
-        # rather than clamping each size individually is deliberate — clamping
-        # would raise the 9px captions and the 12px ticks to the same value and
-        # flatten the hierarchy. The size sliders keep working; they now set
-        # relative size, which is what they were always really doing.
+        # The placement width is DERIVED, not assumed. It used to be a constant
+        # 9.11in, which is the figure the 28x16cm default happens to land at; the
+        # writer actually derives the frame from the figure's aspect and clamps
+        # it to the space on the layout. So the guarantee held for PPT Full alone
+        # and two presets shipped text at under half the floor:
+        #
+        #     PPT Full   9.11in  10.5pt   ok
+        #     PPT Half   5.51in   4.5pt   55% under
+        #     Square     5.20in   4.7pt   53% under
+        #     Wide      11.50in  13.0pt   30% over
+        #
+        # qpcr/slide_geometry owns that arithmetic now, and the PPT writer reads
+        # the same module, so the two cannot drift.
+        #
+        # The CONFIGURED height is used rather than the final one: the final
+        # height depends on the label block, which depends on these very fonts.
+        # Breaking that loop by keying on what the operator asked for is stable
+        # and matches what they see in the size sliders. A canvas that later
+        # grows for long angled labels is placed slightly narrower than assumed,
+        # so the floor is a target rather than a guarantee in that case — see
+        # test_the_floor_holds_for_every_size_preset.
         _cfg_w = settings.get("figure_width", 28)
+        _cfg_h = settings.get("figure_height", 16)
         _eff_w_cm = max(_cfg_w, n_bars * 1.4)
         _fig_w_px = max(int(_eff_w_cm * CM_TO_PX), 1)
-        font_scale = max(
-            1.0,
-            (MIN_SLIDE_PT * _fig_w_px)
-            / (PPT_PLACEMENT_WIDTH_IN * 72.0 * SMALLEST_CHART_FONT_PX),
+        _cfg_h_px = max(int(_cfg_h * CM_TO_PX), 1)
+        _pt_per_px = points_per_figure_px(_eff_w_cm, _fig_w_px, _cfg_h_px)
+        font_scale = min(
+            MAX_FONT_SCALE,
+            max(
+                1.0,
+                MIN_SLIDE_PT / (_pt_per_px * SMALLEST_CHART_FONT_PX)
+                if _pt_per_px > 0 else 1.0,
+            ),
         )
 
         def _fs(px) -> int:

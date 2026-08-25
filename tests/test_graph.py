@@ -234,22 +234,53 @@ class TestSlideLegibilityAndFraming:
             data=data, gene="KI67", settings=settings, sample_order=None
         )
 
-    def _pt_per_px(self, width_cm=28):
-        from qpcr.constants import CM_TO_PX
-        from qpcr.graph import PPT_PLACEMENT_WIDTH_IN
-        return (PPT_PLACEMENT_WIDTH_IN * 72.0) / int(width_cm * CM_TO_PX)
+    @staticmethod
+    def _pt_per_px(fig, width_cm=28):
+        """Points on the slide per figure pixel, DERIVED from this figure.
+
+        This used to divide a hardcoded 9.11in by the figure width, which is
+        where the bug lived: 9.11 describes the 28x16cm default and nothing
+        else, so the test agreed with the code on a fiction for three of the
+        four presets.
+        """
+        from qpcr.slide_geometry import points_per_figure_px
+        return points_per_figure_px(width_cm, fig.layout.width, fig.layout.height)
+
+    @staticmethod
+    def _smallest_text_px(fig):
+        sizes = [fig.layout.xaxis.tickfont.size, fig.layout.yaxis.title.font.size]
+        sizes += [a.font.size for a in fig.layout.annotations
+                  if a.font and a.font.size]
+        return min(sizes)
 
     def test_no_chart_text_falls_below_the_slide_floor(self, mock_streamlit):
         from qpcr.graph import MIN_SLIDE_PT
         fig = self._fig()
-        ppx = self._pt_per_px()
-        sizes = [fig.layout.xaxis.tickfont.size, fig.layout.yaxis.title.font.size]
-        sizes += [a.font.size for a in fig.layout.annotations
-                  if a.font and a.font.size]
-        worst = min(sizes)
+        ppx = self._pt_per_px(fig)
+        worst = self._smallest_text_px(fig)
         assert worst * ppx >= MIN_SLIDE_PT - 1e-6, (
             f"smallest chart text is {worst}px = {worst * ppx:.1f}pt on the "
             f"slide, below the {MIN_SLIDE_PT}pt floor"
+        )
+
+    @pytest.mark.parametrize("preset", ["PPT Full", "PPT Half", "Square", "Wide"])
+    def test_the_floor_holds_for_every_size_preset(self, mock_streamlit, preset):
+        """It held for PPT Full alone.
+
+        The scale divided by a constant 9.11in placement while the writer
+        derives the frame from the figure's aspect and clamps it to the layout.
+        Measured before this was fixed: PPT Half 4.5pt and Square 4.7pt, both
+        under HALF the 10pt floor, while Wide overshot at 13.0pt.
+        """
+        from qpcr.graph import MIN_SLIDE_PT
+        from qpcr.constants import FIGURE_SIZE_PRESETS
+        dims = FIGURE_SIZE_PRESETS[preset]
+        fig = self._fig(figure_width=dims["width"], figure_height=dims["height"])
+        ppx = self._pt_per_px(fig, width_cm=dims["width"])
+        worst = self._smallest_text_px(fig)
+        assert worst * ppx >= MIN_SLIDE_PT - 0.05, (
+            f"{preset}: smallest chart text is {worst}px = {worst * ppx:.2f}pt "
+            f"on the slide, below the {MIN_SLIDE_PT}pt floor"
         )
 
     def test_the_size_hierarchy_survives_scaling(self, mock_streamlit):
@@ -565,9 +596,10 @@ class TestStackedSignificanceSpacing:
         )
 
     def _stacks(self, fig):
-        from qpcr.constants import CM_TO_PX
+        # The figure's OWN height, not the configured cm: the canvas grows to
+        # hold a large label block, so `16 * CM_TO_PX` is not what was drawn.
         m = fig.layout.margin
-        plot_h = int(16 * CM_TO_PX) - (m.b or 0) - (m.t or 0)
+        plot_h = (fig.layout.height or 0) - (m.b or 0) - (m.t or 0)
         lo, hi = fig.layout.yaxis.range
         per_px = (hi - lo) / plot_h
         by_x = {}
@@ -605,9 +637,10 @@ class TestStackedSignificanceSpacing:
     def test_a_short_figure_still_clears_the_glyphs(self, mock_streamlit):
         """The step is geometry-dependent, so check a much shorter figure too."""
         fig = self._fig(figure_height=8)
-        from qpcr.constants import CM_TO_PX
         m = fig.layout.margin
-        plot_h = max(int(8 * CM_TO_PX) - (m.b or 0) - (m.t or 0), 100)
+        # Actual height, not the configured 8cm — a short figure is exactly the
+        # case where the canvas grows to hold its labels and legend.
+        plot_h = max((fig.layout.height or 0) - (m.b or 0) - (m.t or 0), 100)
         lo, hi = fig.layout.yaxis.range
         per_px = (hi - lo) / plot_h
         by_x = {}

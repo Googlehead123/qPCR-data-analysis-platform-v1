@@ -31,6 +31,8 @@ from qpcr.constants import (
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
 from qpcr.utils import natural_sort_key, gradient_styles
+from qpcr.slide_geometry import (EMU_PER_INCH, SLIDE_MAX_PICTURE_H_IN,
+                                 placement_size_in, render_size_px)
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
@@ -2942,17 +2944,19 @@ class PPTGenerator:
         _px_h = int(getattr(fig.layout, "height", 0) or int(h_cm * CM_TO_PX))
         _px_w = max(_px_w, 1)
         _px_h = max(_px_h, 1)
-        # The 800x500 floors are what made the frame and the bitmap disagree:
+        # The short-side floors are what made the frame and the bitmap disagree:
         # when a floor bound, the rendered aspect ratio no longer matched the
         # frame computed from the raw cm, and python-pptx stretched the image to
         # fit (32.5% vertically for the Square preset, 14.3% for PPT Half).
         # Raise the short side but keep the aspect ratio.
-        if _px_w < 800:
-            _px_h = int(round(_px_h * 800 / _px_w))
-            _px_w = 800
-        if _px_h < 500:
-            _px_w = int(round(_px_w * 500 / _px_h))
-            _px_h = 500
+        #
+        # This is qpcr.slide_geometry's arithmetic, not a second copy of it:
+        # qpcr/graph.py sizes every chart font from the SAME functions so the
+        # smallest text clears MIN_SLIDE_PT once placed. When the two disagreed,
+        # the font scale divided by a constant 9.11in placement that only ever
+        # described the 28x16cm default, and PPT Half and Square shipped chart
+        # text at under half the floor.
+        _px_w, _px_h = render_size_px(_px_w, _px_h)
 
         fig_copy = go.Figure(fig)
         fig_copy.update_layout(width=_px_w, height=_px_h)
@@ -2962,21 +2966,12 @@ class PPTGenerator:
             img_stream = io.BytesIO(img_bytes)
 
             # Frame follows the rendered aspect ratio so the bitmap is never
-            # stretched; width still honours the user's cm setting.
-            w_emu = int(w_cm * CM_TO_EMU)
-            h_emu = int(round(w_emu * _px_h / _px_w))
-            # Available area: ~1.0" to ~6.6" vertically, ~12" wide
-            max_w_emu = int(11.5 * 914400)
-            max_h_emu = int(5.2 * 914400)
-
-            if w_emu > max_w_emu:
-                scale_f = max_w_emu / w_emu
-                w_emu = max_w_emu
-                h_emu = int(h_emu * scale_f)
-            if h_emu > max_h_emu:
-                scale_f = max_h_emu / h_emu
-                h_emu = max_h_emu
-                w_emu = int(w_emu * scale_f)
+            # stretched; width still honours the user's cm setting until one of
+            # the layout clamps binds. Same module the font scale reads.
+            _w_in, _h_in = placement_size_in(w_cm, _px_w, _px_h)
+            w_emu = int(_w_in * EMU_PER_INCH)
+            h_emu = int(_h_in * EMU_PER_INCH)
+            max_h_emu = int(SLIDE_MAX_PICTURE_H_IN * EMU_PER_INCH)
 
             slide_w = int(prs.slide_width)
             left = max(0, int((slide_w - w_emu) / 2))
