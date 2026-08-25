@@ -27,8 +27,23 @@ Thumbs.db
 # Ruff cache
 .ruff_cache/
 
-# Local test data (optional - uncomment if you don't want to track)
-# test data/
+# Local working files, kept on disk but out of git.
+#   test_data/ — raw QuantStudio plate exports for real studies. Nothing in the
+#     suite reads them (the tests build their own frames), so they are input for
+#     manual checks, not fixtures.
+#   docs/ — local write-ups. This ignores the WHOLE tree, so a doc that is meant
+#     to be tracked needs an explicit `git add -f`.
+#   효능평가항목_update.xlsx — the in-vitro assay ledger. Its 21 rows were already
+#     reconciled into EFFICACY_CONFIG on 2026-07-31; where the two disagree the
+#     code deliberately wins (see the 탄력 and 장벽 comments in
+#     qpcr/constants.py). Named explicitly rather than ignoring *.xlsx, because
+#     a workbook IS tracked (qPCR_진정_20260205_1424.xlsx) and a blanket rule
+#     would quietly hide any future intentional one.
+# The previous entry here read "# test data/" with a space and never matched the
+# real directory name.
+docs/
+test_data/
+효능평가항목_update.xlsx
 
 # Tool state (Claude Code / Playwright / Superpowers)
 .claude/
