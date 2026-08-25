@@ -160,3 +160,55 @@ The whole-platform health agent (dependency pinning, Cloud-vs-local drift,
 per-rerun cost) was stopped before reporting. `requirements.txt` pinning and the
 Cloud Python-version trap are covered by the 2026-04-01 and 2026-08-07 entries
 above; the rest of that sweep is still open.
+
+---
+
+## 2026-08-25: "No `import X` anywhere" does NOT mean X is unused
+
+**What went wrong:** The audit dropped the `matplotlib` and `seaborn` pins as
+dead weight (7 packages, ~15MB per cold boot) after establishing that nothing in
+the project writes `import matplotlib`. True — and irrelevant. The per-gene
+results table styled its Fold_Change column with
+
+```python
+display_df.style.background_gradient(subset=["Fold_Change"], cmap="RdYlGn", ...)
+```
+
+and `Styler.background_gradient` does `import matplotlib` **inside the function,
+at call time**. Removing the pin made every styled results table raise
+`ImportError: background_gradient requires matplotlib`, taking the Analysis tab
+down with it.
+
+**Why it survived local testing:** the dev machine still had matplotlib 3.10.8
+installed from the older requirements.txt. The full suite was green locally —
+290 tests — while a clean install could not render the tab. The 2026-08-07 entry
+warns about pins that resolve but do not install; this is the mirror image, a
+package that installs *only* because it was already there.
+
+**Rule — a dependency audit must consider transitive, call-time imports, not
+just `import` statements.** Grep is necessary and not sufficient. Libraries that
+lazily import an optional backend inside a method (pandas Styler, plotting
+backends, `pandas.read_*` engines) are invisible to an import grep. Before
+dropping a pin, run the suite in an environment that does NOT have it.
+
+**Rule — verify dependency changes in a clean environment, never the dev one.**
+```bash
+uv venv /tmp/clean --python 3.12
+VIRTUAL_ENV=/tmp/clean uv pip install -r requirements.txt pytest pytest-mock pytest-timeout
+/tmp/clean/bin/python -m pytest tests/
+```
+This is what CI does, and it is the only run that means anything for a pin
+change. A green local suite proves nothing when the question is "is this package
+still needed".
+
+**Fix:** `qpcr/utils.py::gradient_styles` reproduces the RdYlGn ramp directly
+(ColorBrewer 11-class anchors, linear interpolation, pandas' own
+`text_color_threshold=0.408` for the light/dark text flip) and is applied via
+`Styler.apply`. Verified against matplotlib's own output across the table's
+0..3 range: max per-channel difference 3/255, endpoints exact. Two guards in
+`tests/test_utils.py` — one renders the styled table with `matplotlib` forced
+unimportable, one fails if any source file calls `.background_gradient(` again.
+
+**Caught by CI**, which existed for one day at that point (PR #17). It was
+merged ahead of the audit PR precisely so the audit would be gated, and this is
+the defect it caught.

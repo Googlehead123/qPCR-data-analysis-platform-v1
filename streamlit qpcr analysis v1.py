@@ -30,7 +30,7 @@ from qpcr.constants import (
     PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
-from qpcr.utils import natural_sort_key
+from qpcr.utils import natural_sort_key, gradient_styles
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
@@ -6333,9 +6333,11 @@ with tab3:
                 # Filter to existing columns
                 display_df = gene_df[[c for c in display_cols if c in gene_df.columns]]
 
-                # Style the dataframe
-                styled = display_df.style.background_gradient(
-                    subset=["Fold_Change"], cmap="RdYlGn", vmin=0, vmax=3
+                # Style the dataframe. Not Styler.background_gradient: it
+                # imports matplotlib at call time, which this project does not
+                # ship (see qpcr/utils.gradient_styles).
+                styled = display_df.style.apply(
+                    gradient_styles, subset=["Fold_Change"], vmin=0, vmax=3
                 ).format(
                     {
                         "Fold_Change": "{:.3f}",
