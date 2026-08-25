@@ -1,0 +1,10 @@
+# Test-only dependencies. Deliberately NOT in requirements.txt: Streamlit
+# Community Cloud installs from that file, and test tooling has no business in
+# the deployed container.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Pinned for the same reason the runtime deps are locked: an unpinned
+# `pip install pytest` in CI picks up whatever major is current that morning,
+# so the build can break with no commit to this repo.
+pytest==9.1.1
