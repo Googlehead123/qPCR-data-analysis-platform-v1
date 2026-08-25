@@ -16,6 +16,22 @@ DEFAULT_GROUP_COLORS = {
     "Treatment": "#FFFFFF",
 }
 
+# The Korean face for PowerPoint and Excel output. Matches the lab reference
+# workbook +qPCR_진정_20260205_1424.xlsx, whose default font is 맑은 고딕
+# (family 2, charset 129) — decision (Min, 2026-08-24), item 8a. "Malgun Gothic"
+# is the same face under its Latin name, which is what OOXML wants.
+#
+# Every PPT text run was Arial, which has ZERO Hangul coverage, so 진정 효능 평가
+# and Results: 효능 有 rendered by host substitution — visibly a different
+# typeface from the chart's Korean inside the same slide. The Excel workbook
+# defaulted to Calibri, same problem.
+#
+# Note this face is absent on Linux and Streamlit Cloud, so a deck generated
+# there still falls back — but packages.txt installs fonts-noto-cjk, so it falls
+# back to Noto Sans CJK KR and Korean renders either way. The reference match
+# holds where it matters, which is Windows PowerPoint.
+KOREAN_FONT_NAME = "Malgun Gothic"
+
 GRAPH_PRESETS = {
     "Classic": {"color": "#D3D3D3", "ref": "#FFFFFF"},
     "Steel": {"color": "#4A7A9F", "ref": "#FFFFFF"},
@@ -27,6 +43,26 @@ GRAPH_PRESETS = {
     # Okabe-Ito blue — colorblind-safe (deuteranopia/protanopia/tritanopia)
     "Colorblind-Safe": {"color": "#0072B2", "ref": "#FFFFFF"},
 }
+
+# What the Graphs tab OFFERS. The dict above keeps every preset so a stored
+# per-gene choice still resolves — dropping an entry would make Streamlit reset
+# that widget to options[0] and silently repaint a gene (see the reference
+# selectbox fix). The offered set is the two house palettes plus one neutral.
+#
+# Steel leads, and is the default. "Classic" was the default while being the
+# WORST preset for the job it has to do: #D3D3D3 at 0.85 opacity composites to
+# #dadada, 1.40:1 against the paper, and its white reference bar sits at dE 15.4
+# from the treated bars — the smallest control-vs-treated separation of all
+# eight (Steel is 56.7). The default was the one where the control bar is
+# hardest to pick out.
+#
+# Colour is not a data channel here: every preset is a single tone plus a white
+# reference bar, so all of them are colourblind-safe by construction and the
+# "Colorblind-Safe" name implied the others were not. It stays resolvable but
+# is no longer offered.
+GRAPH_PRESET_CHOICES = ("Steel", "Warm Neutral", "Classic")
+
+DEFAULT_GRAPH_PRESET = "Steel"
 
 FIGURE_SIZE_PRESETS = {
     "PPT Full": {"width": 28, "height": 16},
@@ -50,19 +86,18 @@ _DEFAULT_CJK_FONTS = [
 ]
 _FALLBACK_FONTS = ["Arial", "sans-serif"]
 
-
-def _detect_available_fonts():
-    """Check which CJK fonts are actually installed on this system."""
-    try:
-        from matplotlib import font_manager
-        system_fonts = {f.name for f in font_manager.fontManager.ttflist}
-        available_cjk = [f for f in _DEFAULT_CJK_FONTS if f in system_fonts]
-        return available_cjk + _FALLBACK_FONTS
-    except ImportError:
-        return _DEFAULT_CJK_FONTS + _FALLBACK_FONTS
-
-
-PLOTLY_FONT_FAMILY = ", ".join(_detect_available_fonts())
+# This is a CSS font-family list handed to Plotly, so a name that is not
+# installed is simply skipped by the browser — there is nothing to gain by
+# filtering the list first, and the filter actively hurt. It asked matplotlib
+# which families exist, and matplotlib does not index .ttc collections, which is
+# exactly how the fonts-noto-cjk package in packages.txt ships Noto Sans CJK. So
+# on both a dev box and Streamlit Cloud the CJK entries were always dropped and
+# every chart asked for "Arial, sans-serif": Korean still rendered, but only
+# because Chrome falls back per-character, never because a Korean font was
+# chosen. Emitting the full preference list lets a real Korean face (Malgun
+# Gothic on Windows, Apple SD Gothic Neo on macOS, Noto Sans CJK KR on Linux)
+# win when it is present, and costs a matplotlib import at startup less.
+PLOTLY_FONT_FAMILY = ", ".join(_DEFAULT_CJK_FONTS + _FALLBACK_FONTS)
 
 CM_TO_PX = 37.7953
 CM_TO_EMU = 360000
@@ -114,7 +149,9 @@ CM_TO_EMU = 360000
 # Dict order = auto-suggest priority (mainstream assays first, niche last).
 EFFICACY_CONFIG = {
     "탄력": {
-        "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN"],
+        # "FBN-1" is the hyphenated spelling that appears in real plate
+        # exports; without it the marker is silently ungraded in the Overview.
+        "genes": ["COL1A1", "COL1", "ELN", "FBN1", "FBN-1", "FBN"],
         "cell": "HS68 fibroblast",
         "treatment_time": "24 h",
         # Positive control confirmed by Min (2026-07-31): TGF-beta at 10 ng/ml.
@@ -126,7 +163,8 @@ EFFICACY_CONFIG = {
         #   2. it lists two further actives (Retinoic acid 5 μM, Niacinamide
         #      10 μg/ml) that are not used as the 탄력 benchmark.
         "controls": {"negative": "Non-treated", "positive": "TGFβ 10 ng/ml", "compare_to": "negative"},
-        "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up", "FBN1": "up", "FBN": "up"},
+        "expected_direction": {"COL1A1": "up", "COL1": "up", "ELN": "up",
+                               "FBN1": "up", "FBN-1": "up", "FBN": "up"},
     },
     "광노화": {
         "genes": ["MMP1", "MMP-1", "COL1A1", "COL1"],
@@ -144,12 +182,13 @@ EFFICACY_CONFIG = {
         "expected_direction": {"HAS3": "up", "AQP3": "up"},
     },
     "장벽": {
-        "genes": ["FLG", "CLDN1", "CLDN", "IVL"],
+        "genes": ["FLG", "CLDN1", "CLDN", "IVL", "ABCA12"],
         "cell": "HaCaT keratinocyte",
         "treatment_time": "24 h",
         # Positive control kept as Retinoic acid per Min (file listed Calcium 1.2mM).
         "controls": {"negative": "Non-treated", "positive": "Retinoic acid", "compare_to": "negative"},
-        "expected_direction": {"FLG": "up", "CLDN1": "up", "CLDN": "up", "IVL": "up"},
+        "expected_direction": {"FLG": "up", "CLDN1": "up", "CLDN": "up",
+                               "IVL": "up", "ABCA12": "up"},
     },
     "속보습": {
         "genes": ["HAS2", "AQP1"],

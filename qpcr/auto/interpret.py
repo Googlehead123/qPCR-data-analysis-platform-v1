@@ -26,7 +26,7 @@ def _direction(fc: float, tol: float = 0.05) -> str:
     return "flat"
 
 
-def _expected_for(gene: str, expected_direction: dict | None) -> str | None:
+def expected_direction_for(gene: str, expected_direction: dict | None) -> str | None:
     if not expected_direction:
         return None
     if gene in expected_direction:
@@ -110,6 +110,6 @@ def interpret_results(processed_data: dict, expected_direction: dict | None = No
     per-gene interpretation dicts (see `interpret_gene`)."""
     out = []
     for gene, gene_df in (processed_data or {}).items():
-        expected = _expected_for(gene, expected_direction)
+        expected = expected_direction_for(gene, expected_direction)
         out.append(interpret_gene(gene, gene_df, expected=expected, ref_condition=ref_condition))
     return out

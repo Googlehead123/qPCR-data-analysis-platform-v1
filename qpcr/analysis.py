@@ -134,6 +134,15 @@ class AnalysisEngine:
                     if condition == ref_sample:
                         ref_delta_ct = delta_ct
                     else:
+                        # Without reference wells there is nothing to normalise
+                        # against, so this row is dropped. That was silent, and
+                        # when it hits every condition of a gene the gene simply
+                        # vanishes from the results with no explanation.
+                        _skipped_warnings.append(
+                            f"Gene '{target}', condition '{condition}': no usable "
+                            f"reference ('{ref_sample}') wells for this gene "
+                            f"(target refs={len(ref_target)}, HK refs={len(ref_hk)})"
+                        )
                         continue
 
                 ddct = delta_ct - ref_delta_ct
@@ -148,9 +157,15 @@ class AnalysisEngine:
 
                 target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else np.nan
 
-                # Convert NaN to 0 for graph rendering (NaN would break Plotly error bars)
-                sd = target_sd if pd.notna(target_sd) else 0
-                sem = target_sem if pd.notna(target_sem) else 0
+                # Keep NaN when the SD is undefined (n=1) instead of coercing
+                # to 0. The old coercion reported SD 0.000 / SEM 0.000 and drew a
+                # zero-length error bar — the visual signature of the TIGHTEST
+                # measurement in the panel — for the single well left after QC
+                # dropped the other two. graph.py already does .fillna(0) on both
+                # error arrays, so NaN never reached Plotly in the first place;
+                # the stated reason for the coercion did not hold.
+                sd = target_sd
+                sem = target_sem
 
                 original_sample = cond_data["Sample"].iloc[0]
                 group = sample_mapping.get(original_sample, {}).get(
@@ -167,12 +182,13 @@ class AnalysisEngine:
                 # same asymmetric 2^-x transform as the Livak ±SD bars). Target-
                 # only, matching SD/SEM by design; 0 when n<2. Offered as an
                 # alternative to the ±SD bars (reviewers often prefer CIs).
-                if sem > 0 and n_target >= 2:
+                if pd.notna(sem) and n_target >= 2:
                     _ci = float(stats.t.ppf(0.975, n_target - 1)) * sem
                     fc_ci_upper = 2 ** (-(np.clip(ddct - _ci, -50, 50))) - rel_expr
                     fc_ci_lower = rel_expr - 2 ** (-(np.clip(ddct + _ci, -50, 50)))
                 else:
-                    fc_ci_upper = fc_ci_lower = 0
+                    # NaN, not 0: "no CI could be computed" is not "a CI of zero".
+                    fc_ci_upper = fc_ci_lower = np.nan
 
                 results.append(
                     {
@@ -196,8 +212,34 @@ class AnalysisEngine:
                         "Fold_Change": rel_expr,
                         # Fold-change domain error bars (Livak method)
                         # Upper/lower bounds account for nonlinear 2^x transform
-                        "FC_Error_Upper": (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr) if sd > 0 else 0,
-                        "FC_Error_Lower": (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50)))) if sd > 0 else 0,
+                        # pd.notna alone is the right guard: NaN already means
+                        # "undefined" (n=1, no estimable variance). The old
+                        # `sd > 0` also rejected a GENUINE zero — n>=2 identical
+                        # replicates — and exported it as undefined, when the
+                        # correct transformed error there is exactly 0.
+                        "FC_Error_Upper": (
+                            (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr)
+                            if pd.notna(sd) else np.nan
+                        ),
+                        "FC_Error_Lower": (
+                            (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50))))
+                            if pd.notna(sd) else np.nan
+                        ),
+                        # Fold-change-domain SEM, same asymmetric transform as
+                        # FC_Error_*. Without these the "SEM" error-bar mode
+                        # plotted the Ct-domain SEM straight onto a fold-change
+                        # axis, which is dimensionally meaningless and inverts the
+                        # comparison: a bar at FC 4.59 got its Ct SEM of 0.23
+                        # while its true fold-domain interval is 0.79, so the tall
+                        # bar looked TIGHTER than a short one.
+                        "FC_SEM_Upper": (
+                            (2 ** (-(np.clip(ddct - sem, -50, 50))) - rel_expr)
+                            if pd.notna(sem) else np.nan
+                        ),
+                        "FC_SEM_Lower": (
+                            (rel_expr - 2 ** (-(np.clip(ddct + sem, -50, 50))))
+                            if pd.notna(sem) else np.nan
+                        ),
                         "FC_CI_Upper": fc_ci_upper,
                         "FC_CI_Lower": fc_ci_lower,
                     }
@@ -207,6 +249,48 @@ class AnalysisEngine:
         # FIX-06: Attach warnings as attribute for caller to display
         result_df.attrs["_skipped_warnings"] = _skipped_warnings
         return result_df
+
+    @staticmethod
+    def _two_group_ttest(ref_vals, vals, ttest_type):
+        """One comparison's p-value, or NaN when no valid test exists.
+
+        Returns ``(p_value, test_used, skip_reason)`` — ``skip_reason`` is None
+        when a test ran.
+
+        A group holding a single well has no estimable within-group variance,
+        so there is no two-group t-test to run. The previous code substituted
+        ``stats.ttest_1samp``, which treats the singleton's measured ΔCt as a
+        KNOWN population mean. That is a different hypothesis, and it
+        manufactured significance: a lone treatment well returned p=0.0335
+        ('*'), and p=0.0027 ('**') with the groups reversed. The exporter then
+        reconstructed the method from the treatment row's n alone and labelled
+        those results "Welch t-test", which was simply untrue.
+
+        Decision (Min, 2026-08-24): if either group has fewer than two wells,
+        report no p-value and no marker. Rationale for treating this
+        differently from the uncorrected-p-value decision: uncorrected versus
+        BH-corrected is a defensible choice between two valid tests, whereas
+        n=1 has no valid two-group test at all, so there is nothing to be
+        consistent with. `n_reference` / `stat_test_used` are recorded per
+        comparison so no consumer has to infer the method again.
+        """
+        n_ref, n_cond = int(getattr(ref_vals, "size", 0)), int(getattr(vals, "size", 0))
+        if n_ref < 2 or n_cond < 2:
+            return (
+                np.nan,
+                f"none (n={n_cond} vs ref n={n_ref})",
+                f"no p-value (n={n_cond} vs ref n={n_ref}); a two-group "
+                "t-test needs at least 2 wells in both groups",
+            )
+        equal_var = ttest_type == "student"
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                _, p_val = stats.ttest_ind(ref_vals, vals, equal_var=equal_var)
+        except (ValueError, TypeError) as exc:
+            return (np.nan, "none (test error)", f"t-test failed: {exc}")
+        label = "Student t-test" if equal_var else "Welch t-test"
+        return (float(p_val), f"{label} (n={n_cond} vs ref n={n_ref})", None)
 
     @staticmethod
     def calculate_statistics(
@@ -249,8 +333,6 @@ class AnalysisEngine:
         results = processed.copy()
         results["p_value"] = np.nan
         results["significance"] = ""
-        # FIX-16: Track one-sample t-test usage
-        _onesamp_warnings = []
         _stats_skipped = []
 
         # Add second/third p-value columns if compare conditions are provided
@@ -333,37 +415,18 @@ class AnalysisEngine:
                     if cond == compare_condition or vals.size == 0:
                         continue
 
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", RuntimeWarning)
-                            equal_var = ttest_type == "student"
-                            if ref_vals.size >= 2 and vals.size >= 2:
-                                _, p_val = stats.ttest_ind(
-                                    ref_vals, vals, equal_var=equal_var
-                                )
-                            elif vals.size == 1 and ref_vals.size >= 2:
-                                # FIX-16: Track one-sample t-test usage
-                                _onesamp_warnings.append(f"{target}/{cond} (n=1 vs ref n={ref_vals.size})")
-                                _, p_val = stats.ttest_1samp(ref_vals, vals[0])
-                            elif ref_vals.size == 1 and vals.size >= 2:
-                                # FIX-16: Track one-sample t-test usage
-                                _onesamp_warnings.append(f"{target}/{cond} (ref n=1 vs n={vals.size})")
-                                _, p_val = stats.ttest_1samp(vals, ref_vals[0])
-                            else:
-                                # n=1 vs ref n=1: no t-test is possible. Record it so
-                                # the blank significance column has an explanation
-                                # instead of silently showing nothing.
-                                p_val = np.nan
-                                if vals.size == 1 and ref_vals.size == 1:
-                                    _stats_skipped.append(
-                                        f"{target}/{cond}: no p-value (n=1 vs ref n=1)")
-                    except (ValueError, TypeError) as e:
-                        p_val = np.nan
+                    p_val, _test_used, _skip = AnalysisEngine._two_group_ttest(
+                        ref_vals, vals, ttest_type
+                    )
+                    if _skip:
+                        _stats_skipped.append(f"{target}/{cond}: {_skip}")
 
                     mask = (results["Target"] == target) & (
                         results["Condition"] == cond
                     )
                     results.loc[mask, "p_value"] = p_val
+                    results.loc[mask, "n_reference"] = int(ref_vals.size)
+                    results.loc[mask, "stat_test_used"] = _test_used
 
                     if not np.isnan(p_val):
                         if p_val < 0.001:
@@ -381,27 +444,22 @@ class AnalysisEngine:
                         if cond == compare_condition_2 or vals.size == 0:
                             continue
 
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore", RuntimeWarning)
-                                equal_var = ttest_type == "student"
-                                if ref_vals_2.size >= 2 and vals.size >= 2:
-                                    _, p_val_2 = stats.ttest_ind(
-                                        ref_vals_2, vals, equal_var=equal_var
-                                    )
-                                elif vals.size == 1 and ref_vals_2.size >= 2:
-                                    _, p_val_2 = stats.ttest_1samp(ref_vals_2, vals[0])
-                                elif ref_vals_2.size == 1 and vals.size >= 2:
-                                    _, p_val_2 = stats.ttest_1samp(vals, ref_vals_2[0])
-                                else:
-                                    p_val_2 = np.nan
-                        except (ValueError, TypeError) as e:
-                            p_val_2 = np.nan
+                        p_val_2, _test_used_2, _skip_2 = (
+                            AnalysisEngine._two_group_ttest(
+                                ref_vals_2, vals, ttest_type
+                            )
+                        )
+                        if _skip_2:
+                            _stats_skipped.append(
+                                f"{target}/{cond} vs {compare_condition_2}: {_skip_2}"
+                            )
 
                         mask = (results["Target"] == target) & (
                             results["Condition"] == cond
                         )
                         results.loc[mask, "p_value_2"] = p_val_2
+                        results.loc[mask, "n_reference_2"] = int(ref_vals_2.size)
+                        results.loc[mask, "stat_test_used_2"] = _test_used_2
 
                         if not np.isnan(p_val_2):
                             if p_val_2 < 0.001:
@@ -419,27 +477,22 @@ class AnalysisEngine:
                         if cond == compare_condition_3 or vals.size == 0:
                             continue
 
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore", RuntimeWarning)
-                                equal_var = ttest_type == "student"
-                                if ref_vals_3.size >= 2 and vals.size >= 2:
-                                    _, p_val_3 = stats.ttest_ind(
-                                        ref_vals_3, vals, equal_var=equal_var
-                                    )
-                                elif vals.size == 1 and ref_vals_3.size >= 2:
-                                    _, p_val_3 = stats.ttest_1samp(ref_vals_3, vals[0])
-                                elif ref_vals_3.size == 1 and vals.size >= 2:
-                                    _, p_val_3 = stats.ttest_1samp(vals, ref_vals_3[0])
-                                else:
-                                    p_val_3 = np.nan
-                        except (ValueError, TypeError):
-                            p_val_3 = np.nan
+                        p_val_3, _test_used_3, _skip_3 = (
+                            AnalysisEngine._two_group_ttest(
+                                ref_vals_3, vals, ttest_type
+                            )
+                        )
+                        if _skip_3:
+                            _stats_skipped.append(
+                                f"{target}/{cond} vs {compare_condition_3}: {_skip_3}"
+                            )
 
                         mask = (results["Target"] == target) & (
                             results["Condition"] == cond
                         )
                         results.loc[mask, "p_value_3"] = p_val_3
+                        results.loc[mask, "n_reference_3"] = int(ref_vals_3.size)
+                        results.loc[mask, "stat_test_used_3"] = _test_used_3
 
                         if not np.isnan(p_val_3):
                             if p_val_3 < 0.001:
@@ -461,8 +514,6 @@ class AnalysisEngine:
                 results, "p_value_3", "p_value_fdr_3", "significance_fdr_3", "\u2020"
             )
 
-        # FIX-16: Attach one-sample t-test warnings for caller to display
-        results.attrs["_onesamp_warnings"] = _onesamp_warnings
         results.attrs["_stats_skipped_warnings"] = _stats_skipped
         return results
 
@@ -473,6 +524,7 @@ class AnalysisEngine:
         ref_sample: str,
         sample_mapping: dict,
         excluded_wells=None,
+        excluded_samples=None,
     ) -> pd.DataFrame:
         """Compute per-replicate fold change values for data point overlay.
 
@@ -483,8 +535,17 @@ class AnalysisEngine:
 
         Uses per-condition HK mean (not per-replicate HK) to isolate
         target gene variability from housekeeping variability.
+
+        ``excluded_samples`` must be honoured here as well as ``excluded_wells``:
+        calculate_ddct and calculate_statistics both drop those samples, so
+        without it the scatter overlay plotted points for a sample the bar and
+        the p-value had excluded — and, worse, the excluded sample also shifted
+        the reference ΔCt that every point is normalised against.
         """
         data = raw_data.copy()
+
+        if excluded_samples:
+            data = data[~data["Sample"].isin(set(excluded_samples))]
 
         # Apply exclusions
         if isinstance(excluded_wells, dict):

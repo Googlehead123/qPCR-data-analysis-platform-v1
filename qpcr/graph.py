@@ -13,6 +13,14 @@ import streamlit as st
 
 from qpcr.constants import PLOTLY_FONT_FAMILY, CM_TO_PX
 
+# Where a chart image ends up. PPTGenerator places it 9.11in wide on a 13.33in
+# slide, which is what turns figure pixels into points the reader actually sees.
+PPT_PLACEMENT_WIDTH_IN = 9.11
+# Floor for the smallest chart text once placed on that slide.
+MIN_SLIDE_PT = 10.0
+# The smallest hardcoded font in this module (the captions and n= labels).
+SMALLEST_CHART_FONT_PX = 9
+
 
 def _darken_hex(hex_color: str, factor: float = 0.3) -> str:
     """Darken a hex color by the given factor (0-1)."""
@@ -34,14 +42,23 @@ class GraphGenerator:
         return wrapped.replace("\n", "<br>")
 
     @staticmethod
-    def _auto_wrap_width(n_bars: int, fig_width_cm: float = 28) -> int:
+    def _auto_wrap_width(n_bars: int, fig_width_cm: float = 28,
+                         tick_px: float = 12) -> int:
         """Calculate optimal wrap width based on number of bars and figure width.
 
         Adapts like Excel cell wrapping: more bars -> narrower wrap.
         Minimum 10 chars to keep labels readable even with 20+ bars.
+
+        ``tick_px`` is the RENDERED tick font size. The character width used to
+        be a bare /7, which silently assumed the old 12px tick font; once the
+        fonts were scaled for slide legibility the labels grew ~1.8x wider than
+        the wrap allowed for and adjacent labels ran into each other
+        ("Test article 1 ppmTest article 10 ppm"). 0.58 em is a reasonable mean
+        advance for this font stack at these sizes.
         """
         px_per_bar = (fig_width_cm * 37.8) / max(n_bars, 1)
-        chars_per_bar = max(int(px_per_bar / 7), 10)
+        char_px = max(float(tick_px) * 0.58, 4.0)
+        chars_per_bar = max(int(px_per_bar / char_px), 10)
         return min(chars_per_bar, 30)
 
     @staticmethod
@@ -151,9 +168,16 @@ class GraphGenerator:
 
         fig = go.Figure()
 
-        # Error bars — selectable mode; default is Livak fold-change-domain +/-SD.
-        # Modes: 'livak_sd' (FC_Error), 'ci95' (FC_CI), 'sem', 'sd' (Ct domain).
-        # error_caption documents which is shown (reviewers require this to be stated).
+        # Error bars — selectable mode. Every mode plots in the FOLD-CHANGE
+        # domain, because that is the axis: the 'sem' and 'sd' modes used to put
+        # the raw Ct-domain SEM/SD onto a fold-change bar, which is dimensionally
+        # meaningless and inverts the comparison (a bar at FC 4.59 was given its
+        # Ct SEM of 0.23 while its true fold-domain interval is 0.79, so the tall
+        # bar drew a TIGHTER whisker than a short one).
+        # error_caption documents which is shown (reviewers require this to be
+        # stated) and now also states that the spread is of the target
+        # replicates only — the housekeeping SD is deliberately not propagated,
+        # so calling it plain "Livak" overstated it.
         cols = set(gene_data_indexed.columns)
         error_bar_mode = (settings.get("error_bar_mode")
                           or st.session_state.get("error_bar_mode")
@@ -161,21 +185,31 @@ class GraphGenerator:
         if error_bar_mode == "ci95" and {"FC_CI_Upper", "FC_CI_Lower"} <= cols:
             _eu, _el = "FC_CI_Upper", "FC_CI_Lower"
             error_caption = "Error bars: 95% CI (fold-change domain, target replicates)"
-        elif error_bar_mode == "sem" and "SEM" in cols:
-            _eu = _el = "SEM"
-            error_caption = "Error bars: ±SEM (Ct domain)"
-        elif error_bar_mode == "sd" and "SD" in cols:
-            _eu = _el = "SD"
-            error_caption = "Error bars: ±SD (Ct domain)"
+        elif error_bar_mode == "sem" and {"FC_SEM_Upper", "FC_SEM_Lower"} <= cols:
+            _eu, _el = "FC_SEM_Upper", "FC_SEM_Lower"
+            error_caption = "Error bars: ±SEM of target replicates (fold-change domain)"
         elif {"FC_Error_Upper", "FC_Error_Lower"} <= cols:
+            # 'sd' resolves here too: the Livak bars ARE the SD, transformed.
             _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
-            error_caption = "Error bars: ±SD (Livak fold-change domain)"
+            error_caption = "Error bars: ±SD of target replicates (fold-change domain)"
         else:
+            # Last resort for a frame without the transformed columns (e.g. an
+            # older stored result). State the domain honestly.
             _col = "SD" if error_bar_mode == "sd" else "SEM"
             _eu = _el = _col if _col in cols else "SEM"
-            error_caption = f"Error bars: ±{_eu} (Ct domain)"
-        error_upper_array = gene_data_indexed[_eu].fillna(0).values
-        error_lower_array = gene_data_indexed[_el].fillna(0).values
+            error_caption = f"Error bars: ±{_eu} (Ct domain — not fold-change scaled)"
+        # NaN is kept, NOT filled with 0. calculate_ddct stores undefined spread
+        # (n=1: no estimable variance) as NaN; filling it with 0 drew a
+        # zero-length bar, which reads as "measured, perfectly precise" — the
+        # opposite of the truth. Plotly serialises NaN in an error array to
+        # null and omits that point's bar, leaving the others intact.
+        error_upper_array = gene_data_indexed[_eu].values
+        error_lower_array = gene_data_indexed[_el].values
+
+        # Every trace used to be hardcoded showlegend=False, so the "Legend"
+        # toggle switched on a legend with nothing in it. Name the traces and let
+        # the setting drive their visibility instead.
+        show_legend = bool(settings.get("show_legend", False))
 
         gene_bar_settings = st.session_state.get(f"{gene}_bar_settings", {})
 
@@ -197,7 +231,9 @@ class GraphGenerator:
             if show_error_global and bar_config.get("show_err", True):
                 error_visible_upper.append(error_upper_array[idx])
             else:
-                error_visible_upper.append(0)
+                # None, not 0: a 0 still draws the cap, so a bar the user
+                # switched off looked like a measured zero spread.
+                error_visible_upper.append(None)
             error_visible_lower.append(0)  # top-only error bars
 
         fig.add_trace(
@@ -221,7 +257,8 @@ class GraphGenerator:
                     ),
                     opacity=settings.get("bar_opacity", 0.85),
                 ),
-                showlegend=False,
+                name="Relative expression",
+                showlegend=show_legend,
             )
         )
 
@@ -250,9 +287,42 @@ class GraphGenerator:
                     y=scatter_y,
                     mode="markers",
                     marker=dict(size=5, color=scatter_colors, opacity=0.65, line=dict(width=0)),
-                    showlegend=False,
+                    name="Replicates",
+                    showlegend=show_legend,
                     hoverinfo="y",
                 ))
+
+        # ---- Font scale for the output medium -------------------------------
+        # Chart text is sized in FIGURE PIXELS but read on a slide. The PPT
+        # writer places the image 9.11in wide, so on a 28cm (1058px) figure one
+        # figure pixel is 0.620pt: the 9px captions landed at 5.6pt and the 12px
+        # ticks at 7.4pt, while the slide's own chrome is 11-16pt. The least
+        # important text on the slide was three times the size of the axis
+        # labels.
+        #
+        # One scale is applied to every chart font so the SMALLEST text clears a
+        # 10pt floor on the slide (decision: Min, 2026-08-24, item 7a). Scaling
+        # rather than clamping each size individually is deliberate — clamping
+        # would raise the 9px captions and the 12px ticks to the same value and
+        # flatten the hierarchy. The size sliders keep working; they now set
+        # relative size, which is what they were always really doing.
+        _cfg_w = settings.get("figure_width", 28)
+        _eff_w_cm = max(_cfg_w, n_bars * 1.4)
+        _fig_w_px = max(int(_eff_w_cm * CM_TO_PX), 1)
+        font_scale = max(
+            1.0,
+            (MIN_SLIDE_PT * _fig_w_px)
+            / (PPT_PLACEMENT_WIDTH_IN * 72.0 * SMALLEST_CHART_FONT_PX),
+        )
+
+        def _fs(px) -> int:
+            """Scale a figure-pixel font size for the output medium.
+
+            Rounds UP: rounding 9 * 1.792 = 16.13 down to 16 px lands at 9.92pt
+            and misses the floor by 0.08pt, which would make the guarantee a
+            near-miss rather than a guarantee.
+            """
+            return max(1, int(np.ceil(float(px) * font_scale - 1e-9)))
 
         max_y_value = gene_data_indexed["Relative_Expression"].max()
         if pd.isna(max_y_value) or max_y_value <= 0:
@@ -266,7 +336,14 @@ class GraphGenerator:
         if ref_line_value is not None and pd.notna(ref_line_value):
             y_max_auto = max(y_max_auto, ref_line_value * 1.20)
 
-        fixed_symbol_spacing = y_max_auto * 0.05
+        # Stacked significance symbols are POSITIONED LATER, once plot_h_px is
+        # known (see "emit the deferred significance symbols" below). The step
+        # used to be y_max_auto * 0.05, a fraction of the DATA range, which at
+        # the default 28x16cm geometry is ~13.5 px — smaller than the 16 px
+        # asterisk it has to clear, so a dagger's stem was drawn straight
+        # through the middle asterisk of a "***" and corrupted it. A glyph must
+        # be cleared in PIXELS, so the step has to come from the font sizes.
+        pending_sig = []
 
         if show_sig_global:
             # Direct mode: add significance symbols above each bar
@@ -284,12 +361,19 @@ class GraphGenerator:
                 sig_3 = row.get("significance_3", "")
 
                 bar_height = row["Relative_Expression"]
-                error_bar_height = error_visible_upper[idx]
+                # None (bar switched off) and NaN (undefined spread at n=1) both
+                # mean "no error bar is drawn", so the marker sits at the bar
+                # top. Only the LAYOUT coerces to 0 — the plotted array keeps
+                # None/NaN so Plotly omits those bars.
+                _err = error_visible_upper[idx]
+                error_bar_height = (
+                    0.0 if _err is None or pd.isna(_err) else float(_err)
+                )
                 base_y_position = bar_height + error_bar_height
 
-                asterisk_font_size = 16
-                hashtag_font_size = 10
-                dagger_font_size = 10
+                asterisk_font_size = _fs(16)
+                hashtag_font_size = _fs(10)
+                dagger_font_size = _fs(10)
 
                 if show_sig_global:
                     symbols_to_show = []
@@ -307,19 +391,10 @@ class GraphGenerator:
                         symbols_to_show.append(sig_3)
                         font_sizes.append(dagger_font_size)
 
-                    # Stack symbols with fixed absolute spacing
-                    for si, (sym, fs) in enumerate(zip(symbols_to_show, font_sizes)):
-                        y_pos = base_y_position + (fixed_symbol_spacing * 0.2) + (si * fixed_symbol_spacing)
-                        fig.add_annotation(
-                            x=idx,
-                            y=y_pos,
-                            text=sym,
-                            showarrow=False,
-                            font=dict(size=fs, color="black", family=PLOTLY_FONT_FAMILY),
-                            xref="x",
-                            yref="y",
-                            xanchor="center",
-                            yanchor="bottom",
+                    if symbols_to_show:
+                        pending_sig.append(
+                            (idx, base_y_position,
+                             list(zip(symbols_to_show, font_sizes)))
                         )
 
         gene_label = display_gene_name if display_gene_name else gene
@@ -328,7 +403,8 @@ class GraphGenerator:
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
-                font=dict(size=settings.get(f"{gene}_ylabel_size", 14), family=PLOTLY_FONT_FAMILY),
+                font=dict(size=_fs(settings.get(f"{gene}_ylabel_size", 14)),
+                          family=PLOTLY_FONT_FAMILY),
                 standoff=15,
             ),
             showgrid=False,
@@ -343,15 +419,23 @@ class GraphGenerator:
             fixedrange=False,
         )
 
-        if settings.get("y_log_scale"):
+        is_log = bool(settings.get("y_log_scale"))
+        if is_log:
             y_axis_config["type"] = "log"
             y_axis_config.pop("range", None)
 
         if settings.get("y_min") is not None or settings.get("y_max") is not None:
-            y_range = []
-            y_range.append(settings.get("y_min", 0))
-            y_range.append(settings.get("y_max", y_max_auto))
-            y_axis_config["range"] = y_range
+            y_lo = settings.get("y_min", 0)
+            y_hi = settings.get("y_max", y_max_auto)
+            if is_log:
+                # Plotly reads a log axis's range as EXPONENTS, so passing the raw
+                # bounds through turned a 1-100 request into 10^1-10^100 and drew a
+                # blank chart. Convert, and fall back to auto when the bounds are
+                # not expressible on a log axis rather than showing a wrong one.
+                if y_lo is not None and y_lo > 0 and y_hi is not None and y_hi > y_lo:
+                    y_axis_config["range"] = [np.log10(y_lo), np.log10(y_hi)]
+            else:
+                y_axis_config["range"] = [y_lo, y_hi]
 
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get("bar_gap", 0.15))
         gene_margins = settings.get(
@@ -376,7 +460,9 @@ class GraphGenerator:
         x_tick_angle = 0
 
         if label_mode == "Auto-wrap":
-            wrap_w = GraphGenerator._auto_wrap_width(n_bars, effective_fig_width)
+            wrap_w = GraphGenerator._auto_wrap_width(
+                n_bars, effective_fig_width, _fs(gene_tick_size)
+            )
             wrapped_labels = [
                 GraphGenerator._wrap_text(str(cond), wrap_w) for cond in condition_names
             ]
@@ -389,26 +475,65 @@ class GraphGenerator:
         else:  # Horizontal
             wrapped_labels = [str(c) for c in condition_names]
 
-        # Dynamic bottom margin based on label mode and content
+        # Bottom margin, measured from the LABEL BLOCK rather than a floor.
+        # The old floors (180 / 140+len*4 / 120+len*6) were set independently of
+        # the text they had to hold, and they over-reserved badly: on a default
+        # 28x16cm figure the bottom margin resolved to 238px plus a 38px legend
+        # reserve on a 604px figure, leaving a 268px plot area \u2014 44% of the
+        # image, with 40% of every exported PNG blank (measured: ink rows
+        # 117-849 of 1208, so 9.7% blank on top and 29.6% on the bottom). On the
+        # slide that became a 1.54in empty band between the chart and the
+        # "Results: \ud6a8\ub2a5" line.
+        #
+        # Now: one line of ticks costs one line of ticks. Measured after the
+        # change on a 5-condition default figure: bottom blank 29.6% -> 0.0% for
+        # Auto-wrap and Horizontal, and the plot area went from 44% to 75% of
+        # the image.
+        #
+        # The angled modes need the label's PROJECTED height, so they still
+        # scale with length: sin(45 deg) ~= 0.71 of an estimated glyph advance,
+        # and the full advance at 90 deg. Those two keep ~9% bottom slack
+        # (down from 12-17%) because the real projected height depends on glyph
+        # metrics this code cannot measure without rendering first. That slack
+        # is deliberate \u2014 under-reserving CLIPS the labels, which is worse than
+        # white space. If it ever matters, xaxis automargin would let Plotly
+        # measure it properly, at the cost of the caption anchoring below, which
+        # is expressed as a fraction of the plot height.
+        _line_px = _fs(gene_tick_size) * 1.45  # tick line height incl. leading
+        _pad_px = _fs(10)                      # breathing room under the axis
         if label_mode == "Auto-wrap":
             max_label_lines = max(
                 (label.count("<br>") + 1 for label in wrapped_labels), default=1
             )
-            dynamic_b_margin = 180 + max(0, max_label_lines - 1) * 22
+            dynamic_b_margin = int(max_label_lines * _line_px + _pad_px)
         elif label_mode == "Angled 45\u00b0":
             max_label_len = max((len(str(c)) for c in condition_names), default=5)
-            dynamic_b_margin = 140 + max_label_len * 4
-            max_label_lines = max(1, dynamic_b_margin // 22)
+            _glyph_px = _fs(gene_tick_size) * 0.50
+            dynamic_b_margin = int(max_label_len * _glyph_px * 0.71 + _pad_px)
+            max_label_lines = 1
         elif label_mode == "Angled 90\u00b0":
             max_label_len = max((len(str(c)) for c in condition_names), default=5)
-            dynamic_b_margin = 120 + max_label_len * 6
-            max_label_lines = max(1, dynamic_b_margin // 22)
-        else:
-            dynamic_b_margin = 140
+            _glyph_px = _fs(gene_tick_size) * 0.50
+            dynamic_b_margin = int(max_label_len * _glyph_px + _pad_px)
+            max_label_lines = 1
+        else:  # Horizontal
+            dynamic_b_margin = int(_line_px + _pad_px)
             max_label_lines = 1
 
+        # Use the measured value, do not merely floor it. The old code only ever
+        # RAISED b towards dynamic_b_margin, so the {"b": 200} default won
+        # whenever the labels needed less — which is every ordinary chart. An
+        # explicit per-gene margin from the operator still wins over both.
+        _has_explicit_margins = settings.get(f"{gene}_margins") is not None
         default_margins = gene_margins.copy()
-        if default_margins.get("b", 200) < dynamic_b_margin:
+        if not _has_explicit_margins:
+            default_margins["b"] = dynamic_b_margin
+            # No chart title is drawn (the gene name lives on the y-axis), so
+            # the 60px top reserve was holding space for nothing. The
+            # significance stack sits INSIDE the plot area — the y-range is
+            # extended to contain it — so it does not need margin either.
+            default_margins["t"] = int(_pad_px * 1.6)
+        elif default_margins.get("b", 200) < dynamic_b_margin:
             default_margins["b"] = dynamic_b_margin
         gene_margins = default_margins
 
@@ -439,12 +564,52 @@ class GraphGenerator:
 
         # Reserve extra bottom margin for the significance legend below labels
         legend_line_count = legend_text.count("<br>") + 1
-        legend_extra_px = legend_line_count * 18 + 20
+        # Scaled with the legend's own font, which the 18px constant predated.
+        legend_extra_px = int(legend_line_count * _fs(9) * 1.5 + _pad_px)
 
         fig_h_px = int(settings.get("figure_height", 16) * CM_TO_PX)
         b_margin_px = gene_margins.get("b", 200)
         t_margin_px = gene_margins.get("t", 60)
         plot_h_px = max(fig_h_px - b_margin_px - legend_extra_px - t_margin_px, 100)
+
+        # Emit the deferred significance symbols. The step between stacked
+        # symbols is derived from the FONT SIZES in px and converted to data
+        # units through the plot height, so each glyph clears the one below it
+        # whatever the figure geometry or the data range. 1.25x the larger of the
+        # two adjacent sizes gives a normal line's worth of leading.
+        if pending_sig:
+            _data_per_px = (y_max_auto / plot_h_px) if plot_h_px else 0.0
+            _stack_top = 0.0
+            for _idx, _base_y, _syms in pending_sig:
+                _y = _base_y + max(_syms[0][1], 8) * 0.35 * _data_per_px
+                _prev_fs = None
+                _sym_fs = _syms[0][1]
+                for _sym, _sym_fs in _syms:
+                    if _prev_fs is not None:
+                        _y += max(_prev_fs, _sym_fs) * 1.25 * _data_per_px
+                    fig.add_annotation(
+                        x=_idx,
+                        y=_y,
+                        text=_sym,
+                        showarrow=False,
+                        font=dict(size=_sym_fs, color="black",
+                                  family=PLOTLY_FONT_FAMILY),
+                        xref="x",
+                        yref="y",
+                        xanchor="center",
+                        yanchor="bottom",
+                    )
+                    _prev_fs = _sym_fs
+                # The glyph itself occupies height above its anchor.
+                _stack_top = max(_stack_top, _y + _sym_fs * 1.2 * _data_per_px)
+
+            # Give the stack room. Without this a taller stack is clipped by the
+            # axis range, which was computed before the symbols were placed.
+            # Only when the operator has not pinned the bounds themselves.
+            if (settings.get("y_min") is None and settings.get("y_max") is None
+                    and not is_log and _stack_top > y_max_auto):
+                y_max_auto = _stack_top
+                y_axis_config["range"] = [0, y_max_auto]
 
         fig.update_layout(
             title="",
@@ -455,7 +620,8 @@ class GraphGenerator:
                 tickmode="array",
                 tickvals=list(range(n_bars)),
                 ticktext=wrapped_labels,
-                tickfont=dict(size=gene_tick_size, family=PLOTLY_FONT_FAMILY, color="black"),
+                tickfont=dict(size=_fs(gene_tick_size), family=PLOTLY_FONT_FAMILY,
+                              color="black"),
                 tickangle=x_tick_angle,
                 ticks="outside",
                 ticklen=8,
@@ -467,7 +633,8 @@ class GraphGenerator:
             ),
             yaxis=y_axis_config,
             template=settings.get("color_scheme", "plotly_white"),
-            font=dict(size=settings.get("font_size", 14), family=PLOTLY_FONT_FAMILY, color="black"),
+            font=dict(size=_fs(settings.get("font_size", 14)),
+                      family=PLOTLY_FONT_FAMILY, color="black"),
             height=fig_h_px,
             width=int(effective_fig_width * CM_TO_PX),
             bargap=gene_bar_gap,
@@ -482,9 +649,14 @@ class GraphGenerator:
             ),
         )
 
-        # Place significance legend below the plot, beneath x-axis labels
-        label_px_est = max_label_lines * 18 + 10
-        legend_y_frac = -((label_px_est + 8) / plot_h_px)
+        # Place significance legend below the plot, beneath x-axis labels.
+        # label_px_est used a hardcoded 18px line height that predated the font
+        # scaling, so once the ticks grew the captions were anchored INSIDE the
+        # label block and the second line of a wrapped label ("...100 / ppm")
+        # printed straight through them. _line_px is the same value the bottom
+        # margin is computed from, so the two cannot drift apart again.
+        label_px_est = max_label_lines * _line_px + _pad_px
+        legend_y_frac = -((label_px_est + _pad_px * 0.5) / plot_h_px)
         fig.add_annotation(
             text=legend_text,
             xref="paper",
@@ -494,7 +666,7 @@ class GraphGenerator:
             xanchor="right",
             yanchor="top",
             showarrow=False,
-            font=dict(size=9, color="#666666", family=PLOTLY_FONT_FAMILY),
+            font=dict(size=_fs(9), color="#666666", family=PLOTLY_FONT_FAMILY),
             bgcolor="rgba(255,255,255,0.90)",
             bordercolor="#CCCCCC",
             borderwidth=1,
@@ -522,7 +694,8 @@ class GraphGenerator:
                 line_width=1.5,
                 annotation_text=ref_line_label or f"{ref_line_value:.2f}",
                 annotation_position=ann_position,
-                annotation_font=dict(size=10, color="#666666", family=PLOTLY_FONT_FAMILY),
+                annotation_font=dict(size=_fs(10), color="#666666",
+                                     family=PLOTLY_FONT_FAMILY),
             )
 
         # Optional per-bar sample size (n=) — publication convention
@@ -533,7 +706,8 @@ class GraphGenerator:
                     fig.add_annotation(
                         x=_i, y=0, yref="y", text=f"n={int(_n)}",
                         showarrow=False, yshift=9,
-                        font=dict(size=9, color="#555555", family=PLOTLY_FONT_FAMILY),
+                        font=dict(size=_fs(9), color="#555555",
+                                  family=PLOTLY_FONT_FAMILY),
                     )
 
         # Error-bar caption — always state what the error bars represent
@@ -542,7 +716,11 @@ class GraphGenerator:
                 text=error_caption, xref="paper", yref="paper",
                 x=0.0, y=legend_y_frac, xanchor="left", yanchor="top",
                 showarrow=False,
-                font=dict(size=9, color="#888888", family=PLOTLY_FONT_FAMILY),
+                # #666666 to match the significance legend beside it. #888888
+                # measured 3.54:1 on white, below the 4.5:1 AA floor, while its
+                # immediate neighbour sat at 5.74:1 — two adjacent captions in
+                # two different greys, one of them failing.
+                font=dict(size=_fs(9), color="#666666", family=PLOTLY_FONT_FAMILY),
             )
 
         return fig

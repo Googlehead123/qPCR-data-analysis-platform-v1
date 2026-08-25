@@ -181,7 +181,13 @@ MUTATIONS = {
         "condition", "Renamed"),
     "sample mapping include flag": lambda ss: ss["sample_mapping"]["Treatment1"].__setitem__(
         "include", False),
-    "error bar mode": lambda ss: ss.__setitem__("error_bar_mode", "ci95"),
+    # graph_settings["error_bar_mode"], not a bare session_state key. This
+    # mutated ss["error_bar_mode"], which the APP never sets — the mode lives in
+    # graph_settings. It passed only because the fingerprint read the same dead
+    # key, so test and code agreed on a value neither the widget nor the graph
+    # ever used. Both were corrected 2026-08-24.
+    "error bar mode": lambda ss: ss["graph_settings"].__setitem__(
+        "error_bar_mode", "ci95"),
     "analysis reference condition": lambda ss: ss.__setitem__(
         "analysis_ref_condition", "Treatment1"),
     "comparison condition name": lambda ss: ss.__setitem__(

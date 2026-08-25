@@ -154,7 +154,225 @@ class TestGraphGeneratorBugFixes:
         
         bar_trace = fig.data[0]
         error_values = bar_trace.error_y.array
-        assert all(v == 0 for v in error_values)
+        # Expectation updated 2026-08-24: a switched-off bar is now None, not 0.
+        # A 0-length error bar still draws its cap, so "disabled" looked
+        # identical to "measured a spread of exactly zero". Plotly omits the
+        # bar entirely for None, which is what this test is really asserting.
+        assert all(v is None for v in error_values)
+
+    def test_n1_undefined_spread_draws_no_error_bar(
+        self, mock_streamlit, processed_gene_data, graph_settings
+    ):
+        """n=1 has no estimable variance, so it must get NO error bar.
+
+        Regression test for the defect where calculate_ddct correctly stored
+        undefined spread as NaN and the graph then coerced it back to 0 with
+        .fillna(0) — drawing a zero-length bar, the visual signature of the
+        most precise measurement in the panel, on the single well QC left.
+        """
+        import numpy as np
+        from importlib import import_module
+        spec = import_module('streamlit qpcr analysis v1')
+        GraphGenerator = spec.GraphGenerator
+
+        data = processed_gene_data.copy()
+        # Middle condition is a lone well: NaN spread, as calculate_ddct stores.
+        data.loc[1, "n_replicates"] = 1
+        for col in ("FC_Error_Upper", "FC_Error_Lower"):
+            data[col] = [0.3, np.nan, 0.2]
+
+        graph_settings["show_error"] = True
+        fig = GraphGenerator.create_gene_graph(
+            data=data, gene='COL1A1', settings=graph_settings, sample_order=None
+        )
+
+        # Assert on the SERIALISED figure: that is what Plotly renders, and it
+        # is where NaN becomes null (the in-memory array keeps NaN).
+        import json
+        rendered = json.loads(fig.to_json())["data"][0]["error_y"]["array"]
+        assert rendered[1] is None, (
+            "the n=1 bar must render no error bar; a 0 would read as a "
+            f"measured spread of exactly zero (got {rendered[1]!r})"
+        )
+        assert rendered[0] is not None and rendered[2] is not None, (
+            "suppressing the undefined bar must not suppress its neighbours"
+        )
+        # And the significance marker must still lay out (it does arithmetic
+        # on this array, so a None here used to raise TypeError).
+        assert fig.layout is not None
+
+
+class TestSlideLegibilityAndFraming:
+    """Chart text is sized in figure pixels but read on a slide.
+
+    The PPT writer places the image 9.11in wide, so on a 28cm (1058px) figure
+    one figure pixel is 0.620pt: the 9px captions landed at 5.6pt and the 12px
+    ticks at 7.4pt, against slide chrome of 11-16pt. Meanwhile 40% of every
+    exported PNG was blank and the plot area was 44% of the image.
+    """
+
+    def _fig(self, **overrides):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+
+        conds = ["Non-treated", "EGF 25 ng/ml", "Test article 1 ppm",
+                 "Test article 10 ppm", "Test article 100 ppm"]
+        data = pd.DataFrame({
+            "Target": ["KI67"] * 5,
+            "Condition": conds,
+            "Relative_Expression": [1.0, 0.52, 0.46, 0.65, 0.45],
+            "Fold_Change": [1.0, 0.52, 0.46, 0.65, 0.45],
+            "FC_Error_Upper": [0.25, 0.04, 0.01, 0.27, 0.05],
+            "FC_Error_Lower": [0.25, 0.04, 0.01, 0.27, 0.05],
+            "n_replicates": [3] * 5,
+            "significance": ["", "***", "***", "*", "***"],
+        })
+        settings = {"show_error": True, "show_significance": True,
+                    "figure_width": 28, "figure_height": 16}
+        settings.update(overrides)
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67", settings=settings, sample_order=None
+        )
+
+    def _pt_per_px(self, width_cm=28):
+        from qpcr.constants import CM_TO_PX
+        from qpcr.graph import PPT_PLACEMENT_WIDTH_IN
+        return (PPT_PLACEMENT_WIDTH_IN * 72.0) / int(width_cm * CM_TO_PX)
+
+    def test_no_chart_text_falls_below_the_slide_floor(self, mock_streamlit):
+        from qpcr.graph import MIN_SLIDE_PT
+        fig = self._fig()
+        ppx = self._pt_per_px()
+        sizes = [fig.layout.xaxis.tickfont.size, fig.layout.yaxis.title.font.size]
+        sizes += [a.font.size for a in fig.layout.annotations
+                  if a.font and a.font.size]
+        worst = min(sizes)
+        assert worst * ppx >= MIN_SLIDE_PT - 1e-6, (
+            f"smallest chart text is {worst}px = {worst * ppx:.1f}pt on the "
+            f"slide, below the {MIN_SLIDE_PT}pt floor"
+        )
+
+    def test_the_size_hierarchy_survives_scaling(self, mock_streamlit):
+        """Clamping each size to the floor would flatten these into one value."""
+        fig = self._fig()
+        tick = fig.layout.xaxis.tickfont.size
+        ytitle = fig.layout.yaxis.title.font.size
+        caps = [a.font.size for a in fig.layout.annotations
+                if a.font and a.font.size and a.yref == "paper"]
+        assert caps, "expected the error/significance captions"
+        assert min(caps) < tick < ytitle, (
+            f"captions {min(caps)} < ticks {tick} < y-title {ytitle} expected"
+        )
+
+    def test_the_plot_area_is_most_of_the_figure(self, mock_streamlit):
+        from qpcr.constants import CM_TO_PX
+        fig = self._fig()
+        fig_h = int(16 * CM_TO_PX)
+        m = fig.layout.margin
+        plot_h = fig_h - (m.b or 0) - (m.t or 0)
+        assert plot_h / fig_h >= 0.60, (
+            f"plot area is {plot_h / fig_h:.0%} of the figure; it was 44% when "
+            f"the margins were floors rather than measurements"
+        )
+
+    def test_bottom_margin_tracks_the_label_block(self, mock_streamlit):
+        """One line of labels must cost less than three."""
+        one = self._fig(label_mode="Horizontal")
+        wrapped = self._fig(label_mode="Auto-wrap")
+        assert (one.layout.margin.b or 0) < (wrapped.layout.margin.b or 0), (
+            "a single-line label row should reserve less than a wrapped one"
+        )
+
+
+class TestStackedSignificanceSpacing:
+    """Stacked significance symbols must clear each other in PIXELS.
+
+    The step was y_max_auto * 0.05 — a fraction of the DATA range, which at the
+    default 28x16cm geometry is ~13.5px, smaller than the 16px asterisk it has
+    to clear. A dagger's stem was drawn straight through the middle asterisk of
+    a "***" and corrupted it on client-facing charts.
+    """
+
+    SIG_CHARS = set("*#†")
+
+    def _fig(self, **overrides):
+        import pandas as pd
+        from qpcr.graph import GraphGenerator
+
+        data = pd.DataFrame({
+            "Target": ["KI67"] * 3,
+            "Condition": ["Non-treated", "EGF 25 ng/ml", "Test article"],
+            "Relative_Expression": [1.0, 0.52, 0.46],
+            "Fold_Change": [1.0, 0.52, 0.46],
+            "FC_Error_Upper": [0.25, 0.04, 0.01],
+            "FC_Error_Lower": [0.25, 0.04, 0.01],
+            "n_replicates": [3, 3, 3],
+            "significance": ["", "***", "***"],
+            "significance_2": ["", "##", "#"],
+            "significance_3": ["", "†", "††"],
+        })
+        settings = {"show_error": True, "show_significance": True,
+                    "figure_height": 16, "figure_width": 28}
+        settings.update(overrides)
+        return GraphGenerator.create_gene_graph(
+            data=data, gene="KI67", settings=settings, sample_order=None
+        )
+
+    def _stacks(self, fig):
+        from qpcr.constants import CM_TO_PX
+        m = fig.layout.margin
+        plot_h = int(16 * CM_TO_PX) - (m.b or 0) - (m.t or 0)
+        lo, hi = fig.layout.yaxis.range
+        per_px = (hi - lo) / plot_h
+        by_x = {}
+        for a in fig.layout.annotations:
+            if a.text and set(a.text) <= self.SIG_CHARS and a.yref == "y":
+                by_x.setdefault(a.x, []).append((a.y, a.font.size, a.text))
+        for items in by_x.values():
+            items.sort()
+        return by_x, per_px, hi
+
+    def test_stacked_symbols_do_not_overlap(self, mock_streamlit):
+        fig = self._fig()
+        by_x, per_px, _ = self._stacks(fig)
+        assert by_x, "expected stacked significance symbols on this fixture"
+        for x, items in by_x.items():
+            for i in range(1, len(items)):
+                y, fs, txt = items[i]
+                prev_y, prev_fs, prev_txt = items[i - 1]
+                gap_px = (y - prev_y) / per_px
+                assert gap_px >= max(prev_fs, fs), (
+                    f"bar {x}: {prev_txt!r} -> {txt!r} step is {gap_px:.1f}px "
+                    f"but must clear a {max(prev_fs, fs)}px glyph"
+                )
+
+    def test_stack_is_not_clipped_by_the_axis(self, mock_streamlit):
+        """Widening the step must also widen the range that has to contain it."""
+        fig = self._fig()
+        by_x, per_px, y_hi = self._stacks(fig)
+        for x, items in by_x.items():
+            top_y, top_fs, _ = items[-1]
+            assert top_y + top_fs * 1.2 * per_px <= y_hi + 1e-9, (
+                f"bar {x}: the top symbol runs past the axis maximum {y_hi}"
+            )
+
+    def test_a_short_figure_still_clears_the_glyphs(self, mock_streamlit):
+        """The step is geometry-dependent, so check a much shorter figure too."""
+        fig = self._fig(figure_height=8)
+        from qpcr.constants import CM_TO_PX
+        m = fig.layout.margin
+        plot_h = max(int(8 * CM_TO_PX) - (m.b or 0) - (m.t or 0), 100)
+        lo, hi = fig.layout.yaxis.range
+        per_px = (hi - lo) / plot_h
+        by_x = {}
+        for a in fig.layout.annotations:
+            if a.text and set(a.text) <= self.SIG_CHARS and a.yref == "y":
+                by_x.setdefault(a.x, []).append((a.y, a.font.size, a.text))
+        for items in by_x.values():
+            items.sort()
+            for i in range(1, len(items)):
+                gap_px = (items[i][0] - items[i - 1][0]) / per_px
+                assert gap_px >= max(items[i - 1][1], items[i][1])
 
 
 class TestGraphGeneratorWrapText:

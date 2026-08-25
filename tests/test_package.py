@@ -311,12 +311,25 @@ class TestPackageParity:
         values_no_outlier = np.array([18.5, 18.3, 18.6])
         assert QC_old.grubbs_test(values_no_outlier) == QC_new.grubbs_test(values_no_outlier)
 
-    def test_natural_sort_key_parity(self):
-        from qpcr import natural_sort_key as nsk_new
-        nsk_old = self._get_monolith().natural_sort_key
+    def test_monolith_uses_the_package_natural_sort_key(self):
+        """One definition, not two that merely agree.
 
-        names = ["Sample10", "Sample2", "Sample1", "Sample20", "abc", "ABC"]
-        assert sorted(names, key=nsk_new) == sorted(names, key=nsk_old)
+        This used to compare two byte-identical copies for equal OUTPUT, which
+        stayed green no matter how far the copies drifted in every other
+        respect. The monolith now imports the package function, so assert
+        IDENTITY — that is the property the dual-copy hazard actually needs.
+        """
+        from qpcr import natural_sort_key as nsk_pkg
+        nsk_app = self._get_monolith().natural_sort_key
+
+        assert nsk_app is nsk_pkg, (
+            "the monolith must import natural_sort_key from qpcr.utils, not "
+            "redefine it — two copies is how a fix ships into a dead one"
+        )
+        # Still exercise it, including the "20 mJ/cm²" case the guard exists for.
+        names = ["Sample10", "Sample2", "Sample1", "Sample20", "abc", "ABC",
+                 "20 mJ/cm²"]
+        assert sorted(names, key=nsk_pkg) == sorted(names, key=nsk_app)
 
     def test_ddct_parity(self, sample_qpcr_raw_data, sample_mapping):
         from qpcr import AnalysisEngine as AE_new

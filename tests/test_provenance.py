@@ -24,7 +24,11 @@ def test_build_provenance_captures_run_parameters(mock_streamlit):
     assert prov["reference_gene"] == "GAPDH"
     assert prov["reference_condition"] == "Non-treated"
     assert prov["comparison_conditions"] == ["Non-treated", "TGFb"]  # None dropped
-    assert prov["statistical_test"] == "Welch t-test"
+    # The test description now carries the replicate unit, which MIQE requires
+    # be declared because it sets the degrees of freedom.
+    assert prov["statistical_test"].startswith("Welch t-test")
+    assert "technical replicate wells" in prov["statistical_test"]
+    assert prov["replicate_unit"].startswith("technical wells")
     assert prov["method"].startswith("Livak")
     assert prov["excluded_wells_count"] == 3
     assert prov["excluded_samples"] == ["BadSample"]
@@ -41,7 +45,7 @@ def test_build_provenance_student_and_empty(mock_streamlit):
         ttest_type="student", excluded_wells={}, excluded_samples=set(),
         n_genes=0, n_samples=0, timestamp="t",
     )
-    assert prov["statistical_test"] == "Student t-test"
+    assert prov["statistical_test"].startswith("Student t-test")
     assert prov["comparison_conditions"] == []
     assert prov["excluded_wells_count"] == 0
     assert prov["excluded_samples"] == []

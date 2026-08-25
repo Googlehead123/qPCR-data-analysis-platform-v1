@@ -15,20 +15,30 @@ from scipy import stats
 import gc
 import hashlib
 import io
+import logging
 import warnings
 import json
 import re
+import statistics
 import zipfile
 from datetime import datetime
 from typing import Dict, Tuple
 
-from qpcr.constants import GRAPH_PRESETS, FIGURE_SIZE_PRESETS, EFFICACY_CONFIG
+from qpcr.constants import (
+    GRAPH_PRESETS, GRAPH_PRESET_CHOICES, DEFAULT_GRAPH_PRESET,
+    FIGURE_SIZE_PRESETS, EFFICACY_CONFIG, KOREAN_FONT_NAME,
+    PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
+)
 from qpcr.export_utils import export_figure_to_bytes, build_zip
+from qpcr.utils import natural_sort_key, gradient_styles
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
 from qpcr.analysis import AnalysisEngine as _CoreAnalysisEngine
-from qpcr.auto import screen_data, recommend_test, interpret_results, build_miqe_checklist
+from qpcr.auto import (
+    screen_data, recommend_test, interpret_results, build_miqe_checklist,
+    expected_direction_for,
+)
 
 try:
     from streamlit_sortables import sort_items
@@ -37,11 +47,83 @@ except ImportError:
 
 
 # ==================== UTILITY FUNCTIONS ====================
-def natural_sort_key(sample_name):
-    """Extract numbers from sample name for natural sorting (e.g., Sample2 < Sample10)"""
-    parts = re.split(r"(\d+)", str(sample_name))
-    return [int(part) if part.isdigit() else part.lower() for part in parts]
+# natural_sort_key is imported from qpcr.utils above. It was defined here too,
+# byte-identically, with the package copy having no consumer inside qpcr/ at all
+# — it existed only to be re-exported and tested. Two copies of one function is
+# the dual-copy hazard tasks/lessons.md is about, and it is how fixes have
+# shipped into a dead copy here before.
+#
+# Six MORE qpcr/utils.py functions are still duplicated in this file
+# (get_well_exclusion_key, get_grid_cell_key, get_selected_cell,
+# set_selected_cell, clear_selected_cell, is_cell_selected). Do NOT simply add
+# them to the import above: four of them are defined BELOW it and would shadow
+# the import, leaving the duplication in place while looking fixed. Each needs
+# its local def deleted in the same edit.
 
+
+# Third verdict for the PPT gene slide, used when a marker IS significant but
+# moved against its configured expected_direction, or when the direction is not
+# configured for that marker. Neither 有 nor 無 is honest there: a significant
+# change the wrong way is a finding a reviewer must see, not an absence of one.
+#
+# WORDING NOT YET CONFIRMED BY THE OWNER (2026-08-24). The approach was
+# approved; this exact Korean string is a placeholder. It appears on a
+# client-facing slide as "Results: 효능 재검토 필요", so confirm before shipping.
+# Changing it here changes every slide.
+_VERDICT_REVIEW = "재검토 필요"
+
+
+def _set_korean_face(run) -> None:
+    """Name the Korean face on a PPT run that carries Hangul.
+
+    The template's runs are Arial, which has zero Hangul coverage, so every
+    Korean string this code writes — 진정 효능 평가, Results: 효능 有, the title
+    slide's efficacy name — rendered by host substitution and visibly differed
+    from the chart image's Korean inside the same slide.
+
+    Sets BOTH the run font and the OOXML a:ea attribute: python-pptx's
+    ``font.name`` writes a:latin only, and a:ea is what East-Asian runs read.
+    Best-effort — a font that cannot be named is not worth losing a deck over.
+    """
+    try:
+        run.font.name = KOREAN_FONT_NAME
+        rPr = run._r.get_or_add_rPr()
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        ea = rPr.find(f"{ns}ea")
+        if ea is None:
+            ea = rPr.makeelement(f"{ns}ea", {})
+            rPr.append(ea)
+        ea.set("typeface", KOREAN_FONT_NAME)
+    except Exception as _face_err:  # noqa: BLE001
+        logging.warning("Korean font not applied to a slide run: %s", _face_err)
+
+
+_HANGUL_RE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
+
+
+def _apply_korean_face_to_deck(prs) -> None:
+    """Name the Korean face on every Hangul-bearing run that lacks one.
+
+    Catches the template's OWN Korean text, which no writer touches. Runs that
+    already declare an East-Asian face are left alone, so a template that has
+    been set up properly is not overridden.
+    """
+    ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                for run in para.runs:
+                    if not _HANGUL_RE.search(run.text or ""):
+                        continue
+                    try:
+                        rPr = run._r.find(f"{ns}rPr")
+                        if rPr is not None and rPr.find(f"{ns}ea") is not None:
+                            continue  # already declares an East-Asian face
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _set_korean_face(run)
 
 WORKFLOW_STEPS = [
     ("Upload", "upload"),
@@ -172,12 +254,31 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
         "generated": timestamp,
         "software": app_version,
         "method": "Livak 2^-ddCt, single reference gene",
-        "fdr_correction": "Benjamini-Hochberg",
+        # This said "Benjamini-Hochberg" flatly, which was a false claim in the
+        # record that goes out with the report. Reporting UNCORRECTED p-values is
+        # a deliberate choice (Min, 2026-08-24); BH q-values are still computed
+        # and carried into the per-gene Excel sheets as p_value_fdr /
+        # significance_fdr, so the corrected view is available to anyone who
+        # asks for it. State both, so no reviewer has to guess which is which.
+        "fdr_correction": (
+            "none applied to the reported markers — significance shown on charts, "
+            "slides and summary sheets is the uncorrected p-value. "
+            "Benjamini-Hochberg q-values are computed and included per gene in "
+            "the Excel export (p_value_fdr / significance_fdr)."
+        ),
         "efficacy_type": efficacy or None,
         "reference_gene": hk_gene or None,
         "reference_condition": ref_condition or None,
         "comparison_conditions": [c for c in (cmp_conditions or []) if c],
-        "statistical_test": "Welch t-test" if ttest_type == "welch" else "Student t-test",
+        # The replicate unit is part of the test description, not a footnote:
+        # n counts technical wells pooled across the samples mapped to a
+        # condition (deliberate — Min, 2026-08-24), which MIQE requires be
+        # declared because it sets the degrees of freedom.
+        "statistical_test": (
+            f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test on ΔCt, "
+            f"n = technical replicate wells pooled per condition"
+        ),
+        "replicate_unit": "technical wells (pooled across samples per condition)",
         "n_genes": int(n_genes),
         "n_samples": int(n_samples),
         "excluded_samples": sorted(excluded_samples) if excluded_samples else [],
@@ -250,6 +351,7 @@ def _cached_replicate_fold_changes(
     ref_sample: str,
     sample_mapping: dict,
     excluded_wells,
+    excluded_samples=(),
 ) -> pd.DataFrame:
     """Content-hash-memoized per-replicate fold changes (data-point overlay).
 
@@ -262,11 +364,13 @@ def _cached_replicate_fold_changes(
     now pays for the full replicate table once instead of N times per rerun.
     """
     return _CoreAnalysisEngine.compute_replicate_fold_changes(
-        raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+        raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells,
+        excluded_samples=excluded_samples,
     )
 
 
-def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells):
+def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping,
+                               excluded_wells, excluded_samples=None):
     """Cache-fronted access to per-replicate fold changes with a live fallback.
 
     Normal inputs (str/bool mapping values, ``dict[(Target, Sample) -> set]``
@@ -275,61 +379,144 @@ def get_replicate_fold_changes(raw_data, hk_gene, ref_sample, sample_mapping, ex
     analysis — the fallback preserves the exact pre-cache behaviour.
     """
     try:
+        # Sorted tuple: excluded_samples is a set, whose iteration order is not
+        # stable, and an unstable cache key would miss on every rerun.
+        _excl_s = tuple(sorted(str(s) for s in (excluded_samples or ())))
         return _cached_replicate_fold_changes(
-            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells, _excl_s
         )
     except Exception:
         return _CoreAnalysisEngine.compute_replicate_fold_changes(
-            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells
+            raw_data, hk_gene, ref_sample, sample_mapping, excluded_wells,
+            excluded_samples=excluded_samples,
         )
 
 
 # ==================== QC MEMOIZATION ====================
 # st.tabs renders EVERY tab body on EVERY rerun — Streamlit does not lazily skip
-# the tabs you aren't looking at. So the QC dashboard's summary, replicate table
-# and up to three plate heatmaps used to recompute on every widget interaction
-# anywhere in the app. All three helpers are pure (qpcr/quality_control.py reads
-# no session_state), so memoizing them is exact.
+# the tabs you aren't looking at. So the QC dashboard's summary and replicate
+# table used to recompute on every widget interaction anywhere in the app. Both
+# helpers are pure (qpcr/quality_control.py reads no session_state), so
+# memoizing them is exact.
+
+
+# The QC Settings widgets ARE the store: a widget key is session state, so the
+# session's own values live there and nothing has to be mirrored. `scale`
+# converts the widget's unit to the package's (the CV input is in percent).
+_QC_THRESHOLD_WIDGETS = {
+    "ct_high": ("qc_settings_ct_high", 1.0),
+    "ct_low": ("qc_settings_ct_low", 1.0),
+    "cv": ("qc_settings_cv", 0.01),
+    "hk_variation": ("qc_settings_hk_var", 1.0),
+}
+
+
+def qc_thresholds() -> dict:
+    """This SESSION's QC thresholds, defaults filled in from the package.
+
+    These used to be reassigned onto ``QualityControl``'s class attributes by
+    the QC Settings widgets, and the helper methods read them from there. A
+    class attribute is PROCESS state and a Streamlit session is not: one
+    container runs one Python process and every browser session shares class
+    state, so one operator's thresholds became every concurrent operator's — and
+    survived a refresh, so a new session silently inherited them instead of the
+    documented defaults. For a validated instrument tool that is also a
+    provenance problem, since build_provenance would record thresholds nobody
+    set.
+
+    They now live in session_state and are PASSED to the helpers. The class
+    attributes are the immutable fallback.
+    """
+    stored = {}
+    for name, (widget_key, scale) in _QC_THRESHOLD_WIDGETS.items():
+        value = st.session_state.get(widget_key)
+        if value is not None:
+            try:
+                stored[name] = float(value) * scale
+            except (TypeError, ValueError):
+                pass
+    return QualityControl.resolve_thresholds(stored)
+
+
+def _unkey_thresholds(threshold_key: tuple) -> dict:
+    """Rebuild the threshold dict from a ``_qc_threshold_key`` tuple.
+
+    The cached wrappers only receive the hashable key, so they need this to hand
+    the helpers the dict form. Keeping the two in one place stops the tuple
+    order and the key names drifting apart.
+    """
+    try:
+        return dict(zip(QualityControl.THRESHOLD_KEYS, threshold_key))
+    except TypeError:
+        return QualityControl.resolve_thresholds(None)
 
 
 def _qc_threshold_key() -> tuple:
-    """The QC thresholds that the helpers read, as a cache-key tuple.
+    """The session's thresholds as a cache-key tuple.
 
-    These live as MUTABLE CLASS ATTRIBUTES on ``QualityControl`` and the QC tab's
-    sliders reassign them at runtime; the helper methods read them directly
-    instead of taking them as arguments. They must therefore be part of every QC
-    cache key, or moving a threshold slider would keep serving the old counts.
+    Still part of every QC cache key: the helpers' output depends on them, so a
+    threshold move must invalidate the memo even though they are now arguments
+    rather than class state.
     """
-    return (
-        float(QualityControl.CT_HIGH_THRESHOLD),
-        float(QualityControl.CT_LOW_THRESHOLD),
-        float(QualityControl.CV_THRESHOLD),
-        float(QualityControl.HK_VARIATION_THRESHOLD),
-    )
+    t = qc_thresholds()
+    return tuple(float(t[k]) for k in QualityControl.THRESHOLD_KEYS)
 
 
 def _excluded_key(excluded_wells) -> tuple:
-    """Normalise an exclusion set to a deterministic, hashable cache key."""
+    """Normalise an exclusion set OR per-(gene,sample) dict to a cache key.
+
+    A dict has to be walked explicitly: iterating one yields only its keys, so
+    ``{('G','S'): {'A1'}}`` and ``{('G','S'): {'A2'}}`` hashed identically and a
+    cached QC view would not notice which well was excluded.
+
+    The key is tagged and REVERSIBLE, and ``_unkey_excluded`` must be used to
+    read it back. Encoding a dict and then rebuilding it with ``set(key)``
+    silently degrades a per-(gene, sample) exclusion into a set of key/value
+    tuples that match no well at all, so the QC view counted zero exclusions
+    while DDCt applied them. The QC tab does pass the dict form
+    (see the QC Overview call site).
+    """
     if not excluded_wells:
         return ()
-    return tuple(sorted(str(w) for w in excluded_wells))
+    if isinstance(excluded_wells, dict):
+        return ("dict", tuple(sorted(
+            (tuple(str(p) for p in k) if isinstance(k, tuple) else (str(k),),
+             tuple(sorted(str(w) for w in (v or ()))))
+            for k, v in excluded_wells.items()
+        )))
+    return ("set", tuple(sorted(str(w) for w in excluded_wells)))
+
+
+def _unkey_excluded(excluded_key: tuple):
+    """Rebuild the exclusion structure that ``_excluded_key`` encoded.
+
+    Returns the SAME shape the caller passed. That matters: a flat set of well
+    IDs excludes that plate coordinate for every gene and sample sharing it
+    (see ``QualityControl.excluded_mask``), which is not what a per-(gene,
+    sample) dict means.
+    """
+    if not excluded_key:
+        return set()
+    kind, payload = excluded_key
+    if kind == "dict":
+        return {
+            (k[0] if len(k) == 1 else tuple(k)): set(wells)
+            for k, wells in payload
+        }
+    return set(payload)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _cached_qc_summary_stats(data: pd.DataFrame, excluded_key: tuple, thresholds: tuple) -> dict:
-    return QualityControl.get_qc_summary_stats(data, set(excluded_key))
+    return QualityControl.get_qc_summary_stats(
+        data, _unkey_excluded(excluded_key), thresholds=_unkey_thresholds(thresholds)
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _cached_replicate_stats(data: pd.DataFrame, thresholds: tuple) -> pd.DataFrame:
-    return QualityControl.get_replicate_stats(data)
-
-
-@st.cache_data(show_spinner=False, max_entries=12)
-def _cached_plate_heatmap(data: pd.DataFrame, value_col: str, excluded_key: tuple,
-                          thresholds: tuple) -> go.Figure:
-    return QualityControl.create_plate_heatmap(
-        data, value_col=value_col, excluded_wells=set(excluded_key)
+    return QualityControl.get_replicate_stats(
+        data, thresholds=_unkey_thresholds(thresholds)
     )
 
 
@@ -338,7 +525,9 @@ def get_qc_summary_stats(data, excluded_wells=None) -> dict:
     try:
         return _cached_qc_summary_stats(data, _excluded_key(excluded_wells), _qc_threshold_key())
     except Exception:
-        return QualityControl.get_qc_summary_stats(data, excluded_wells)
+        return QualityControl.get_qc_summary_stats(
+            data, excluded_wells, thresholds=qc_thresholds()
+        )
 
 
 def get_replicate_stats(data) -> pd.DataFrame:
@@ -346,22 +535,8 @@ def get_replicate_stats(data) -> pd.DataFrame:
     try:
         return _cached_replicate_stats(data, _qc_threshold_key())
     except Exception:
-        return QualityControl.get_replicate_stats(data)
-
-
-def get_plate_heatmap(data, value_col: str = "CT", excluded_wells=None) -> go.Figure:
-    """Cache-fronted plate heatmap with a live fallback.
-
-    ``st.cache_data`` hands every caller its own copy, so the call sites that
-    then apply ``update_layout(title=...)`` cannot corrupt the cached figure.
-    """
-    try:
-        return _cached_plate_heatmap(
-            data, value_col, _excluded_key(excluded_wells), _qc_threshold_key()
-        )
-    except Exception:
-        return QualityControl.create_plate_heatmap(
-            data, value_col=value_col, excluded_wells=excluded_wells
+        return QualityControl.get_replicate_stats(
+            data, thresholds=qc_thresholds()
         )
 
 
@@ -373,7 +548,10 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     if raw is None or not hk or not ref or not processed_data:
         return recs
     try:
-        reps = get_replicate_fold_changes(raw, hk, ref, mapping, excluded)
+        reps = get_replicate_fold_changes(
+            raw, hk, ref, mapping, excluded,
+            st.session_state.get("excluded_samples", set()),
+        )
     except Exception:
         return recs
 
@@ -388,7 +566,12 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
         others = [c for c in gdf["Condition"].tolist() if c != ref]
         if not others:
             continue
-        cmp_cond = others[0]
+        # Advise on the comparison the USER actually selected. This took
+        # others[0] — whatever condition happened to come first — while the
+        # docstring claimed the primary comparison and the caption invites the
+        # user to sanity-check that choice against this recommendation.
+        _user_cmp = st.session_state.get("analysis_cmp_condition")
+        cmp_cond = _user_cmp if _user_cmp in others else others[0]
         g = reps[reps["Target"] == gene] if not reps.empty else reps
         ref_vals = _log(g[g["Condition"] == ref]["Replicate_FC"].values) if not g.empty else []
         cmp_vals = _log(g[g["Condition"] == cmp_cond]["Replicate_FC"].values) if not g.empty else []
@@ -415,9 +598,29 @@ def apply_auto_qc(threshold: float = None) -> None:
         threshold = st.session_state.get("qc_sd_threshold", 0.3)
     threshold = float(threshold)
     exclusions, audit = QualityControl.auto_select_replicates(data, sd_threshold=threshold)
-    st.session_state.excluded_wells = {k: set(v) for k, v in exclusions.items()}
+
+    # Preserve exclusions the user made by hand. This used to assign the
+    # auto-QC result wholesale, so nudging the SD threshold to check sensitivity
+    # silently deleted every manual per-well exclusion in groups auto-QC never
+    # touched — and the SD banner could not flag them, because those groups'
+    # SD is fine. Ownership is tracked so a well auto-QC dropped last time is
+    # not mistaken for a manual one now.
+    prev_auto = st.session_state.get("_auto_qc_owned", {}) or {}
+    merged: dict = {}
+    for key, wells in (st.session_state.get("excluded_wells", {}) or {}).items():
+        manual = set(wells) - set(prev_auto.get(key, ()))
+        if manual:
+            merged[key] = manual
+    for key, wells in exclusions.items():
+        merged.setdefault(key, set()).update(wells)
+
+    st.session_state.excluded_wells = merged
+    st.session_state._auto_qc_owned = {k: set(v) for k, v in exclusions.items()}
     st.session_state.auto_qc_audit = audit
     st.session_state.qc_sd_threshold = threshold
+    # The per-well checkboxes are keyed, so they would render the pre-change
+    # state and write it back on the next "Apply Changes".
+    _clear_well_checkbox_state()
 
 
 def _analysis_state_snapshot() -> dict:
@@ -427,13 +630,28 @@ def _analysis_state_snapshot() -> dict:
     which graphs/exports read live from sample_order without a re-run."""
     m = st.session_state.get("sample_mapping", {})
     return {
+        # The housekeeping gene and the reference/comparison conditions are read
+        # from live widgets on every rerun but were absent here, so changing any
+        # of them left processed_data untouched: the bars kept the old
+        # normalisation while _shared_figure_context DOES fingerprint hk_gene, so
+        # the replicate overlay moved to the new one — one chart, two reference
+        # genes — and _current_provenance reported the new gene for old numbers.
+        "hk_gene": st.session_state.get("hk_gene"),
+        "ref_key": st.session_state.get("_last_ref_sample_key"),
+        "cmp_keys": [
+            st.session_state.get("_last_cmp_sample_key"),
+            st.session_state.get("_last_cmp_sample_key_2"),
+            st.session_state.get("_last_cmp_sample_key_3"),
+        ],
         "excluded_wells": {
             str(k): sorted(v) for k, v in st.session_state.get("excluded_wells", {}).items()
         },
         "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
         "ttest_type": st.session_state.get("ttest_type", "welch"),
         "mapping": {
-            s: (v.get("condition", s), bool(v.get("include", True)))
+            # Group is included because it reaches the results as `Group` and is
+            # shown in the results table and the Excel Summary grouping.
+            s: (v.get("condition", s), bool(v.get("include", True)), v.get("group"))
             for s, v in sorted(m.items())
         },
     }
@@ -452,13 +670,31 @@ def maybe_autorun_analysis() -> None:
     if _analysis_state_snapshot() != st.session_state["_exclusion_snapshot"]:
         ok = AnalysisEngine.run_full_analysis(
             st.session_state["_last_ref_sample_key"],
-            st.session_state["_last_cmp_sample_key"],
+            # .get, not []: the guard above only proves _last_ref_sample_key
+            # exists, so indexing this one crashed the tab if the two diverged.
+            st.session_state.get("_last_cmp_sample_key"),
             st.session_state.get("_last_cmp_sample_key_2"),
             st.session_state.get("_last_cmp_sample_key_3"),
         )
+        # analysis_stale was previously set False in three places and True in
+        # none, so it could never warn about anything. It now means what its name
+        # says: the inputs moved and the re-run did not succeed, so what is on
+        # screen no longer matches the settings.
+        st.session_state.analysis_stale = not ok
         if ok:
-            st.session_state.analysis_stale = False
             st.info("Analysis auto-updated to reflect changes in QC, mapping, or settings.")
+        else:
+            st.warning(
+                "Settings changed but the analysis could not be re-run, so the "
+                "results below are out of date. Re-run it from the Mapping tab."
+            )
+    else:
+        # The inputs now match the ones that produced the results on screen, so
+        # nothing is out of date. Without this the flag could never clear: an
+        # undo that restores the original state takes this branch and never
+        # re-runs, so a True set on an earlier rerun survived forever and any
+        # gate reading it would be a permanent false positive.
+        st.session_state.analysis_stale = False
 
 
 def _ensure_bar_settings(gene, gene_data) -> None:
@@ -473,6 +709,265 @@ def _ensure_bar_settings(gene, gene_data) -> None:
         })
         for sk in ("show_sig_1", "show_sig_2", "show_sig_3"):
             bs.setdefault(sk, bs.get("show_sig", True))
+
+
+# ==================== SETTINGS-BACKED WIDGETS ====================
+# A keyed Streamlit widget IGNORES a recomputed ``value=``/``index=``: verified
+# against streamlit 1.53, ``compute_and_register_element_id`` derives the element
+# id from the ``key`` alone (sliders additionally from min/max/step, select_slider
+# from options), so once the widget has state, a changed default never re-seeds
+# it. Anything that writes graph_settings and expects the widget to follow is
+# therefore a silent no-op — that is what made "Size preset" and "Reset this
+# gene" do nothing, and what let the colour-preset selectbox overwrite a
+# hand-picked bar colour on the next interaction.
+#
+# The only way to move such a widget from code is to assign its key BEFORE it is
+# instantiated. Doing that unconditionally would clobber the user's own choice,
+# so we remember the last value we pushed: a push happens only when the settings
+# value changed since then, which is exactly the case where something other than
+# the widget changed it.
+
+
+def _settings_backed_selectbox(label, options, *, settings_key, widget_key,
+                               default, **kwargs):
+    """Selectbox whose value lives in ``graph_settings`` and can be set by code.
+
+    Keeps ``graph_settings[settings_key]`` and the widget in sync in BOTH
+    directions, and re-seeds the widget when ``options`` no longer contains the
+    stored value (e.g. a condition was renamed after the last analysis run).
+    """
+    gs = st.session_state.graph_settings
+    options = list(options)
+    if not options:
+        return None
+    want = gs.get(settings_key, default)
+    if want not in options:
+        want = default if default in options else options[0]
+    sentinel = f"_sync_{widget_key}"
+    if (st.session_state.get(sentinel) != want
+            or st.session_state.get(widget_key) not in options):
+        st.session_state[widget_key] = want
+        st.session_state[sentinel] = want
+    chosen = st.selectbox(label, options, key=widget_key, **kwargs)
+    gs[settings_key] = chosen
+    st.session_state[sentinel] = chosen
+    return chosen
+
+
+def _seed_widget(widget_key, value):
+    """Give a keyed widget its initial value without fighting its stored state."""
+    st.session_state.setdefault(widget_key, value)
+
+
+# Widget keys owned by the per-gene editor, as f-string suffixes of the gene.
+_GENE_WIDGET_KEYS = (
+    "preset_{g}", "bo_{g}", "gap_sl_{g}", "ow_{g}", "bg_{g}",
+    "fig_w_{g}", "fig_h_{g}", "gene_display_{g}", "lbl_mode_{g}", "ref_sel_{g}",
+    "gf_{g}", "ts_{g}", "ys_{g}", "ymin_{g}", "ymax_{g}", "ylog_{g}",
+    "tgl_sig_{g}", "tgl_err_{g}", "tgl_dp_{g}",
+)
+# Per-condition widget keys are f"{prefix}{gene}_{condition}", so they are
+# matched by prefix rather than enumerated.
+_GENE_WIDGET_PREFIXES = (
+    "cp_{g}_", "_desired_cp_{g}_", "show_sig_1_{g}_", "show_sig_2_{g}_",
+    "show_sig_3_{g}_", "show_err_{g}_",
+)
+_GENE_SETTING_SUFFIXES = (
+    "show_sig", "show_err", "bar_gap", "show_data_points", "color_preset",
+    "figure_width", "figure_height", "font_size", "bar_opacity",
+    "marker_line_width", "tick_size", "ylabel_size", "bg_color", "y_min",
+    "y_max", "label_mode", "y_log", "ref_line", "size_preset",
+)
+
+# Per-gene style keys that the editor materialises on first render. Deliberately
+# NOT seeded for every gene up front: several of them (figure_width, font_size,
+# y_log, ...) fall back to a GLOBAL graph_settings entry when absent, so seeding
+# them would shadow that global and make it dead state.
+_GENE_STYLE_DEFAULTS = {
+    "show_sig": True, "show_err": True, "bar_gap": 0.45,
+    "color_preset": DEFAULT_GRAPH_PRESET, "show_data_points": False,
+    "label_mode": "Auto-wrap",
+}
+
+
+def _ensure_gene_style_defaults(gene: str) -> None:
+    """Materialise the per-gene style keys that have no global fallback."""
+    gs = st.session_state.graph_settings
+    for suffix, value in _GENE_STYLE_DEFAULTS.items():
+        gs.setdefault(f"{gene}_{suffix}", value)
+
+
+def _reset_gene_style(gene: str) -> None:
+    """Restore one gene's chart styling to the defaults.
+
+    Clears the ``graph_settings`` entries AND the widget keys that feed them.
+    Clearing only ``graph_settings`` is what made this button do nothing: every
+    keyed widget kept its own state and re-populated ``graph_settings`` on the
+    next run (see the note above ``_settings_backed_selectbox``).
+
+    Must run BEFORE any of the gene's widgets are instantiated in the current
+    run — Streamlit refuses to modify a widget's key after instantiation — so
+    the button only raises a flag and this is called at the top of the editor.
+    """
+    gs = st.session_state.graph_settings
+    st.session_state.pop(f"{gene}_bar_settings", None)
+    for suffix in _GENE_SETTING_SUFFIXES:
+        gs.pop(f"{gene}_{suffix}", None)
+    per_bar = gs.get("bar_colors_per_sample")
+    if isinstance(per_bar, dict):
+        for bar_key in [k for k in per_bar
+                        if isinstance(k, str) and k.startswith(f"{gene}_")]:
+            per_bar.pop(bar_key, None)
+    st.session_state.get("gene_display_names", {}).pop(gene, None)
+
+    fixed = {k.format(g=gene) for k in _GENE_WIDGET_KEYS}
+    fixed |= {f"_sync_{k.format(g=gene)}" for k in _GENE_WIDGET_KEYS}
+    prefixes = tuple(p.format(g=gene) for p in _GENE_WIDGET_PREFIXES)
+    for key in list(st.session_state.keys()):
+        if key in fixed or key.startswith(prefixes):
+            st.session_state.pop(key, None)
+
+    # Drop the memoized figure so the chart is rebuilt from the defaults.
+    sigs = st.session_state.get("_graph_signatures")
+    if isinstance(sigs, dict):
+        sigs.pop(gene, None)
+
+
+def _clear_all_gene_style_state() -> None:
+    """Drop every gene's chart styling and the exports built from it.
+
+    Called when a new file is uploaded. That path rebuilds ``graph_settings``
+    from defaults, but the editor's values really live in the widget keys, which
+    survived — so a new file whose gene names overlap the previous one silently
+    inherited the old experiment's styling (and its per-condition significance
+    and error-bar toggles, which are keyed by gene+condition).
+
+    The cached export bytes go too: they were built from the previous dataset,
+    and the download buttons would otherwise keep serving them under a filename
+    stamped with the new run's timestamp.
+    """
+    # Every analysed gene gets a "<gene>_bar_settings" entry, so that is the
+    # reliable record of which genes have styling state — including genes from a
+    # file loaded even earlier.
+    suffix = "_bar_settings"
+    genes = {k[: -len(suffix)] for k in list(st.session_state.keys())
+             if isinstance(k, str) and k.endswith(suffix)}
+    genes |= set(st.session_state.get("processed_data") or {})
+    for gene in genes:
+        _reset_gene_style(gene)
+    for key in ("_graph_signatures", "_gene_images", "_excel_export", "_ppt_export"):
+        st.session_state.pop(key, None)
+    _clear_non_gene_widget_state()
+
+
+# Keyed widgets OUTSIDE the per-gene editor whose stored value outlives the
+# session_state entry it is supposed to seed. Clearing the entry alone is a
+# no-op — the widget re-supplies its old value on the next render — so a new
+# upload inherited the previous experiment's choices.
+_RESET_WIDGET_PREFIXES = (
+    "cond_",      # condition name per sample: the previous file's labels
+    "include_",   # per-sample include flag: the previous file's exclusions
+    "cb_",        # per-well QC include/exclude: the previous file's decisions
+)
+_RESET_WIDGET_KEYS = frozenset({
+    # Analysis configuration — a stale comparison condition silently keeps the
+    # 2nd/3rd p-value comparison switched on against a condition from the old
+    # file (st.checkbox ignores value= once it has state).
+    "use_second_pval", "use_third_pval", "ref_choice_ddct",
+    "cmp_choice_pval", "cmp_choice_pval_2", "cmp_choice_pval_3",
+    # Printed onto the PowerPoint. Carrying the previous run's concentration
+    # over is exactly the confident-wrong-number this field was made blank to
+    # avoid.
+    "exp_concentration",
+    # These three write straight into graph_settings, so re-initialising
+    # graph_settings without them left the old values in force.
+    "show_legend_global", "eb_mode_global", "show_n_global",
+    # Overview auto-selects these from the efficacy category; without clearing,
+    # they never auto-select again and % of benchmark is computed against the
+    # wrong control.
+    "overview_benchmark", "overview_highlight",
+    # Display-only, but pointing at genes/samples that no longer exist.
+    "qc_gene_filter", "qc_sample_filter", "qc_grid_selected_cell",
+    # Auto-QC review state for the previous file's triplicates.
+    "qc_sd_threshold_input", "auto_qc_audit_editor",
+})
+
+
+def _clear_non_gene_widget_state() -> None:
+    """Drop keyed widget state that a new upload must not inherit."""
+    for key in list(st.session_state.keys()):
+        k = str(key)
+        if k in _RESET_WIDGET_KEYS or k.startswith(_RESET_WIDGET_PREFIXES):
+            st.session_state.pop(key, None)
+
+
+def _safe_image_stem(gene: str) -> str:
+    """Filename stem for an exported gene image: display name, path-safe."""
+    name = str(st.session_state.get("gene_display_names", {}).get(gene, gene))
+    return re.sub(r'[\\/:*?"<>|]+', "_", name).strip() or str(gene)
+
+
+def _push_qc_history() -> None:
+    """Snapshot the whole QC decision state before changing it.
+
+    History used to hold ``excluded_wells`` alone, while ``apply_auto_qc`` also
+    rewrites ``qc_sd_threshold``, ``auto_qc_audit`` and ``_auto_qc_owned``. After
+    0.30 -> 0.50 -> Undo, the banner, the threshold box and the decisions table
+    all still described 0.50 while the exclusions were the 0.30 set — and because
+    ``qc_sd_threshold`` matched the widget, the threshold-change branch never
+    re-fired, so it never self-corrected.
+    """
+    st.session_state.setdefault("excluded_wells_history", []).append({
+        "excluded_wells": {
+            k: set(v) for k, v in (st.session_state.get("excluded_wells") or {}).items()
+        },
+        "auto_qc_owned": {
+            k: set(v) for k, v in (st.session_state.get("_auto_qc_owned") or {}).items()
+        },
+        "auto_qc_audit": list(st.session_state.get("auto_qc_audit") or []),
+        "qc_sd_threshold": st.session_state.get("qc_sd_threshold", 0.3),
+    })
+
+
+def _pop_qc_history() -> bool:
+    """Restore the previous QC decision state. Returns False if there is none."""
+    hist = st.session_state.get("excluded_wells_history") or []
+    if not hist:
+        return False
+    snap = hist.pop()
+    # Tolerate the old exclusions-only entries so a session that was already
+    # running keeps working across this change.
+    if not isinstance(snap, dict) or "excluded_wells" not in snap:
+        st.session_state.excluded_wells = {
+            k: set(v) for k, v in (snap or {}).items()
+        }
+    else:
+        st.session_state.excluded_wells = {
+            k: set(v) for k, v in snap["excluded_wells"].items()
+        }
+        st.session_state._auto_qc_owned = {
+            k: set(v) for k, v in snap.get("auto_qc_owned", {}).items()
+        }
+        st.session_state.auto_qc_audit = snap.get("auto_qc_audit", [])
+        st.session_state.qc_sd_threshold = snap.get("qc_sd_threshold", 0.3)
+        # The threshold box is keyed, so it has to be dropped to re-read the
+        # restored value instead of showing the one that was just undone.
+        st.session_state.pop("qc_sd_threshold_input", None)
+    _clear_well_checkbox_state()
+    return True
+
+
+def _clear_well_checkbox_state() -> None:
+    """Drop the per-well QC checkboxes so they re-read ``excluded_wells``.
+
+    The checkboxes are keyed (``cb_{gene}_{well}_{sample}_{idx}``), so their
+    stored value wins over the computed ``value=`` — every writer that changes
+    ``excluded_wells`` from outside the form must call this or the grid renders
+    the pre-change state, and the next "Apply Changes" writes that stale view
+    back, silently undoing the change.
+    """
+    for key in [k for k in list(st.session_state.keys()) if str(k).startswith("cb_")]:
+        st.session_state.pop(key, None)
 
 
 def resolve_gene_settings(gene: str) -> dict:
@@ -519,9 +1014,12 @@ def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
         hk = st.session_state.get("hk_gene")
         ref = st.session_state.get("analysis_ref_condition")
         mapping = st.session_state.get("sample_mapping", {})
-        excl = st.session_state.get("excluded_wells", set())
+        # {} not set(): excluded_wells is a per-(gene,sample) dict everywhere
+        # else, and a bare set would silently take the wrong branch.
+        excl = st.session_state.get("excluded_wells", {})
+        excl_s = st.session_state.get("excluded_samples", set())
         if raw is not None and hk and ref:
-            reps = get_replicate_fold_changes(raw, hk, ref, mapping, excl)
+            reps = get_replicate_fold_changes(raw, hk, ref, mapping, excl, excl_s)
             replicate_df = reps[reps["Target"] == gene]
     return GraphGenerator.create_gene_graph(
         gene_data, gene, cs, efficacy_config,
@@ -529,7 +1027,8 @@ def build_gene_figure(gene: str, gene_data, efficacy_config: dict):
         display_gene_name=st.session_state.gene_display_names.get(gene, gene),
         ref_line_value=ref_val, ref_line_label=ref_lbl,
         show_data_points=show_dp, replicate_data=replicate_df,
-        color_preset=st.session_state.graph_settings.get(f"{gene}_color_preset", "Classic"),
+        color_preset=st.session_state.graph_settings.get(
+            f"{gene}_color_preset", DEFAULT_GRAPH_PRESET),
         ref_condition=st.session_state.get("analysis_ref_condition"),
     )
 
@@ -612,11 +1111,15 @@ def _settings_for_gene(cs: dict, gene: str, other_genes) -> dict:
             continue
         out[k] = v
     # bar_colors_per_sample is keyed f"{gene}_{condition}" across ALL genes.
+    # Always emit the key. It used to be omitted entirely while the dict did not
+    # exist yet and present-but-empty once some other gene created it, so the
+    # fingerprint of a gene with no colour overrides of its own changed by itself
+    # and every such gene was rebuilt one extra time.
     colors = cs.get("bar_colors_per_sample")
-    if isinstance(colors, dict):
-        out["bar_colors_per_sample"] = {
-            k: v for k, v in colors.items() if isinstance(k, str) and k.startswith(own)
-        }
+    out["bar_colors_per_sample"] = {
+        k: v for k, v in colors.items()
+        if isinstance(k, str) and k.startswith(own)
+    } if isinstance(colors, dict) else {}
     return out
 
 
@@ -631,7 +1134,17 @@ def _shared_figure_context(efficacy_config: dict, any_data_points: bool):
         "efficacy": efficacy_config,
         "sample_order": st.session_state.get("sample_order"),
         "sample_mapping": st.session_state.get("sample_mapping", {}),
-        "error_bar_mode": st.session_state.get("error_bar_mode"),
+        # graph_settings, not a bare session_state key: there IS no
+        # st.session_state["error_bar_mode"] — the value lives in
+        # graph_settings["error_bar_mode"]. This entry was therefore always
+        # None and contributed nothing, and was harmless only by accident
+        # (resolve_gene_settings copies the mode into the per-gene dict, which
+        # IS hashed). The docstring above claimed this block covers what
+        # create_gene_graph reads directly, so leaving it would have been a
+        # standing invitation to a stale-chart bug.
+        "error_bar_mode": st.session_state.get("graph_settings", {}).get(
+            "error_bar_mode"
+        ),
         "ref_condition": st.session_state.get("analysis_ref_condition"),
         "cmp_conditions": [
             st.session_state.get("analysis_cmp_condition", ""),
@@ -649,6 +1162,9 @@ def _shared_figure_context(efficacy_config: dict, any_data_points: bool):
             "raw": raw_fp,
             "hk": st.session_state.get("hk_gene"),
             "excluded": st.session_state.get("excluded_wells"),
+            # The overlay now honours excluded_samples, so it has to be part of
+            # the fingerprint or excluding a sample would leave a stale scatter.
+            "excluded_samples": st.session_state.get("excluded_samples"),
         }
     return ctx
 
@@ -663,11 +1179,20 @@ def _gene_figure_signature(gene, gene_data, shared, other_genes) -> str | None:
         "gene": gene,
         "data": data_fp,
         "settings": _settings_for_gene(resolve_gene_settings(gene), gene, other_genes),
-        "bar_settings": st.session_state.get(f"{gene}_bar_settings", {}),
+        # Only the show_* flags: graph.py reads show_err and show_sig_1/2/3 (with
+        # show_sig as the fallback) out of bar_settings and takes the bar COLOURS
+        # from the preset or bar_colors_per_sample instead. Hashing the whole dict
+        # meant the editor writing back a bar's displayed colour moved the
+        # fingerprint of a figure that colour had no part in.
+        "bar_settings": {
+            bar_key: {k: v for k, v in (bar or {}).items()
+                      if isinstance(k, str) and k.startswith("show_")}
+            for bar_key, bar in (st.session_state.get(f"{gene}_bar_settings") or {}).items()
+        },
         "display_name": st.session_state.gene_display_names.get(gene, gene),
         "ref_line": gs.get(f"{gene}_ref_line", "None"),
         "show_data_points": bool(gs.get(f"{gene}_show_data_points", False)),
-        "color_preset": gs.get(f"{gene}_color_preset", "Classic"),
+        "color_preset": gs.get(f"{gene}_color_preset", DEFAULT_GRAPH_PRESET),
         "shared": shared,
     })
 
@@ -759,7 +1284,16 @@ def build_all_figures(gene_list, efficacy_config: dict) -> None:
     Genes whose inputs are unchanged since the last run keep their existing
     figure instead of being rebuilt (see the fingerprint note above).
     """
-    figures_for_genes(gene_list, efficacy_config)
+    _figs, _errs = figures_for_genes(gene_list, efficacy_config)
+    # The errors used to be discarded here, so a gene whose chart failed to build
+    # was simply missing from st.session_state.graphs — and the exports then
+    # placed a blank white picture (or silently shipped N-1 images) with nothing
+    # anywhere saying why. This is the point every export is driven from.
+    for _gene, _err in _errs.items():
+        st.warning(
+            f"{_gene}: chart could not be built ({_err}). It will be missing or "
+            f"blank in the Excel, PowerPoint and image exports."
+        )
 
 
 def _render_per_bar_table(current_gene, gene_data):
@@ -816,7 +1350,7 @@ def _render_per_bar_table(current_gene, gene_data):
             f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
             unsafe_allow_html=True,
         )
-        _active_pn = gs.get(f"{current_gene}_color_preset", "Classic")
+        _active_pn = gs.get(f"{current_gene}_color_preset", DEFAULT_GRAPH_PRESET)
         _cp_key = f"cp_{current_gene}_{condition}"
         _desired_key = f"_desired_{_cp_key}"
         if _active_pn != "Custom" and _active_pn in GRAPH_PRESETS:
@@ -857,58 +1391,6 @@ def _render_per_bar_table(current_gene, gene_data):
 
 
 @st.fragment
-def render_plate_heatmaps(data, excluded_wells) -> None:
-    """Plate heatmaps plus their two filter selectboxes.
-
-    A fragment: the gene/sample filters are display-only, so changing one should
-    redraw this block rather than re-execute the whole script (Streamlit renders
-    every one of the seven top-level tabs on each full rerun, so an app-scope
-    rerun from a filter click was paying for all of them).
-
-    Exclusions arrive as an argument rather than being read live: Streamlit
-    replays a fragment with its last arguments, and anything that can change the
-    exclusions lives outside this fragment and triggers a full rerun anyway.
-    """
-    plate_fig = get_plate_heatmap(data, value_col="CT", excluded_wells=excluded_wells)
-    st.plotly_chart(plate_fig, use_container_width=True)
-    st.caption(
-        "Red = High CT (low expression) | Green = Low CT (high expression) | X = Excluded"
-    )
-
-    # Per-gene heatmap
-    all_genes = sorted(data["Target"].dropna().unique().tolist())
-    if all_genes:
-        selected_gene = st.selectbox(
-            "Filter heatmap by gene",
-            options=["(All)"] + all_genes,
-            key="heatmap_gene_select",
-        )
-        if selected_gene != "(All)":
-            gene_fig = get_plate_heatmap(
-                data[data["Target"] == selected_gene],
-                value_col="CT", excluded_wells=excluded_wells,
-            )
-            gene_fig.update_layout(title=f"Plate Heatmap — {selected_gene}")
-            st.plotly_chart(gene_fig, use_container_width=True)
-
-    # Per-sample heatmap
-    all_samples = sorted(data["Sample"].dropna().unique().tolist(), key=natural_sort_key)
-    if all_samples:
-        selected_sample = st.selectbox(
-            "Filter heatmap by sample",
-            options=["(All)"] + all_samples,
-            key="heatmap_sample_select",
-        )
-        if selected_sample != "(All)":
-            sample_fig = get_plate_heatmap(
-                data[data["Sample"] == selected_sample],
-                value_col="CT", excluded_wells=excluded_wells,
-            )
-            sample_fig.update_layout(title=f"Plate Heatmap — {selected_sample}")
-            st.plotly_chart(sample_fig, use_container_width=True)
-
-
-@st.fragment
 def render_gene_editor(current_gene):
     """Per-gene live editor: tabbed controls over a chart that updates in place.
     A Streamlit fragment, so a control change reruns only this block, not the
@@ -917,19 +1399,21 @@ def render_gene_editor(current_gene):
     gene_data = st.session_state.processed_data[current_gene]
     gs = st.session_state.graph_settings
 
-    gs.setdefault(f"{current_gene}_show_sig", True)
-    gs.setdefault(f"{current_gene}_show_err", True)
-    gs.setdefault(f"{current_gene}_bar_gap", 0.45)
-    gs.setdefault(f"{current_gene}_color_preset", "Classic")
-    gs.setdefault(f"{current_gene}_show_data_points", False)
-    gs.setdefault(f"{current_gene}_label_mode", "Auto-wrap")
+    # "Reset this gene" only raises a flag; the clearing must land here, before a
+    # single one of this gene's widgets is instantiated.
+    if st.session_state.pop(f"_reset_style_{current_gene}", False):
+        _reset_gene_style(current_gene)
+
+    _ensure_gene_style_defaults(current_gene)
     ref_options = ["None"] + gene_data["Condition"].tolist()
     if gs.get(f"{current_gene}_ref_line", "None") not in ref_options:
         gs[f"{current_gene}_ref_line"] = "None"
     _ensure_bar_settings(current_gene, gene_data)
 
     label_modes = ["Auto-wrap", "Angled 45°", "Angled 90°", "Horizontal"]
-    _EB_LABELS = {"Livak ±SD": "livak_sd", "95% CI": "ci95", "SEM": "sem", "SD": "sd"}
+    # "SD" is gone: it resolved to the very same transformed bars as
+    # "Livak ±SD", so the menu offered one thing twice under two names.
+    _EB_LABELS = {"Livak ±SD": "livak_sd", "SEM": "sem", "95% CI": "ci95"}
 
     t_style, t_labels, t_colors, t_axis, t_stats = st.tabs(
         ["Style", "Labels", "Colors", "Axis", "Stats"])
@@ -937,13 +1421,23 @@ def render_gene_editor(current_gene):
     with t_style:
         c1, c2, c3 = st.columns(3)
         with c1:
-            preset_names = list(GRAPH_PRESETS.keys()) + ["Custom"]
-            cur = gs.get(f"{current_gene}_color_preset", "Classic")
-            if cur not in preset_names:
-                cur = "Custom"
-            gs[f"{current_gene}_color_preset"] = st.selectbox(
-                "Color preset", preset_names, index=preset_names.index(cur),
-                key=f"preset_{current_gene}")
+            # Offer the curated set, but never drop the preset this gene is
+            # ALREADY on: an option list that omits the stored value makes
+            # Streamlit reset the widget to options[0] and repaint the gene
+            # silently. Legacy presets stay selectable while selected.
+            _current_preset = gs.get(f"{current_gene}_color_preset")
+            preset_names = list(GRAPH_PRESET_CHOICES)
+            if _current_preset not in preset_names + ["Custom", None]:
+                preset_names.append(_current_preset)
+            preset_names.append("Custom")
+            # Settings-backed: picking a colour by hand in the Colors tab sets the
+            # preset to "Custom", and this has to show that instead of snapping the
+            # bars back to the old preset on the next interaction.
+            _settings_backed_selectbox(
+                "Color preset", preset_names,
+                settings_key=f"{current_gene}_color_preset",
+                widget_key=f"preset_{current_gene}",
+                default=DEFAULT_GRAPH_PRESET)
             gs[f"{current_gene}_bar_opacity"] = st.slider(
                 "Bar opacity", 0.3, 1.0,
                 value=float(gs.get(f"{current_gene}_bar_opacity", gs.get("bar_opacity", 0.85))),
@@ -961,50 +1455,45 @@ def render_gene_editor(current_gene):
                 "Background",
                 gs.get(f"{current_gene}_bg_color", gs.get("plot_bgcolor", "#FFFFFF")),
                 key=f"bg_{current_gene}")
-            size_names = list(FIGURE_SIZE_PRESETS.keys()) + ["Custom"]
-            spk = f"{current_gene}_size_preset"
-            gs.setdefault(spk, "PPT Full")
-            cur_sp = gs.get(spk, "PPT Full")
-            if cur_sp not in size_names:
-                cur_sp = "Custom"
-            sel_sp = st.selectbox("Size preset", size_names, index=size_names.index(cur_sp),
-                key=f"size_preset_{current_gene}")
-            prev_sp = gs.get(spk, "PPT Full")
-            if sel_sp != "Custom" and sel_sp in FIGURE_SIZE_PRESETS:
-                gs[f"{current_gene}_figure_width"] = FIGURE_SIZE_PRESETS[sel_sp]["width"]
-                gs[f"{current_gene}_figure_height"] = FIGURE_SIZE_PRESETS[sel_sp]["height"]
-            gs[spk] = sel_sp
-            if sel_sp != prev_sp:
-                st.rerun(scope="fragment")
+        # Size presets are an ACTION, not a persisted selection: they snap the two
+        # sliders below. Buttons rather than a selectbox because the sliders are the
+        # single source of truth for the dimensions — a selectbox would have to be
+        # forced back to "Custom" the instant a slider moved, and a keyed widget
+        # cannot be reassigned once it has been instantiated in the same run. The
+        # buttons are declared BEFORE the sliders so a click lands in the slider
+        # state that the very same run then reads (no rerun needed).
+        _w_key, _h_key = f"fig_w_{current_gene}", f"fig_h_{current_gene}"
+        _seed_widget(_w_key, float(gs.get(f"{current_gene}_figure_width",
+                                          gs.get("figure_width", 28))))
+        _seed_widget(_h_key, float(gs.get(f"{current_gene}_figure_height",
+                                          gs.get("figure_height", 16))))
+        st.caption("Size preset")
+        _sp_cols = st.columns(len(FIGURE_SIZE_PRESETS))
+        for _spi, (_sp_name, _sp_dim) in enumerate(FIGURE_SIZE_PRESETS.items()):
+            if _sp_cols[_spi].button(
+                _sp_name, key=f"sp_{_sp_name}_{current_gene}",
+                width='stretch',
+                help=f"{_sp_dim['width']} × {_sp_dim['height']} cm",
+            ):
+                st.session_state[_w_key] = float(_sp_dim["width"])
+                st.session_state[_h_key] = float(_sp_dim["height"])
         sc1, sc2 = st.columns(2)
         with sc1:
-            fw = st.slider("Width (cm)", 10.0, 40.0,
-                value=float(gs.get(f"{current_gene}_figure_width", gs.get("figure_width", 28))),
-                step=0.5, key=f"fig_w_{current_gene}")
+            fw = st.slider("Width (cm)", 10.0, 40.0, step=0.5, key=_w_key)
         with sc2:
-            fh = st.slider("Height (cm)", 6.0, 25.0,
-                value=float(gs.get(f"{current_gene}_figure_height", gs.get("figure_height", 16))),
-                step=0.5, key=f"fig_h_{current_gene}")
+            fh = st.slider("Height (cm)", 6.0, 25.0, step=0.5, key=_h_key)
         gs[f"{current_gene}_figure_width"] = fw
         gs[f"{current_gene}_figure_height"] = fh
-        if sel_sp != "Custom" and sel_sp in FIGURE_SIZE_PRESETS:
-            p = FIGURE_SIZE_PRESETS[sel_sp]
-            if fw != p["width"] or fh != p["height"]:
-                gs[spk] = "Custom"
         if st.button("Reset this gene", key=f"reset_all_{current_gene}"):
-            st.session_state.pop(f"{current_gene}_bar_settings", None)
-            for k in [f"{current_gene}_show_sig", f"{current_gene}_show_err",
-                      f"{current_gene}_bar_gap", f"{current_gene}_show_data_points",
-                      f"{current_gene}_color_preset", f"{current_gene}_size_preset",
-                      f"{current_gene}_figure_width", f"{current_gene}_figure_height",
-                      f"{current_gene}_font_size", f"{current_gene}_bar_opacity",
-                      f"{current_gene}_marker_line_width", f"{current_gene}_tick_size",
-                      f"{current_gene}_ylabel_size", f"{current_gene}_bg_color",
-                      f"{current_gene}_y_min", f"{current_gene}_y_max",
-                      f"{current_gene}_label_mode", f"{current_gene}_y_log",
-                      f"{current_gene}_ref_line"]:
-                gs.pop(k, None)
-            st.rerun(scope="fragment")
+            # Flag only: the clearing has to happen before this gene's widgets are
+            # instantiated, which is the top of this fragment on the next pass.
+            #
+            # A full rerun, not scope="fragment": Streamlit rejects a
+            # fragment-scoped rerun whenever the fragment body happens to be
+            # running as part of a full script run, and a reset also has to reach
+            # build_all_figures so the export figures pick up the defaults.
+            st.session_state[f"_reset_style_{current_gene}"] = True
+            st.rerun()
 
     with t_labels:
         c1, c2 = st.columns(2)
@@ -1013,26 +1502,66 @@ def render_gene_editor(current_gene):
                 value=st.session_state.gene_display_names.get(current_gene, current_gene),
                 key=f"gene_display_{current_gene}", placeholder=current_gene)
             gds = (gene_display.strip() if gene_display else "")[:50]
-            if gds and gds != current_gene:
+            # Two genes sharing a display name silently collapse to one in the
+            # Excel export: _disp overwrites Target before both the Summary
+            # groupby (which averages them together) and the FC_Matrix pivot,
+            # whose aggfunc="first" keeps one gene's numbers and discards the
+            # other's — on the sheet people paste into reports. Refuse the
+            # collision here rather than losing data there.
+            _taken = {
+                v for k, v in st.session_state.gene_display_names.items()
+                if k != current_gene
+            } | {
+                g for g in st.session_state.processed_data if g != current_gene
+            }
+            if gds and gds in _taken:
+                st.error(
+                    f"'{gds}' is already used by another gene. Excel would merge "
+                    f"the two into one row, so this rename was not applied."
+                )
+                st.session_state.gene_display_names.pop(current_gene, None)
+            elif gds and gds != current_gene:
                 st.session_state.gene_display_names[current_gene] = gds
             elif current_gene in st.session_state.gene_display_names:
                 del st.session_state.gene_display_names[current_gene]
-            gs[f"{current_gene}_label_mode"] = st.selectbox("X-label mode", label_modes,
-                index=label_modes.index(gs.get(f"{current_gene}_label_mode", "Auto-wrap")),
-                key=f"lbl_mode_{current_gene}",
+            _settings_backed_selectbox(
+                "X-label mode", label_modes,
+                settings_key=f"{current_gene}_label_mode",
+                widget_key=f"lbl_mode_{current_gene}", default="Auto-wrap",
                 help="How x-axis labels handle long text")
-            gs[f"{current_gene}_ref_line"] = st.selectbox("Reference line", ref_options,
-                index=ref_options.index(gs.get(f"{current_gene}_ref_line", "None")),
-                key=f"ref_sel_{current_gene}",
+            # Settings-backed because ref_options changes when conditions are
+            # renamed or re-mapped: the widget's stored condition name can vanish
+            # from the option list, and a keyed selectbox will not re-seed itself.
+            _settings_backed_selectbox(
+                "Reference line", ref_options,
+                settings_key=f"{current_gene}_ref_line",
+                widget_key=f"ref_sel_{current_gene}", default="None",
                 help="Horizontal dashed line at a condition's expression level")
         with c2:
-            gs[f"{current_gene}_font_size"] = st.slider("Global font", 8, 28,
-                value=gs.get(f"{current_gene}_font_size", gs.get("font_size", 14)),
-                key=f"gf_{current_gene}")
-            gs[f"{current_gene}_tick_size"] = st.slider("X-tick labels", 8, 24,
-                value=gs.get(f"{current_gene}_tick_size", 12), key=f"ts_{current_gene}")
-            gs[f"{current_gene}_ylabel_size"] = st.slider("Y-axis label", 8, 24,
-                value=gs.get(f"{current_gene}_ylabel_size", 14), key=f"ys_{current_gene}")
+            # ONE text-size control, not three. The editor carried separate
+            # "Global font", "X-tick labels" and "Y-axis label" sliders — three
+            # ways to break the type hierarchy, and three decisions where one
+            # will do. Against the LEAN rule this was the clearest offender in a
+            # tab that had 26+ controls across five nested sub-tabs.
+            #
+            # It sets the scale and derives the rest at the ratios the defaults
+            # already used (global 14 / tick 12 / y-label 14), so an existing
+            # chart is unchanged. graph.py scales all of them again for slide
+            # legibility, so this is a relative control — which is what it
+            # always really was.
+            _base_font = int(
+                gs.get(f"{current_gene}_font_size", gs.get("font_size", 14))
+            )
+            _base_font = st.slider(
+                "Text size", 8, 28, value=_base_font,
+                key=f"gf_{current_gene}",
+                help="Scales the axis titles, tick labels and captions together",
+            )
+            gs[f"{current_gene}_font_size"] = _base_font
+            gs[f"{current_gene}_ylabel_size"] = _base_font
+            gs[f"{current_gene}_tick_size"] = max(
+                8, int(round(_base_font * 12 / 14))
+            )
 
     with t_colors:
         _render_per_bar_table(current_gene, gene_data)
@@ -1049,8 +1578,16 @@ def render_gene_editor(current_gene):
             gs[f"{current_gene}_y_log"] = st.toggle("Log y-axis",
                 value=gs.get(f"{current_gene}_y_log", False), key=f"ylog_{current_gene}",
                 help="Log-scale the expression axis")
-        if ymin is not None and ymax is not None and ymax > 0 and ymin >= ymax:
+        # `ymax > 0` used to be part of this guard, which let ymin=0/ymax=0 through
+        # and handed Plotly the degenerate range [0, 0] (a blank plot).
+        if ymin is not None and ymax is not None and ymin >= ymax:
             st.warning("Y-axis min must be less than max. Using auto range.")
+            ymin = ymax = None
+        if ymax is not None and ymax <= 0:
+            st.warning("Y-axis max must be greater than 0. Using auto range.")
+            ymin = ymax = None
+        if gs.get(f"{current_gene}_y_log") and ymin is not None and ymin <= 0:
+            st.warning("A log axis cannot start at or below 0. Using auto range.")
             ymin = ymax = None
         if ymin is not None:
             gs[f"{current_gene}_y_min"] = ymin
@@ -1086,7 +1623,7 @@ def render_gene_editor(current_gene):
     # Memoized: reuses the figure the Graphs/Overview pass already built when
     # nothing changed, and rebuilds here on a fragment-scoped rerun when it did.
     fig = gene_figure_for_display(current_gene, gene_data, efficacy_config)
-    st.plotly_chart(fig, use_container_width=True, key=f"main_fig_{current_gene}")
+    st.plotly_chart(fig, width='stretch', key=f"main_fig_{current_gene}")
 
 
 # ==================== PAGE CONFIG ====================
@@ -1330,34 +1867,11 @@ COSMAX_LAB_WHITE = "#F3F0ED"  # Secondary background (off-white)
 COSMAX_FROST_GREY = "#C1C6C7"  # Secondary elements, table headers
 COSMAX_CREAM = "#D4CEC1"  # Secondary data series, neutral accents
 
-# Font family with CJK (Korean) support for Plotly image export (kaleido)
-# Cross-platform fallback: Linux → Windows → macOS → generic
-_DEFAULT_CJK_FONTS = [
-    "Noto Sans CJK KR", "NanumGothic", "Malgun Gothic",
-    "Apple SD Gothic Neo", "AppleGothic",
-]
-_FALLBACK_FONTS = ["Arial", "sans-serif"]
-
-# FIX-12: Validate CJK font availability at startup with graceful fallback
-def _detect_available_fonts():
-    """Check which CJK fonts are actually installed on this system."""
-    try:
-        from matplotlib import font_manager
-        system_fonts = {f.name for f in font_manager.fontManager.ttflist}
-        available_cjk = [f for f in _DEFAULT_CJK_FONTS if f in system_fonts]
-        if not available_cjk:
-            # No CJK fonts found — warn once via Streamlit toast
-            # (deferred to first render since st isn't ready at import time)
-            pass
-        return available_cjk + _FALLBACK_FONTS
-    except ImportError:
-        # matplotlib not available — use full fallback list
-        return _DEFAULT_CJK_FONTS + _FALLBACK_FONTS
-
-PLOTLY_FONT_FAMILY = ", ".join(_detect_available_fonts())
-
-CM_TO_PX = 37.7953
-CM_TO_EMU = 360000
+# PLOTLY_FONT_FAMILY, CM_TO_PX and CM_TO_EMU are imported from qpcr.constants at
+# the top of this file. They used to be re-declared here with byte-identical
+# values, which is the dual-copy hazard tasks/lessons.md warns about: qpcr/graph.py
+# read the package's copy while the report/PPT writers below read this one, so a
+# change to either only reached half the output.
 
 
 # ==================== SESSION STATE INIT ====================
@@ -1647,17 +2161,41 @@ class AnalysisEngine(_CoreAnalysisEngine):
                 )
 
                 if processed_df is None or processed_df.empty:
+                    # Report the engine's own reasons rather than guessing. The
+                    # fixed "check mapping and housekeeping gene" text was the
+                    # wrong diagnosis whenever the real cause was a reference
+                    # condition with no wells left.
+                    _why = (processed_df.attrs.get("_skipped_warnings", [])
+                            if processed_df is not None else [])
                     st.warning(
-                        "⚠️ No ΔΔCt results produced. Check mapping and housekeeping gene."
+                        "⚠️ No ΔΔCt results produced."
+                        + ("\n\nReasons reported by the calculation:\n"
+                           + "\n".join(f"  • {w}" for w in _why[:10])
+                           if _why else
+                           " Check the mapping, the housekeeping gene, and that the "
+                           "reference condition has wells that survived QC.")
                     )
                     return False
 
                 # FIX-06: Display warnings for skipped genes/conditions
                 _skipped = processed_df.attrs.get("_skipped_warnings", [])
                 if _skipped:
+                    # A gene can lose EVERY condition here and so disappear from
+                    # the results entirely; name those separately, because a
+                    # missing gene is far easier to overlook than a missing bar.
+                    _lost = sorted({
+                        g for g in (st.session_state.get("data", processed_df)["Target"].unique()
+                                    if "Target" in processed_df.columns else [])
+                        if g != hk_gene and g not in set(processed_df["Target"].unique())
+                    }) if "Target" in processed_df.columns else []
                     st.warning(
-                        f"⚠️ {len(_skipped)} condition(s) skipped due to all wells being excluded:\n"
+                        f"⚠️ {len(_skipped)} condition(s) skipped (no usable wells "
+                        f"after QC exclusions):\n"
                         + "\n".join(f"  • {w}" for w in _skipped)
+                        + (f"\n\n**Dropped entirely from the results: "
+                           f"{', '.join(_lost)}** — these genes have no bars, no "
+                           f"p-values and no rows in the export."
+                           if _lost else "")
                     )
 
                 # --- Statistical test ---
@@ -1688,14 +2226,29 @@ class AnalysisEngine(_CoreAnalysisEngine):
                         excluded_wells=st.session_state.get("excluded_wells", {}),
                     )
 
-                # FIX-16: Display warning when one-sample t-test was used
-                _onesamp = processed_with_stats.attrs.get("_onesamp_warnings", [])
-                if _onesamp:
-                    st.info(
-                        f"ℹ️ One-sample t-test used for {len(_onesamp)} comparison(s) "
-                        f"(one group has n=1 replicate): "
-                        + ", ".join(_onesamp[:5])
-                        + (f" ... and {len(_onesamp) - 5} more" if len(_onesamp) > 5 else "")
+                # The one-sample-t-test notice that used to sit here is gone with
+                # the fallback itself (2026-08-24): a group with n=1 now yields
+                # no p-value and no marker, and _stats_skipped_warnings below
+                # reports it as a test that could not run. An info box saying a
+                # one-sample test "was used" could not repair a shipped result.
+
+                # calculate_statistics also records the comparisons it could not
+                # run at all, and nothing read it. When the comparison condition
+                # has no data (renamed in Mapping, or every well QC-excluded)
+                # EVERY p-value comes back NaN and the chart simply has no
+                # asterisks — which reads as "nothing is significant" rather than
+                # "no test ran". This must be an error, not an info.
+                _stats_skipped = processed_with_stats.attrs.get(
+                    "_stats_skipped_warnings", []
+                )
+                if _stats_skipped:
+                    st.error(
+                        f"⚠️ No statistical test could be run for "
+                        f"{len(_stats_skipped)} gene/comparison(s) — their p-values "
+                        f"are blank, NOT non-significant:\n"
+                        + "\n".join(f"  • {w}" for w in _stats_skipped[:10])
+                        + (f"\n  ... and {len(_stats_skipped) - 10} more"
+                           if len(_stats_skipped) > 10 else "")
                     )
 
                 # --- Organize data for graphs ---
@@ -2215,7 +2768,7 @@ class PPTGenerator:
         p.text = "유전자 발현 분석 (Gene Expression Analysis)"
         p.font.size = Pt(40)
         p.font.bold = True
-        p.font.name = "Malgun Gothic"
+        p.font.name = KOREAN_FONT_NAME
         p.alignment = PP_ALIGN.CENTER
 
         # Subtitle (Efficacy Type)
@@ -2227,7 +2780,7 @@ class PPTGenerator:
         efficacy = analysis_params.get("Efficacy_Type", "Analysis")
         p.text = f"{efficacy} Efficacy Test"
         p.font.size = Pt(28)
-        p.font.name = "Malgun Gothic"
+        p.font.name = KOREAN_FONT_NAME
         p.alignment = PP_ALIGN.CENTER
 
         # Date and Info
@@ -2239,7 +2792,7 @@ class PPTGenerator:
         date = analysis_params.get("Date", "")
         p.text = f"Date: {date}"
         p.font.size = Pt(18)
-        p.font.name = "Arial"
+        p.font.name = KOREAN_FONT_NAME
         p.alignment = PP_ALIGN.CENTER
 
         # Logo Placeholder (Bottom Right)
@@ -2279,7 +2832,7 @@ class PPTGenerator:
         p.text = f"{display_name} Expression"
         p.font.size = Pt(32)
         p.font.bold = True
-        p.font.name = "Malgun Gothic"
+        p.font.name = KOREAN_FONT_NAME
 
         # Navy Blue Line
         line = slide.shapes.add_shape(
@@ -2298,12 +2851,15 @@ class PPTGenerator:
             extra_b = max(0, (orig_m.b if orig_m and orig_m.b else 0) - 120)
             img_bytes = ReportGenerator._fig_to_image(fig, format="png", scale=2, width=fb_w, height=fb_h + extra_b)
             image_stream = io.BytesIO(img_bytes)
+            # Width only: passing both width and height forced every chart into
+            # a fixed 1.5 aspect ratio unrelated to what was rendered (17%
+            # stretch at the defaults). python-pptx derives the missing dimension
+            # from the image, so the bitmap is never distorted.
             slide.shapes.add_picture(
                 image_stream,
                 Inches(0.5),
                 Inches(1.5),
                 width=Inches(6.0),
-                height=Inches(4.0),
             )
         except Exception as e:
             err_box = slide.shapes.add_textbox(
@@ -2511,6 +3067,7 @@ class PPTGenerator:
                     for run in para.runs:
                         if "효능" in run.text:
                             run.text = run.text.replace("효능 평가", f"{display_name} 효능 평가")
+                            _set_korean_face(run)
                             break
                     break
 
@@ -2518,14 +3075,93 @@ class PPTGenerator:
             elif "Results" in full_text or "효능 有" in full_text:
                 has_efficacy = False
                 if gene_data is not None and not gene_data.empty:
-                    sig_vals = gene_data.get("significance", pd.Series())
-                    has_efficacy = sig_vals.str.len().gt(0).any() if not sig_vals.empty else False
-                result_text = f"Results: 효능 {'有' if has_efficacy else '無'}"
+                    # Judge efficacy on the TEST ARTICLE only. This tested the
+                    # whole significance column, and calculate_statistics marks
+                    # every condition except the comparison one — including the
+                    # assay's positive control. So a run where the positive
+                    # control worked and the sample did nothing still stamped
+                    # "Results: 효능 有" on the client slide, next to a chart
+                    # saying the opposite.
+                    _ctl = EFFICACY_CONFIG.get(
+                        analysis_params.get("Efficacy_Type", ""), {}
+                    ).get("controls", {})
+                    _skip = {
+                        analysis_params.get("Reference_Sample"),
+                        analysis_params.get("Compare_To"),
+                        _ctl.get("positive"), _ctl.get("positive_display"),
+                        _ctl.get("negative"), _ctl.get("negative_display"),
+                    } - {None, ""}
+                    _rows = gene_data
+                    if "Condition" in gene_data.columns and _skip:
+                        _norm = gene_data["Condition"].astype(str).str.strip().str.lower()
+                        _skip_norm = {str(s).strip().lower() for s in _skip}
+                        _rows = gene_data[~_norm.isin(_skip_norm)]
+
+                    # Significance ALONE is not efficacy. This checked only that
+                    # a marker existed, so a significant move AGAINST the
+                    # configured mechanism was stamped 효능 有 on a client slide:
+                    # a 4x rise in MMP1, which 광노화 expects to fall, read as a
+                    # success. Require the direction to agree.
+                    _expected = expected_direction_for(
+                        gene,
+                        EFFICACY_CONFIG.get(
+                            analysis_params.get("Efficacy_Type", ""), {}
+                        ).get("expected_direction", {}),
+                    )
+                    _fc_col = (
+                        "Fold_Change" if "Fold_Change" in _rows.columns
+                        else "Relative_Expression"
+                    )
+                    _sig = _rows.get("significance", pd.Series(dtype=object))
+                    _sig_mask = (
+                        _sig.astype(str).str.len().gt(0) if len(_sig)
+                        else pd.Series(dtype=bool)
+                    )
+                    _n_sig = int(_sig_mask.sum()) if len(_sig_mask) else 0
+
+                    if _n_sig == 0:
+                        _verdict = "無"
+                    elif not _expected or _fc_col not in _rows.columns:
+                        # No configured direction for this marker, so there is
+                        # nothing to check the sign against: fall back to the
+                        # historical significance-only verdict rather than
+                        # stamping the review verdict on a result that may be
+                        # perfectly good. Decision (Min, 2026-08-24), and it
+                        # matters: EFFICACY_CONFIG covers 73 of 83 markers, but
+                        # the gaps CLUSTER — 립 색상 has NONE of its six (VEGFA,
+                        # VEGF, NOS3, EDN1, MC1R, TYR), so every slide in that
+                        # category would otherwise have flipped. 외이도염 lacks
+                        # CBD103/cBD103, 탈모 개선 lacks FLG, 열 노화 lacks NID1.
+                        # Filling those in is what makes the verdict correct
+                        # rather than merely cautious; until then this confines
+                        # the change to markers that can actually be judged.
+                        _verdict = "有"
+                    else:
+                        _fc = pd.to_numeric(
+                            _rows.loc[_sig_mask, _fc_col], errors="coerce"
+                        ).dropna()
+                        _agree = (
+                            (_fc > 1.0) if _expected == "up" else (_fc < 1.0)
+                        )
+                        if len(_fc) == 0:
+                            _verdict = _VERDICT_REVIEW
+                        elif bool(_agree.all()):
+                            _verdict = "有"
+                        else:
+                            # At least one significant marker moved the wrong
+                            # way. That is a finding a reviewer must see, not an
+                            # absence of effect, so it is neither 有 nor 無.
+                            _verdict = _VERDICT_REVIEW
+                    has_efficacy = _verdict == "有"
+                else:
+                    _verdict = "無"
+                result_text = f"Results: 효능 {_verdict}"
                 for para in shape.text_frame.paragraphs:
                     runs = list(para.runs)
                     for i, run in enumerate(runs):
                         if i == 0:
                             run.text = result_text
+                            _set_korean_face(run)
                         else:
                             run.text = ""
                     break
@@ -2570,18 +3206,46 @@ class PPTGenerator:
         w_cm = gs.get(f"{gene}_figure_width", gs.get("figure_width", 28))
         h_cm = gs.get(f"{gene}_figure_height", gs.get("figure_height", 16))
 
+        # go.Figure(None) is a VALID empty figure, so a gene whose chart failed
+        # to build used to be placed as a blank white picture and the except
+        # branch below — which writes the visible "Graph Error" box — never ran.
+        if fig is None:
+            raise ValueError(
+                f"No chart could be built for {gene}, so it cannot be placed on "
+                f"the slide."
+            )
+
+        # Render at the figure's OWN pixel size where it has one. graph.py
+        # auto-widens the figure for many bars (max(configured, n_bars*1.4) cm),
+        # and re-rendering at the configured width squeezed labels that had been
+        # wrapped for the wider canvas.
+        _px_w = int(getattr(fig.layout, "width", 0) or int(w_cm * CM_TO_PX))
+        _px_h = int(getattr(fig.layout, "height", 0) or int(h_cm * CM_TO_PX))
+        _px_w = max(_px_w, 1)
+        _px_h = max(_px_h, 1)
+        # The 800x500 floors are what made the frame and the bitmap disagree:
+        # when a floor bound, the rendered aspect ratio no longer matched the
+        # frame computed from the raw cm, and python-pptx stretched the image to
+        # fit (32.5% vertically for the Square preset, 14.3% for PPT Half).
+        # Raise the short side but keep the aspect ratio.
+        if _px_w < 800:
+            _px_h = int(round(_px_h * 800 / _px_w))
+            _px_w = 800
+        if _px_h < 500:
+            _px_w = int(round(_px_w * 500 / _px_h))
+            _px_h = 500
+
         fig_copy = go.Figure(fig)
-        fig_copy.update_layout(
-            width=max(int(w_cm * CM_TO_PX), 800),
-            height=max(int(h_cm * CM_TO_PX), 500),
-        )
+        fig_copy.update_layout(width=_px_w, height=_px_h)
 
         try:
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
             img_stream = io.BytesIO(img_bytes)
 
+            # Frame follows the rendered aspect ratio so the bitmap is never
+            # stretched; width still honours the user's cm setting.
             w_emu = int(w_cm * CM_TO_EMU)
-            h_emu = int(h_cm * CM_TO_EMU)
+            h_emu = int(round(w_emu * _px_h / _px_w))
             # Available area: ~1.0" to ~6.6" vertically, ~12" wide
             max_w_emu = int(11.5 * 914400)
             max_h_emu = int(5.2 * 914400)
@@ -2597,7 +3261,37 @@ class PPTGenerator:
 
             slide_w = int(prs.slide_width)
             left = max(0, int((slide_w - w_emu) / 2))
-            top = int(1.0 * 914400)  # 1.0" below header
+
+            # Start below whatever the header actually occupies, not at a fixed
+            # 1.0". The chart's top band is opaque white and the picture is
+            # later in z-order, so a hardcoded 1.0" painted over the template's
+            # assay-metadata box (which runs to ~1.53"): "Inducer: ..." was
+            # sliced through mid-glyph and "Treatment time" and "Test method"
+            # disappeared entirely from every gene slide. The text is still in
+            # the file — it was covered, not dropped — so nothing but geometry
+            # is wrong here.
+            _HEADER_BAND = int(1.6 * 914400)
+            _GAP = int(0.06 * 914400)
+            header_bottom = 0
+            for _sh in slide.shapes:
+                if not _sh.has_text_frame or not _sh.text_frame.text.strip():
+                    continue
+                if _sh.top is None or _sh.height is None:
+                    continue
+                if _sh.top < _HEADER_BAND:
+                    header_bottom = max(header_bottom, int(_sh.top + _sh.height))
+            top = max(int(1.0 * 914400), header_bottom + _GAP)
+
+            # Keep the bottom edge where it was, so the chart cannot grow down
+            # into the "Results: 효능" box that sits below it.
+            _bottom_limit = int(1.0 * 914400) + max_h_emu
+            if top + h_emu > _bottom_limit:
+                _avail = max(_bottom_limit - top, int(1.0 * 914400))
+                if h_emu > _avail:
+                    scale_f = _avail / h_emu
+                    h_emu = _avail
+                    w_emu = int(w_emu * scale_f)
+                    left = max(0, int((slide_w - w_emu) / 2))
 
             slide.shapes.add_picture(
                 img_stream, left, top, width=Emu(w_emu), height=Emu(h_emu)
@@ -2649,15 +3343,15 @@ class PPTGenerator:
                 gene_data_local = processed_data.get(gene)
                 if gene_data_local is None or gene_data_local.empty:
                     return None
-                disp = gene_display_names.get(gene, gene)
-                return GraphGenerator.create_gene_graph(
-                    gene_data_local,
+                # Rebuild through build_gene_figure so a lazily-built figure
+                # carries the SAME resolved per-gene settings as the on-screen
+                # chart. Passing the raw graph_settings here dropped this gene's
+                # overrides, colour preset, reference line and data-point overlay,
+                # so the slide silently disagreed with the screen.
+                return build_gene_figure(
                     gene,
-                    gs or {},
+                    gene_data_local,
                     EFFICACY_CONFIG.get(analysis_params.get("Efficacy_Type", ""), {}),
-                    sample_order=st.session_state.get("sample_order"),
-                    display_gene_name=disp,
-                    ref_condition=st.session_state.get("analysis_ref_condition"),
                 )
             except Exception:
                 return None
@@ -2675,6 +3369,7 @@ class PPTGenerator:
                         for run in para.runs:
                             if "소재" in run.text:
                                 run.text = run.text.replace("소재", efficacy)
+                                _set_korean_face(run)
 
             # Step 2: Copy gene template (index 2) BEFORE deleting to avoid
             # ZIP part-name conflicts (delete frees a name that add_slide reuses)
@@ -2714,6 +3409,14 @@ class PPTGenerator:
                     display_name=gene_display_names.get(gene, gene),
                 )
 
+        # Final sweep: name the Korean face on every Hangul-bearing run in the
+        # deck. The writers above cover the runs they author, but the template
+        # carries Korean of its own (the title slide's "효능 평가") which no code
+        # path touches, so it would still render by host substitution. Only runs
+        # with no East-Asian face yet are altered, so a template run that
+        # already declares one keeps it.
+        _apply_korean_face_to_deck(prs)
+
         output = io.BytesIO()
         prs.save(output)
         output.seek(0)
@@ -2721,15 +3424,30 @@ class PPTGenerator:
 
 
 # ==================== EXPORT FUNCTIONS ====================
-def _sanitize_sheet_name(name: str, used_names: set) -> str:
-    """Sanitize Excel sheet name: remove invalid chars, truncate, deduplicate."""
+def _sanitize_sheet_name(name: str, used_names: set, suffix: str = "") -> str:
+    """Sanitize Excel sheet name: remove invalid chars, truncate, deduplicate.
+
+    ``suffix`` (e.g. "_Analysis", "_Chart") is kept whole and the NAME is
+    truncated to fit around it. Concatenating first and truncating afterwards cut
+    the suffix off entirely for any display name of 22 characters or more, so the
+    data sheet and the chart sheet for one gene ended up as indistinguishable
+    "…", "…_1", "…_2" pairs.
+    """
     import re
-    safe = re.sub(r'[\\/*\[\]:?]', '_', name)[:31]
-    base = safe
+    # Excel also rejects a sheet name that starts or ends with an apostrophe, and
+    # an embedded one has to be doubled inside a quoted sheet reference. The
+    # error-bar formulas below are hand-built and did not escape it, so a target
+    # like 5'-NT produced a chart XML that Excel refuses to open. Replacing it
+    # keeps every reference builder in agreement.
+    bad = r"[\\/*\[\]:?']"
+    safe_suffix = re.sub(bad, "_", str(suffix or ""))
+    limit = 31 - len(safe_suffix)
+    body = re.sub(bad, "_", str(name))[:max(limit, 1)]
+    safe = base = (body + safe_suffix) or "Sheet"
     counter = 1
     while safe in used_names:
-        suffix = f"_{counter}"
-        safe = base[: 31 - len(suffix)] + suffix
+        tail = f"_{counter}"
+        safe = base[: 31 - len(tail)] + tail
         counter += 1
     used_names.add(safe)
     return safe
@@ -2744,6 +3462,9 @@ def export_to_excel(
     replicate_stats: pd.DataFrame = None,
     excluded_wells=None,
     gene_display_names: dict = None,
+    *,
+    graph_settings: dict = None,
+    provenance: dict = None,
 ) -> bytes:
     """Export comprehensive Excel with gene-by-gene sheets, QC report, and FC matrix.
 
@@ -2751,12 +3472,31 @@ def export_to_excel(
     tab). When provided, per-gene sheet names, the FC matrix index, and the chart
     Y-axis title all use the display name so Excel matches what the user sees on
     screen. Raw gene name is preserved as a `Target_Raw` column for traceability.
+
+    `graph_settings` is keyword-only and carries the operator's chart choices —
+    the error-bar mode and the Y-axis bounds. This parameter did not exist, so
+    the native Excel chart could not see either: it always plotted the SD-derived
+    columns and hardcoded the axis minimum to 0. With SEM selected the workbook's
+    bars were ~1.7-1.8x too large and with 95% CI ~2.6-2.8x too small, while the
+    PowerPoint and PNG from the SAME click carried a caption naming the mode the
+    operator actually chose. Two exports of one run disagreed about what the bars
+    meant, and the Excel chart carries no caption of its own to give it away.
     """
     gene_display_names = gene_display_names or {}
     _disp = lambda g: str(gene_display_names.get(g, g))
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        # Workbook default font. The generated workbook defaulted to Calibri,
+        # which has no Hangul, so 대조군 / 시료 1 처리 (10 ppm) in Sample_Mapping,
+        # every *_Analysis sheet, FC_Matrix and the *_Chart sheets all rendered
+        # by host substitution. The lab reference workbook's default is 맑은 고딕
+        # (family 2, charset 129) — this matches it.
+        try:
+            writer.book.formats[0].set_font_name(KOREAN_FONT_NAME)
+        except Exception as _font_err:  # noqa: BLE001
+            logging.warning("Workbook default font not set: %s", _font_err)
+
         # Parameters sheet
         pd.DataFrame([params]).to_excel(
             writer, sheet_name="Analysis_Parameters", index=False
@@ -2786,7 +3526,7 @@ def export_to_excel(
         _used_sheet_names = {"Analysis_Parameters", "Raw_Data"}
         for gene, gene_data in processed_data.items():
             display = _disp(gene)
-            sheet_name = _sanitize_sheet_name(f"{display}_Analysis", _used_sheet_names)
+            sheet_name = _sanitize_sheet_name(display, _used_sheet_names, "_Analysis")
             gene_export = gene_data.copy()
             # Preserve raw gene name so an exported sheet can be cross-referenced
             # to raw_data["Target"] even when the user has renamed the gene.
@@ -2798,19 +3538,28 @@ def export_to_excel(
                 )
                 gene_export["Target"] = display
             if "p_value" in gene_export.columns:
-                ttest_type = params.get("ttest_type", "welch")
+                # Report the test that actually ran, from stat_test_used, rather
+                # than reconstructing it. The old reconstruction read only the
+                # treatment row's n_replicates, so a comparison whose REFERENCE
+                # had n=1 was labelled "Welch t-test (n=3)" while the call was
+                # really ttest_1samp. That fallback is gone (n<2 now yields no
+                # p-value at all), but the label must not be re-derived either.
                 gene_export["Stat_Test"] = ""
-                for idx, row in gene_export.iterrows():
-                    n_rep = row.get("n_replicates", 0)
-                    if pd.notna(row.get("p_value")) and row.get("p_value") is not np.nan:
-                        if n_rep >= 2:
+                if "stat_test_used" in gene_export.columns:
+                    gene_export["Stat_Test"] = (
+                        gene_export["stat_test_used"].fillna("").astype(str)
+                    )
+                else:
+                    # Older stored result with no stat_test_used column.
+                    ttest_type = params.get("ttest_type", "welch")
+                    _label = "Welch" if ttest_type == "welch" else "Student"
+                    for idx, row in gene_export.iterrows():
+                        n_rep = row.get("n_replicates", 0)
+                        if pd.notna(row.get("p_value")):
                             gene_export.loc[idx, "Stat_Test"] = (
-                                f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test (n={n_rep})"
+                                f"{_label} t-test (n={n_rep})" if n_rep >= 2
+                                else "N/A"
                             )
-                        elif n_rep == 1:
-                            gene_export.loc[idx, "Stat_Test"] = f"One-sample t-test (n={n_rep})"
-                        else:
-                            gene_export.loc[idx, "Stat_Test"] = "N/A"
             gene_export.to_excel(writer, sheet_name=sheet_name, index=False)
 
         # Summary sheet
@@ -2872,19 +3621,53 @@ def export_to_excel(
                         ref_sample,
                         mapping,
                         excluded_wells,
+                        st.session_state.get("excluded_samples", set()),
                     )
                     if not replicate_fc.empty:
                         replicate_fc.to_excel(writer, sheet_name="Replicate_FC", index=False)
+                    else:
+                        # Both branches used to be silent — the empty case said
+                        # nothing at all and the exception went only to
+                        # logging.warning, so the operator got a workbook with
+                        # no Replicate_FC sheet and no way to know why.
+                        st.warning(
+                            "The workbook has no Replicate_FC sheet: no "
+                            "per-replicate fold changes could be computed for "
+                            f"reference '{ref_sample}'."
+                        )
                 except Exception as e:
-                    import logging
                     logging.warning(f"Replicate_FC sheet skipped: {e}")
+                    st.warning(
+                        f"The workbook has no Replicate_FC sheet: {e}"
+                    )
 
         # QC Report sheet
         _write_qc_report_sheet(writer, qc_stats, replicate_stats)
 
+        # Provenance + MIQE checklist. The Analysis tab told the operator this
+        # record "is downloadable on the Export tab" and it was not: no sheet,
+        # no slide, no button, and build_miqe_checklist was imported and never
+        # called anywhere. That record is the honesty mechanism for the two
+        # settled statistical choices (uncorrected markers, technical-well n),
+        # so a report that omits it cannot be checked against them.
+        if provenance:
+            _prov_lines = format_provenance_text(provenance).splitlines()
+            try:
+                _prov_lines += ["", "MIQE CHECKLIST", ""]
+                _prov_lines += [
+                    _ln.lstrip("- ").replace("**", "")
+                    for _ln in build_miqe_checklist(provenance).splitlines()
+                ]
+            except Exception as _miqe_err:  # noqa: BLE001
+                logging.warning("MIQE checklist omitted: %s", _miqe_err)
+            pd.DataFrame({"qPCR Analysis Provenance": _prov_lines}).to_excel(
+                writer, sheet_name="Provenance", index=False
+            )
+
     # Post-process: add gene chart sheets with openpyxl (supports rich text axis titles)
     output = _add_gene_chart_sheets(
-        output, processed_data, params, gene_display_names=gene_display_names
+        output, processed_data, params, gene_display_names=gene_display_names,
+        graph_settings=graph_settings,
     )
 
     return output.getvalue()
@@ -2900,8 +3683,15 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         rows.append({"Metric": "CT Mean", "Value": qc_stats.get("ct_mean", "")})
         rows.append({"Metric": "CT SD", "Value": qc_stats.get("ct_std", "")})
         rows.append({"Metric": "CT Range", "Value": f"{qc_stats.get('ct_min', '')}-{qc_stats.get('ct_max', '')}"})
-        rows.append({"Metric": "High CT Wells (>35)", "Value": qc_stats.get("high_ct_count", "")})
-        rows.append({"Metric": "Low CT Wells (<10)", "Value": qc_stats.get("low_ct_count", "")})
+        # Interpolate the configured thresholds: the COUNTS honour QC Settings
+        # but these labels were hardcoded to 35/10, and this sheet goes to
+        # clients, so a re-thresholded run shipped a mislabelled row. Read from
+        # the SESSION now, not from class attributes.
+        _qct_report = qc_thresholds()
+        rows.append({"Metric": f"High CT Wells (>{_qct_report['ct_high']:g})",
+                     "Value": qc_stats.get("high_ct_count", "")})
+        rows.append({"Metric": f"Low CT Wells (<{_qct_report['ct_low']:g})",
+                     "Value": qc_stats.get("low_ct_count", "")})
         rows.append({"Metric": "Total Triplicates", "Value": qc_stats.get("total_triplicates", "")})
         rows.append({"Metric": "Healthy Triplicates", "Value": qc_stats.get("healthy_triplicates", "")})
         rows.append({"Metric": "Warning Triplicates", "Value": qc_stats.get("warning_triplicates", "")})
@@ -2916,7 +3706,8 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         replicate_stats.to_excel(writer, sheet_name="QC_Report", index=False, startrow=start_row)
 
 
-def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_names=None):
+def _add_gene_chart_sheets(output_buf, processed_data, params,
+                           gene_display_names=None, graph_settings=None):
     """Post-process Excel bytes to add per-gene chart sheets using openpyxl.
 
     Two-phase approach:
@@ -2926,6 +3717,15 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
 
     `gene_display_names` maps raw gene -> display name. The sheet name and the
     Y-axis title both use the display name so they always agree.
+
+    `graph_settings` carries the operator's error-bar mode and Y-axis bounds, so
+    the native chart plots the same spread the screen and the deck do. See
+    export_to_excel's docstring for what went wrong without it.
+
+    Note the all-white bars, the absent significance markers and the 219/-27 bar
+    geometry are a DELIBERATE clone of the lab reference workbook
+    (+qPCR_진정_20260205_1424.xlsx), which writes ten identical white per-point
+    overrides of its own. Do not "fix" those to match the screen.
     """
     from openpyxl import load_workbook
     from openpyxl.chart import BarChart, Reference
@@ -2956,8 +3756,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
             continue
 
         display = _disp(gene)
-        display_for_chart_order.append(display)
-        sheet_name = _sanitize_sheet_name(f"{display}_Chart", _used_sheet_names)
+        sheet_name = _sanitize_sheet_name(display, _used_sheet_names, "_Chart")
         ws = wb.create_sheet(sheet_name)
 
         # Build data columns
@@ -2973,19 +3772,45 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         p_values_3 = gene_data.get("p_value_3", pd.Series()).tolist() if has_p3 else []
         sig_3 = gene_data.get("significance_3", pd.Series()).tolist() if has_p3 else []
 
-        # Fold-change-domain asymmetric error bounds (Livak). Match the on-screen
-        # Plotly graph instead of plotting Ct-domain SEM symmetrically on the
-        # linear fold-change axis. Fall back to symmetric SEM when unavailable.
-        if "FC_Error_Upper" in gene_data.columns and "FC_Error_Lower" in gene_data.columns:
-            fc_err_upper = gene_data["FC_Error_Upper"].fillna(0).tolist()
-            fc_err_lower = gene_data["FC_Error_Lower"].fillna(0).tolist()
+        # Fold-change-domain asymmetric error bounds, in the mode the OPERATOR
+        # chose. Same precedence ladder as qpcr/graph.py, including its
+        # availability guards, so an older stored frame lacking the transformed
+        # columns still falls back rather than raising.
+        _cols = set(gene_data.columns)
+        _eb_mode = (graph_settings or {}).get("error_bar_mode") or "livak_sd"
+        if _eb_mode == "ci95" and {"FC_CI_Upper", "FC_CI_Lower"} <= _cols:
+            _eu, _el = "FC_CI_Upper", "FC_CI_Lower"
+        elif _eb_mode == "sem" and {"FC_SEM_Upper", "FC_SEM_Lower"} <= _cols:
+            _eu, _el = "FC_SEM_Upper", "FC_SEM_Lower"
+        elif {"FC_Error_Upper", "FC_Error_Lower"} <= _cols:
+            # 'sd' resolves here too: the Livak bars ARE the SD, transformed.
+            _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
         else:
-            fc_err_upper = [s if pd.notna(s) else 0 for s in sems]
+            _eu = _el = None
+
+        if _eu:
+            # None, not 0: an undefined spread (n=1) written as 0 draws a
+            # zero-length bar, the visual signature of the most precise
+            # measurement in the panel. Excel treats an empty custom-error cell
+            # as no bar. The _Analysis sheet already writes blank here, so
+            # filling with 0 made two sheets of one workbook contradict.
+            fc_err_upper = [v if pd.notna(v) else None for v in gene_data[_eu]]
+            fc_err_lower = [v if pd.notna(v) else None for v in gene_data[_el]]
+        else:
+            fc_err_upper = [s if pd.notna(s) else None for s in sems]
             fc_err_lower = list(fc_err_upper)
 
         n_rows = len(conditions)
         if n_rows == 0:
             continue
+
+        # Recorded only once a chart is actually going to exist. This ran BEFORE
+        # the skip above, so a gene that produced no chart still consumed an
+        # entry: n_gene_charts over-counted and the later
+        # zip(gene_chart_files, display_for_chart_order) shifted every display
+        # name onto the wrong chart's Y-axis title. Same failure class the
+        # numeric chart-file sort was added to fix, re-entering by another door.
+        display_for_chart_order.append(display)
 
         hdr_row, data_start = 5, 6
         headers = ["Condition", "Fold_Change", "SEM", "p_value", "significance"]
@@ -3011,7 +3836,9 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
             fc = fold_changes[i]
             ws.cell(row=r, column=4, value=fc if pd.notna(fc) else 0)
             sem = sems[i]
-            ws.cell(row=r, column=5, value=sem if pd.notna(sem) else 0)
+            # None, not 0 — an undefined SEM (n=1) is not a SEM of zero, and the
+            # _Analysis sheet in the same workbook already writes it blank.
+            ws.cell(row=r, column=5, value=sem if pd.notna(sem) else None)
             pv = p_values[i] if i < len(p_values) else None
             ws.cell(row=r, column=6, value=pv if pd.notna(pv) else None)
             sig = significances[i] if i < len(significances) else ""
@@ -3104,7 +3931,27 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         chart.y_axis.delete = False
         chart.y_axis.majorTickMark = "out"
         chart.y_axis.minorTickMark = "none"
-        chart.y_axis.scaling.min = 0
+        # Honour the operator's Y bounds. min was hardcoded to 0 and max never
+        # set, so the axis limits typed in the Graphs tab reached the screen and
+        # the deck but not the workbook. The lab reference workbook sets
+        # max=32 min=0 by hand, so bounds ARE part of how these charts are read.
+        _gs_gene = (graph_settings or {})
+        _y_min = _gs_gene.get("y_min")
+        _y_max = _gs_gene.get("y_max")
+        _y_log = bool(_gs_gene.get("y_log_scale"))
+        if _y_log:
+            # A log axis cannot start at 0, so the hardcoded floor must not
+            # survive into one. openpyxl writes logBase on the scaling object.
+            chart.y_axis.scaling.logBase = 10
+            chart.y_axis.scaling.min = (
+                float(_y_min) if _y_min not in (None, "", 0) else None
+            )
+        else:
+            chart.y_axis.scaling.min = (
+                float(_y_min) if _y_min not in (None, "") else 0
+            )
+        if _y_max not in (None, ""):
+            chart.y_axis.scaling.max = float(_y_max)
         chart.y_axis.majorGridlines = None
         yax_sp_xml = (
             '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
@@ -3115,7 +3962,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
         )
         chart.y_axis.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(yax_sp_xml))
 
-        ws.add_chart(chart, "I3")
+        # Anchor clear of the data block. "I3" was hardcoded while the block runs
+        # to column K once a 2nd/3rd comparison exists, so a full-width chart sat
+        # on top of significance_2, FC_Err_Upper and FC_Err_Lower — the values
+        # were intact but hidden underneath.
+        ws.add_chart(chart, f"{get_column_letter(err_minus_col + 2)}3")
 
     # ---- Phase 1 complete: save workbook to bytes ----
     phase1_buf = io.BytesIO()
@@ -3127,6 +3978,10 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     nsmap = {"c": C, "a": A}
 
     phase1_buf.seek(0)
+    # try/finally rather than bare handles: the XML rewriting loop between the
+    # two ZipFile objects can raise, and export_to_excel surfaces that as
+    # "Excel generation failed" — leaving both handles and their BytesIO open for
+    # the life of the session, once per retry.
     zf_in = zipfile.ZipFile(phase1_buf, "r")
 
     # Identify which chart files are gene charts (the ones we just added).
@@ -3153,54 +4008,147 @@ def _add_gene_chart_sheets(output_buf, processed_data, params, gene_display_name
     result = io.BytesIO()
     zf_out = zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED)
 
-    for item in zf_in.infolist():
-        data = zf_in.read(item.filename)
+    try:
+        for item in zf_in.infolist():
+            data = zf_in.read(item.filename)
 
-        if item.filename in gene_for_chart:
-            gene = gene_for_chart[item.filename]
-            root = etree.fromstring(data)
+            if item.filename in gene_for_chart:
+                # Per-chart isolation. One try/finally used to wrap the WHOLE
+                # loop, so a single gene's XML post-processing failure threw
+                # away the ENTIRE workbook — Raw_Data, QC_Report, FC_Matrix,
+                # Replicate_FC and every _Analysis sheet, all of which had
+                # already been written successfully in phase 1. Now a bad chart
+                # costs only its own styling: the unmodified chart is written
+                # through and the gene is named in the log.
+                try:
+                    data = _restyle_gene_chart_xml(
+                        data, gene_for_chart[item.filename], hk_gene,
+                        C, A, nsmap,
+                    )
+                except Exception as _chart_err:  # noqa: BLE001
+                    logging.warning(
+                        "Excel chart styling failed for %s (%s); writing the "
+                        "unstyled chart. %s",
+                        gene_for_chart[item.filename], item.filename,
+                        _chart_err,
+                    )
 
-            cat_ax = root.find(".//c:catAx", nsmap)
-            val_ax = root.find(".//c:valAx", nsmap)
+            zf_out.writestr(item, data)
 
-            # X-axis: add txPr for 9pt gray Arial labels
-            if cat_ax is not None:
-                cat_ax.append(_build_axis_txpr(C, A))
-
-            if val_ax is not None:
-                # Hidden gridlines (noFill)
-                mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
-                mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
-                mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
-                etree.SubElement(mg_ln, f"{{{A}}}noFill")
-
-                # Y-axis tick label font
-                val_ax.append(_build_axis_txpr(C, A))
-
-                # Rich text Y-axis title
-                _build_yaxis_title(val_ax, gene, hk_gene, C, A)
-
-            # Chart area: white fill, light gray border
-            chart_space = root
-            cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
-            sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
-            etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
-            ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
-            ln_cs.set("w", "9525")
-            sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
-            sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
-            sc_ln.set("val", "tx1")
-            etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
-            etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
-
-            data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
-
-        zf_out.writestr(item, data)
-
-    zf_in.close()
-    zf_out.close()
+    finally:
+        zf_out.close()
+        zf_in.close()
     result.seek(0)
     return result
+
+
+# ECMA-376 child order for the chart elements this module rewrites. These are
+# xsd:sequence, so position is meaning — and phase 2 builds them with append and
+# SubElement, which always land LAST. Validating a generated workbook against
+# the real dml-chart.xsd failed on three counts: txPr after crossAx (must be
+# before), majorGridlines after spPr (must follow axPos), and errBars' minus
+# before plus. The third is upstream: openpyxl 3.1.5 declares
+# ErrorBars.__elements__ with minus before plus, so it appears even in a bare
+# openpyxl workbook that touches none of this code — fixing only the appends
+# here would not clear it, which is why the reorder is applied to errBars too.
+# Excel's own output (the lab reference workbook) is in perfect schema order.
+_AX_SHARED_ORDER = (
+    "axId", "scaling", "delete", "axPos", "majorGridlines", "minorGridlines",
+    "title", "numFmt", "majorTickMark", "minorTickMark", "tickLblPos", "spPr",
+    "txPr", "crossAx", "crosses", "crossesAt",
+)
+_CAT_AX_ORDER = _AX_SHARED_ORDER + (
+    "auto", "lblAlgn", "lblOffset", "tickLblSkip", "tickMarkSkip",
+    "noMultiLvlLbl", "extLst",
+)
+_VAL_AX_ORDER = _AX_SHARED_ORDER + (
+    "crossBetween", "majorUnit", "minorUnit", "dispUnits", "extLst",
+)
+_ERR_BARS_ORDER = (
+    "errDir", "errBarType", "errValType", "noEndCap", "plus", "minus", "val",
+    "spPr", "extLst",
+)
+
+
+def _reorder_xml_children(element, order, ns) -> None:
+    """Sort ``element``'s children into the schema's declared sequence.
+
+    Unknown children keep their relative position at the end, so an element this
+    list does not know about is never dropped.
+    """
+    if element is None:
+        return
+    rank = {name: i for i, name in enumerate(order)}
+    kids = list(element)
+    if not kids:
+        return
+
+    def _key(pair):
+        i, child = pair
+        tag = child.tag
+        local = tag.split("}")[-1] if isinstance(tag, str) else ""
+        return (rank.get(local, len(order)), i)
+
+    for _, child in sorted(enumerate(kids), key=_key):
+        element.append(child)
+
+
+def _restyle_gene_chart_xml(data: bytes, gene: str, hk_gene: str,
+                            C: str, A: str, nsmap: dict) -> bytes:
+    """Apply phase-2 styling to one gene chart's XML and return the new bytes.
+
+    Extracted so a failure can be caught PER CHART; see the call site. Ends by
+    sorting the elements it touched back into the ECMA-376 sequence, because
+    append/SubElement always land last and these are xsd:sequence.
+    """
+    from lxml import etree
+
+    root = etree.fromstring(data)
+
+    cat_ax = root.find(".//c:catAx", nsmap)
+    val_ax = root.find(".//c:valAx", nsmap)
+
+    # X-axis: add txPr for 9pt gray Arial labels
+    if cat_ax is not None:
+        cat_ax.append(_build_axis_txpr(C, A))
+
+    if val_ax is not None:
+        # Hidden gridlines (noFill)
+        mgrid = etree.SubElement(val_ax, f"{{{C}}}majorGridlines")
+        mg_sp = etree.SubElement(mgrid, f"{{{C}}}spPr")
+        mg_ln = etree.SubElement(mg_sp, f"{{{A}}}ln")
+        etree.SubElement(mg_ln, f"{{{A}}}noFill")
+
+        # Y-axis tick label font
+        val_ax.append(_build_axis_txpr(C, A))
+
+        # Rich text Y-axis title
+        _build_yaxis_title(val_ax, gene, hk_gene, C, A)
+
+    # Chart area: white fill, light gray border. NOT reordered — CT_ChartSpace
+    # puts spPr directly after chart, so appending it here is already correct.
+    chart_space = root
+    cs_sp = etree.SubElement(chart_space, f"{{{C}}}spPr")
+    sf_cs = etree.SubElement(cs_sp, f"{{{A}}}solidFill")
+    etree.SubElement(sf_cs, f"{{{A}}}schemeClr").set("val", "bg1")
+    ln_cs = etree.SubElement(cs_sp, f"{{{A}}}ln")
+    ln_cs.set("w", "9525")
+    sf_ln = etree.SubElement(ln_cs, f"{{{A}}}solidFill")
+    sc_ln = etree.SubElement(sf_ln, f"{{{A}}}schemeClr")
+    sc_ln.set("val", "tx1")
+    etree.SubElement(sc_ln, f"{{{A}}}lumMod").set("val", "15000")
+    etree.SubElement(sc_ln, f"{{{A}}}lumOff").set("val", "85000")
+
+    # Restore the declared sequence for everything touched here, plus errBars,
+    # whose minus-before-plus order comes from openpyxl itself.
+    _reorder_xml_children(cat_ax, _CAT_AX_ORDER, C)
+    _reorder_xml_children(val_ax, _VAL_AX_ORDER, C)
+    for _eb in root.iter(f"{{{C}}}errBars"):
+        _reorder_xml_children(_eb, _ERR_BARS_ORDER, C)
+
+    return etree.tostring(
+        root, xml_declaration=True, encoding="UTF-8", standalone=True
+    )
 
 
 def _build_axis_txpr(C, A):
@@ -3209,7 +4157,10 @@ def _build_axis_txpr(C, A):
 
     txpr = etree.Element(f"{{{C}}}txPr")
     bp = etree.SubElement(txpr, f"{{{A}}}bodyPr")
-    bp.set("rot", "-60000000")
+    # No `rot`: OOXML measures rotation in 60000ths of a degree, so the old
+    # "-60000000" was -1000 degrees — far outside the valid -90..90 range. These
+    # are horizontal tick labels (vert="horz"), and omitting rot is the default
+    # horizontal, which is what was clearly intended.
     bp.set("vert", "horz")
     bp.set("wrap", "square")
     etree.SubElement(txpr, f"{{{A}}}lstStyle")
@@ -3225,6 +4176,10 @@ def _build_axis_txpr(C, A):
     etree.SubElement(sc, f"{{{A}}}lumOff").set("val", "35000")
     lat = etree.SubElement(dRPr, f"{{{A}}}latin")
     lat.set("typeface", "Arial")
+    # a:ea is the attribute East-Asian runs actually read; without it Hangul
+    # axis text fell back no matter what latin/cs said.
+    ea = etree.SubElement(dRPr, f"{{{A}}}ea")
+    ea.set("typeface", KOREAN_FONT_NAME)
     cs = etree.SubElement(dRPr, f"{{{A}}}cs")
     cs.set("typeface", "Arial")
     return txpr
@@ -3260,6 +4215,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
     sc1.set("lastClr", "000000")
     lat1 = etree.SubElement(rPr1, f"{{{A}}}latin")
     lat1.set("typeface", "Arial")
+    ea1 = etree.SubElement(rPr1, f"{{{A}}}ea")
+    ea1.set("typeface", KOREAN_FONT_NAME)
     cs1 = etree.SubElement(rPr1, f"{{{A}}}cs")
     cs1.set("typeface", "Arial")
     t1 = etree.SubElement(r1, f"{{{A}}}t")
@@ -3280,6 +4237,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
     etree.SubElement(sf2, f"{{{A}}}srgbClr").set("val", "FF0000")
     lat2 = etree.SubElement(rPr2, f"{{{A}}}latin")
     lat2.set("typeface", "Arial")
+    ea2 = etree.SubElement(rPr2, f"{{{A}}}ea")
+    ea2.set("typeface", KOREAN_FONT_NAME)
     cs2 = etree.SubElement(rPr2, f"{{{A}}}cs")
     cs2.set("typeface", "Arial")
     t2 = etree.SubElement(r2, f"{{{A}}}t")
@@ -3297,6 +4256,8 @@ def _build_yaxis_title(val_ax, gene, hk_gene, C, A):
     sc3.set("lastClr", "000000")
     lat3 = etree.SubElement(rPr3, f"{{{A}}}latin")
     lat3.set("typeface", "Arial")
+    ea3 = etree.SubElement(rPr3, f"{{{A}}}ea")
+    ea3.set("typeface", KOREAN_FONT_NAME)
     cs3 = etree.SubElement(rPr3, f"{{{A}}}cs")
     cs3.set("typeface", "Arial")
     t3 = etree.SubElement(r3, f"{{{A}}}t")
@@ -3356,6 +4317,30 @@ with tab1:
                     st.success(f"{file.name}: {len(parsed)} wells parsed")
                 elif parsed is not None and parsed.empty:
                     st.warning(f"{file.name}: parsed successfully but contained no valid data rows.")
+                else:
+                    # parse() returned None. It reports the reason itself, but
+                    # this branch did not exist, so the file's failure was
+                    # invisible in the upload list.
+                    st.error(f"{file.name}: could NOT be loaded — see the error above.")
+
+            if not all_data:
+                # Nothing usable arrived. This used to fall through leaving the
+                # PREVIOUS file's data in session_state while the uploader showed
+                # the new filename, so every metric, the preview, QC and the
+                # analysis kept describing the old experiment. Clearing also lets
+                # the hash record advance so the failed file is not re-parsed on
+                # every rerun.
+                if st.session_state.get("data") is not None:
+                    st.error(
+                        "None of the selected files could be loaded. The previously "
+                        "loaded data has been cleared so nothing below describes the "
+                        "wrong experiment."
+                    )
+                st.session_state.data = None
+                st.session_state.processed_data = {}
+                st.session_state.graphs = {}
+                _clear_all_gene_style_state()
+                st.session_state._uploaded_file_hashes = current_file_hashes
 
             if all_data:
                 st.session_state.data = pd.concat(all_data, ignore_index=True)
@@ -3367,6 +4352,10 @@ with tab1:
                 st.session_state.sample_mapping = {}
                 st.session_state.excluded_wells = {}
                 st.session_state.excluded_wells_history = []
+                # Which exclusions auto-QC owns, so manual ones survive a
+                # threshold change. Must be dropped with the exclusions or the
+                # new file's first auto-QC treats the old file's wells as manual.
+                st.session_state._auto_qc_owned = {}
                 st.session_state.excluded_samples = set()
                 st.session_state.hk_gene = None
                 st.session_state.selected_efficacy = None
@@ -3406,6 +4395,10 @@ with tab1:
                     "y_max": None,
                     "plot_bgcolor": "#FFFFFF",
                 }
+                # graph_settings above is only half the state: the per-gene editor
+                # keeps its values in widget keys, which would repopulate it on the
+                # next render and carry the previous file's styling over.
+                _clear_all_gene_style_state()
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
 
@@ -3416,25 +4409,34 @@ with tab1:
                 if had_previous_analysis:
                     st.info("Previous analysis results cleared due to new data upload.")
 
-                # FIX-05: Detect overlapping data across multiple files
-                if len(all_data) > 1:
-                    combined = st.session_state.data
-                    dup_check_cols = ["Target", "Well", "Sample"]
-                    duplicated_mask = combined.duplicated(subset=dup_check_cols, keep=False)
-                    if duplicated_mask.any():
-                        dup_rows = combined[duplicated_mask]
-                        dup_sources = dup_rows.groupby(dup_check_cols)["Source_File"].apply(
-                            lambda x: list(x.unique())
+                # FIX-05: Detect overlapping data across files AND within one.
+                # This whole block used to sit behind `len(all_data) > 1`, so two
+                # identical Target+Well+Sample rows inside a SINGLE file became
+                # silent extra replicates — inflating n and tightening the SD.
+                combined = st.session_state.data
+                dup_check_cols = ["Target", "Well", "Sample"]
+                duplicated_mask = combined.duplicated(subset=dup_check_cols, keep=False)
+                if duplicated_mask.any():
+                    dup_rows = combined[duplicated_mask]
+                    dup_sources = dup_rows.groupby(dup_check_cols)["Source_File"].apply(
+                        lambda x: list(x.unique())
+                    )
+                    cross_file_dups = dup_sources[dup_sources.apply(len) > 1]
+                    within_file_dups = dup_sources[dup_sources.apply(len) == 1]
+                    if len(cross_file_dups) > 0:
+                        st.warning(
+                            f"⚠️ Found {len(cross_file_dups)} overlapping data "
+                            f"point(s) across files (same Target+Well+Sample in "
+                            f"different files). This may cause duplicated results. "
+                            f"Consider deduplicating your input files."
                         )
-                        # Only warn if same combo appears in DIFFERENT files
-                        cross_file_dups = dup_sources[dup_sources.apply(len) > 1]
-                        if len(cross_file_dups) > 0:
-                            n_dups = len(cross_file_dups)
-                            st.warning(
-                                f"⚠️ Found {n_dups} overlapping data point(s) across files "
-                                f"(same Target+Well+Sample in different files). "
-                                f"This may cause duplicated results. Consider deduplicating your input files."
-                            )
+                    if len(within_file_dups) > 0:
+                        st.warning(
+                            f"⚠️ Found {len(within_file_dups)} repeated "
+                            f"Target+Well+Sample row(s) within a single file. They "
+                            f"are counted as extra replicates, which inflates n "
+                            f"and narrows the error bars."
+                        )
 
                 unique_samples = sorted(
                     st.session_state.data["Sample"].unique(), key=natural_sort_key
@@ -3489,17 +4491,33 @@ with tab1:
             st.warning(
                 "No standard housekeeping gene detected. Please select one manually."
             )
+            # Require an explicit choice. This used to be a plain selectbox over
+            # the targets in file order with index=0, and its result was assigned
+            # straight to hk_gene — so despite the warning, an ARBITRARY target
+            # was already the housekeeping gene, the metric displayed it, and
+            # run_full_analysis's `if not hk_gene:` guard was satisfied. On a
+            # plate whose reference gene lives in the companion file, everything
+            # was normalised to whichever target happened to be listed first.
+            _HK_PROMPT = "— select a housekeeping gene —"
+            _hk_options = [_HK_PROMPT] + all_genes
             default_idx = 0
             if st.session_state.get("hk_gene") in all_genes:
-                default_idx = all_genes.index(st.session_state.hk_gene)
-            st.session_state.hk_gene = st.selectbox(
+                default_idx = _hk_options.index(st.session_state.hk_gene)
+            _picked = st.selectbox(
                 "🔬 Select Housekeeping Gene",
-                all_genes,
+                _hk_options,
                 index=default_idx,
                 key="hk_select_manual",
                 help="Select the reference/housekeeping gene for normalization",
             )
-            col4.metric("HK Gene", st.session_state.hk_gene)
+            st.session_state.hk_gene = None if _picked == _HK_PROMPT else _picked
+            col4.metric("HK Gene", st.session_state.hk_gene or "—")
+            if st.session_state.hk_gene is None:
+                st.info(
+                    "Pick the housekeeping gene before running the analysis. If "
+                    "this plate's reference gene is in another file, upload both "
+                    "files together."
+                )
 
         st.subheader("Data Preview")
         st.dataframe(st.session_state.data.head(50), height=300)
@@ -3539,7 +4557,15 @@ with tab1:
             )
 
         if not warnings_found:
-            st.success("Data validation passed. No issues detected.")
+            # Guarded on non-empty: an empty plate trips none of the checks
+            # above, so it used to be congratulated with "validation passed".
+            if data is None or data.empty:
+                st.info(
+                    "No wells to validate — the uploaded file produced no "
+                    "usable rows."
+                )
+            else:
+                st.success("Data validation passed. No issues detected.")
 
 # ==================== TAB QC: QUALITY CONTROL ====================
 with tab_qc:
@@ -3567,8 +4593,27 @@ with tab_qc:
         # ==================== QC SUMMARY DASHBOARD ====================
         st.caption("Browse all CT values, review triplicates, and exclude outliers before analysis.")
 
+        # The block that used to sit here pre-applied the QC Settings widget
+        # values onto QualityControl's class attributes, because those widgets
+        # render ~80 lines BELOW this point and a class-attribute read here would
+        # otherwise have been one rerun stale. It was the workaround that made
+        # the thresholds process-global: a class attribute is shared by every
+        # browser session on the container, so one operator's setting became
+        # everyone's and survived a refresh.
+        #
+        # Both problems are gone for the same reason. qc_thresholds() reads the
+        # widget KEYS, and a widget's key is populated in session_state at the
+        # start of every rerun regardless of where in the script it renders — so
+        # the value is both current here and private to this session. Nothing
+        # writes to the class attributes any more; they are immutable defaults.
+
         # Get comprehensive QC stats using helper to get all excluded wells
-        qc_stats = get_qc_summary_stats(data, get_all_excluded_wells())
+        # The dict, not the flattened set: a flat set of well IDs excludes that
+        # plate coordinate for every gene and sample sharing it (see
+        # QualityControl.excluded_mask), which diverged from what DDCt uses.
+        qc_stats = get_qc_summary_stats(
+            data, st.session_state.get("excluded_wells", {})
+        )
 
         # Summary metrics — 2 rows of 3 for better readability
         row1_cols = st.columns(3)
@@ -3613,7 +4658,7 @@ with tab_qc:
                 f"{qc_stats.get('ct_min', 0):.1f} - {qc_stats.get('ct_max', 0):.1f}",
             )
             dist_cols[2].metric(
-                "High CT (>35)",
+                f"High CT (>{qc_thresholds()['ct_high']:g})",
                 qc_stats.get("high_ct_count", 0),
                 delta="check" if qc_stats.get("high_ct_count", 0) > 0 else None,
                 delta_color="off",
@@ -3641,10 +4686,18 @@ with tab_qc:
             )
 
             # ---- Inline QC Settings (collapsed) ----
+            # These widgets no longer assign onto QualityControl's class
+            # attributes. A class attribute is PROCESS state: one Cloud
+            # container runs one Python process and every browser session shares
+            # it, so one operator's thresholds became every concurrent
+            # operator's, and survived a refresh so a fresh session inherited
+            # them instead of the documented defaults. The widget keys ARE the
+            # per-session store (see _QC_THRESHOLD_WIDGETS) and the values are
+            # passed to the QC helpers as arguments.
             with st.expander("QC Settings", expanded=False):
                 thresh_col1, thresh_col2 = st.columns(2)
                 with thresh_col1:
-                    new_ct_high = st.number_input(
+                    st.number_input(
                         "High CT Threshold",
                         min_value=25.0, max_value=45.0,
                         value=float(QualityControl.CT_HIGH_THRESHOLD),
@@ -3652,9 +4705,7 @@ with tab_qc:
                         help="Wells with CT above this are flagged as low expression",
                         key="qc_settings_ct_high",
                     )
-                    QualityControl.CT_HIGH_THRESHOLD = new_ct_high
-
-                    new_ct_low = st.number_input(
+                    st.number_input(
                         "Low CT Threshold",
                         min_value=5.0, max_value=20.0,
                         value=float(QualityControl.CT_LOW_THRESHOLD),
@@ -3662,10 +4713,9 @@ with tab_qc:
                         help="Wells with CT below this are flagged as unusually high expression",
                         key="qc_settings_ct_low",
                     )
-                    QualityControl.CT_LOW_THRESHOLD = new_ct_low
 
                 with thresh_col2:
-                    new_cv = st.number_input(
+                    st.number_input(
                         "CV% Threshold",
                         min_value=1.0, max_value=20.0,
                         value=float(QualityControl.CV_THRESHOLD * 100),
@@ -3673,9 +4723,7 @@ with tab_qc:
                         help="Replicates with CV above this are flagged as high variability",
                         key="qc_settings_cv",
                     )
-                    QualityControl.CV_THRESHOLD = new_cv / 100
-
-                    new_hk_var = st.number_input(
+                    st.number_input(
                         "HK Variation Threshold",
                         min_value=0.5, max_value=3.0,
                         value=float(QualityControl.HK_VARIATION_THRESHOLD),
@@ -3683,10 +4731,19 @@ with tab_qc:
                         help="Housekeeping gene deviation threshold across samples",
                         key="qc_settings_hk_var",
                     )
-                    QualityControl.HK_VARIATION_THRESHOLD = new_hk_var
 
-                if st.button("🔄 Re-run QC with New Settings", type="primary", use_container_width=True, key="qc_rerun_settings"):
-                    st.rerun()
+                # The "Re-run QC with New Settings" button that used to sit here
+                # was a NO-OP: it only called st.rerun(), and changing a
+                # number_input already triggers a rerun that applies the new
+                # threshold before this point. Its label implied the settings
+                # above were inert until pressed, which was the opposite of
+                # true. Verified: the metric label changed to the new threshold
+                # BEFORE the button was pressed, and pressing it changed nothing.
+                st.caption(
+                    "Changes apply immediately — the QC counts above update as "
+                    "soon as a threshold moves. These settings belong to your "
+                    "session only."
+                )
 
             # ---- Automatic replicate QC (best-2-of-3) ----
             st.markdown("---")
@@ -3701,9 +4758,7 @@ with tab_qc:
                          "best 2 replicates (closest CT values).",
                 )
             if abs(new_thresh - _cur_thresh) > 1e-9:
-                st.session_state.excluded_wells_history.append(
-                    {k: set(v) for k, v in st.session_state.excluded_wells.items()}
-                )
+                _push_qc_history()
                 apply_auto_qc(new_thresh)
                 st.rerun()
 
@@ -3760,12 +4815,10 @@ with tab_qc:
                     edited_audit = st.data_editor(
                         pd.DataFrame(audit_rows),
                         disabled=["Gene", "Sample", "Status", "SD before", "SD after", "Dropped well(s)"],
-                        hide_index=True, use_container_width=True, key="auto_qc_audit_editor",
+                        hide_index=True, width='stretch', key="auto_qc_audit_editor",
                     )
                     if st.button("Apply overrides", key="apply_auto_qc_overrides", type="primary"):
-                        st.session_state.excluded_wells_history.append(
-                            {k: set(v) for k, v in st.session_state.excluded_wells.items()}
-                        )
+                        _push_qc_history()
                         for i, a in enumerate(audit):
                             dropped = a["dropped_wells"]
                             if not dropped:
@@ -3781,6 +4834,15 @@ with tab_qc:
                                         cur.discard(w)
                                     if not cur:
                                         del st.session_state.excluded_wells[key]
+                        # Overriding an auto-QC decision makes those wells the
+                        # user's, so auto-QC must not reclaim (or re-delete)
+                        # them on the next threshold change.
+                        _owned = st.session_state.get("_auto_qc_owned", {}) or {}
+                        for i, a in enumerate(audit):
+                            if a["dropped_wells"]:
+                                _owned.pop((a["Target"], a["Sample"]), None)
+                        st.session_state._auto_qc_owned = _owned
+                        _clear_well_checkbox_state()
                         st.rerun()
 
             st.markdown("---")
@@ -3869,26 +4931,23 @@ with tab_qc:
                 # Global quick actions
                 action_cols = st.columns(3)
                 with action_cols[0]:
-                    if st.button("Include All Visible", key="qc_incl_all_visible", use_container_width=True):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
+                    if st.button("Include All Visible", key="qc_incl_all_visible", width='stretch'):
+                        _push_qc_history()
                         for _, r in wells_all.iterrows():
                             include_well(r["Well"], r["Target"], r["Sample"])
+                        _clear_well_checkbox_state()
                         st.rerun()
                 with action_cols[1]:
-                    if st.button("Exclude All Visible", key="qc_excl_all_visible", use_container_width=True):
-                        st.session_state.excluded_wells_history.append(
-                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                        )
+                    if st.button("Exclude All Visible", key="qc_excl_all_visible", width='stretch'):
+                        _push_qc_history()
                         for _, r in wells_all.iterrows():
                             exclude_well(r["Well"], r["Target"], r["Sample"])
+                        _clear_well_checkbox_state()
                         st.rerun()
                 with action_cols[2]:
                     can_undo = len(st.session_state.excluded_wells_history) > 0
-                    if st.button("Undo Last Change", key="qc_undo_browser", use_container_width=True, disabled=not can_undo):
-                        if st.session_state.excluded_wells_history:
-                            st.session_state.excluded_wells = st.session_state.excluded_wells_history.pop()
+                    if st.button("Undo Last Change", key="qc_undo_browser", width='stretch', disabled=not can_undo):
+                        if _pop_qc_history():
                             st.rerun()
 
                 # Render per-gene expandable sections
@@ -3997,16 +5056,12 @@ with tab_qc:
                                 sample = row["Sample"]
                                 if not include and not is_well_excluded(well, gene, sample):
                                     if not changed:
-                                        st.session_state.excluded_wells_history.append(
-                                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                                        )
+                                        _push_qc_history()
                                         changed = True
                                     exclude_well(well, gene, sample)
                                 elif include and is_well_excluded(well, gene, sample):
                                     if not changed:
-                                        st.session_state.excluded_wells_history.append(
-                                            {k: v.copy() for k, v in st.session_state.excluded_wells.items()}
-                                        )
+                                        _push_qc_history()
                                         changed = True
                                     include_well(well, gene, sample)
                             if changed:
@@ -4017,40 +5072,54 @@ with tab_qc:
         # ==================== TAB 2: QC OVERVIEW (CONSOLIDATED) ====================
         with qc_tab2:
             st.subheader("QC Overview")
-            st.caption("Plate heatmap, auto-flagged wells, and pre-analysis summary at a glance.")
+            st.caption("Replicate statistics, auto-flagged wells, and pre-analysis summary at a glance.")
 
-            # ---- Section 1: Plate Heatmap ----
-            st.markdown("### Plate Heatmap")
-            heatmap_col1, heatmap_col2 = st.columns([2, 1])
+            # ---- Section 1: Replicate Statistics ----
+            # The 96-well plate heatmap that used to head this tab was removed:
+            # the app concatenates every uploaded file into one frame, so a
+            # plate coordinate like "A1" recurs once per plate and per target,
+            # and an 8x12 grid can only draw one reaction per cell. Every real
+            # export here concatenates, so the grid silently hid most of the
+            # reactions it appeared to summarise. The replicate table below is
+            # keyed by (Sample, Target) and has no such ceiling.
+            st.markdown("### Replicate Statistics")
 
-            with heatmap_col1:
-                render_plate_heatmaps(data, get_all_excluded_wells())
+            # Exclusions have to be applied here: get_replicate_stats takes
+            # no exclusion argument, and the Excel export pre-filters before
+            # calling it. The same "Replicate Statistics" table was therefore
+            # showing n=3 / High CV on screen while the workbook said n=2 /
+            # OK for the very same triplicate.
+            _rs_mask = QualityControl.excluded_mask(
+                data, st.session_state.get("excluded_wells", {})
+            )
+            rep_stats = get_replicate_stats(
+                data[~_rs_mask] if _rs_mask.any() else data
+            )
+            if not rep_stats.empty:
+                def highlight_status(row):
+                    if row["Status"] == "High CV":
+                        return ["background-color: #fff3cd"] * len(row)
+                    elif row["Status"] == "Low Expression":
+                        return ["background-color: #f8d7da"] * len(row)
+                    elif row["Status"] == "Check Signal":
+                        return ["background-color: #cce5ff"] * len(row)
+                    return [""] * len(row)
 
-            with heatmap_col2:
-                st.markdown("**Replicate Statistics**")
-                rep_stats = get_replicate_stats(data)
-                if not rep_stats.empty:
-                    def highlight_status(row):
-                        if row["Status"] == "High CV":
-                            return ["background-color: #fff3cd"] * len(row)
-                        elif row["Status"] == "Low Expression":
-                            return ["background-color: #f8d7da"] * len(row)
-                        elif row["Status"] == "Check Signal":
-                            return ["background-color: #cce5ff"] * len(row)
-                        return [""] * len(row)
-
-                    styled_stats = rep_stats.style.apply(highlight_status, axis=1)
-                    st.dataframe(styled_stats, height=400, use_container_width=True)
+                styled_stats = rep_stats.style.apply(highlight_status, axis=1)
+                st.dataframe(styled_stats, height=400, width='stretch')
+            else:
+                st.info("No replicate statistics to show for the current data.")
 
             # ---- Section 2: Flagged Wells (SD-based, matches Triplicate Browser) ----
             st.markdown("### Flagged Wells")
 
             # Use same SD-based flagging logic as the Triplicate Browser
-            _ov_excl_flat = set()
-            if isinstance(st.session_state.excluded_wells, dict):
-                for _ws in st.session_state.excluded_wells.values():
-                    _ov_excl_flat.update(_ws)
-            _ov_active = data[~data["Well"].isin(_ov_excl_flat)] if _ov_excl_flat else data
+            # Dict-aware: flattening to well IDs excluded the coordinate for
+            # every gene sharing it, so this list disagreed with the analysis.
+            _ov_mask = QualityControl.excluded_mask(
+                data, st.session_state.get("excluded_wells", {})
+            )
+            _ov_active = data[~_ov_mask] if _ov_mask.any() else data
 
             _ov_flagged_rows = []
             for (gene_t, sample_t), grp in _ov_active.groupby(["Target", "Sample"]):
@@ -4084,7 +5153,7 @@ with tab_qc:
                 st.dataframe(
                     flagged_overview,
                     hide_index=True,
-                    use_container_width=True,
+                    width='stretch',
                     column_config={
                         "CT": st.column_config.NumberColumn("CT", format="%.2f"),
                     },
@@ -4196,7 +5265,7 @@ with tab_qc:
                         ]
                         st.dataframe(
                             gene_rows[display_cols].reset_index(drop=True),
-                            use_container_width=True,
+                            width='stretch',
                             hide_index=True,
                         )
             else:
@@ -4223,19 +5292,16 @@ with tab_qc:
             can_undo = len(st.session_state.excluded_wells_history) > 0
             if st.button(
                 "↩️ Undo Last",
-                use_container_width=True,
+                width='stretch',
                 disabled=not can_undo,
                 key="global_undo",
             ):
-                if st.session_state.excluded_wells_history:
-                    st.session_state.excluded_wells = (
-                        st.session_state.excluded_wells_history.pop()
-                    )
+                if _pop_qc_history():
                     st.rerun()
 
         with status_cols[2]:
             if st.button(
-                "🔄 Refresh QC", use_container_width=True, key="global_refresh"
+                "🔄 Refresh QC", width='stretch', key="global_refresh"
             ):
                 st.rerun()
 
@@ -4270,8 +5336,16 @@ with tab2:
 
         # Show control structure
         with st.expander("📋 Control Structure for this Test"):
-            for ctrl_type, ctrl_name in config["controls"].items():
-                st.markdown(f"- **{ctrl_type.title()}**: {ctrl_name}")
+            # Only the real control roles. Iterating the whole dict printed
+            # "Compare_To: negative" and "Negative_Display: ..." as if they were
+            # two more controls — the first is a routing key and the second is
+            # display text reserved for the PPT writer — so 진정 appeared to have
+            # four controls where it has two.
+            for ctrl_type in ("baseline", "negative", "positive"):
+                ctrl_name = config["controls"].get(ctrl_type)
+                if ctrl_name:
+                    _shown = config["controls"].get(f"{ctrl_type}_display") or ctrl_name
+                    st.markdown(f"- **{ctrl_type.title()}**: {_shown}")
 
         # Sample mapping interface with professional layout
         st.markdown("### Sample Condition Mapping")
@@ -4292,10 +5366,23 @@ with tab2:
             )
             if new_samples:
                 st.session_state.sample_order = existing_order + new_samples
-            # Remove samples no longer in data
-            st.session_state.sample_order = [
+            # Remove samples no longer in data, and de-duplicate. A repeated
+            # sample makes the per-sample widget keys below collide, which
+            # Streamlit raises on — and because this was the only code that
+            # rewrites sample_order, a duplicate that got in (e.g. from the
+            # drag-reorder component echoing a stale list) left the Mapping tab
+            # raising on every render with no way back through the UI.
+            st.session_state.sample_order = list(dict.fromkeys(
                 s for s in st.session_state.sample_order if s in current_data_samples
-            ]
+            ))
+        # sample_order is pruned above but sample_mapping never was, and three
+        # places iterate the mapping rather than the order — excluded_samples, the
+        # duplicate-condition warning and the "Groups" metric — so stale entries
+        # from a previous file inflated the group count and could name conditions
+        # that are no longer on screen.
+        for _gone in [s for s in list(st.session_state.sample_mapping)
+                      if s not in current_data_samples]:
+            del st.session_state.sample_mapping[_gone]
 
         # Group type options
         group_types = ["Negative Control", "Positive Control", "Treatment"]
@@ -4322,10 +5409,23 @@ with tab2:
                 if label and sl == str(label).strip().lower():
                     grp = _role_to_group[role]
                     return grp if grp in group_types else "Treatment"
+            # Substring pass. This used to match in BOTH directions on any
+            # length, so a short sample name inside a dosed control label won:
+            # every real export here names samples "1".."21", and under 탄력 the
+            # sample named "1" became a Positive Control because "1" is inside
+            # "tgfβ 10 ng/ml" (under 진정, "4" inside "poly(i:c)+il-4"). The
+            # derived group reaches processed_data["Group"], the results table and
+            # the Excel Summary grouping, and analysis.py takes a pooled
+            # condition's group from its first sample — so one mis-grouped sample
+            # relabels a whole condition. Require at least 3 characters and a
+            # prefix/containment relation, which keeps "Non-treated 24h" and
+            # "Dexamethasone" matching while a bare number no longer does.
             for role in ("baseline", "negative", "positive"):
                 label = controls.get(role)
                 ll = str(label).strip().lower() if label else ""
-                if ll and (ll in sl or sl in ll):
+                if not ll or len(sl) < 3:
+                    continue
+                if ll.startswith(sl) or sl.startswith(ll) or ll in sl:
                     grp = _role_to_group[role]
                     return grp if grp in group_types else "Treatment"
             return "Treatment"
@@ -4346,7 +5446,11 @@ with tab2:
                 st.session_state.sample_mapping[sample] = entry
             entry.pop("concentration", None)
             entry.setdefault("include", True)
-            entry["group"] = _suggest_group(sample)
+            # Derive the group from the CONDITION name the user typed, falling
+            # back to the raw sample name. This was fed the raw sample name only,
+            # so renaming "1" to "Non-treated" never updated the group — the
+            # rename is precisely the point at which the role becomes knowable.
+            entry["group"] = _suggest_group(entry.get("condition") or sample)
 
         st.caption(
             "Choose which samples to include and name their conditions. "
@@ -4399,6 +5503,19 @@ with tab2:
                     placeholder="Enter condition name...",
                     max_chars=50,
                 )
+                # Strip before storing. analysis.py groups on this string exactly,
+                # so "Non-treated" and "Non-treated " (one pasted with a trailing
+                # space) became two conditions with visually identical bar labels
+                # — two n=3 bars each with its own p-value instead of one n=6 —
+                # and the duplicate-name notice compares raw strings, so it did
+                # not fire. The matching layer already strips (_suggest_group,
+                # the Overview _match), so only the grouping layer disagreed.
+                cond = (cond or "").strip()
+                if not cond:
+                    # An empty name pooled every sample into one "" condition,
+                    # making every fold change exactly 1.0.
+                    cond = sample
+                    st.caption("⚠️ Blank condition — using the sample name.")
                 st.session_state.sample_mapping[sample]["condition"] = cond
 
         # ---- Order (always available; reflects live into graphs and exports) ----
@@ -4444,7 +5561,24 @@ with tab2:
             # Guard: the component can return None (headless / first render).
             sorted_labels = sorted_labels or order_labels
 
-            new_order = [label_to_sample[lbl] for lbl in sorted_labels] + excluded_samples_list
+            # Translate labels back to samples defensively. sort_items is called
+            # without a key=, so after a condition rename it can echo the labels
+            # from before the rename; indexing label_to_sample directly then threw
+            # KeyError and took the whole Mapping tab down. A label the component
+            # invents or repeats must not drop or duplicate a sample either, so
+            # anything unrecognised is ignored and every included sample missing
+            # from the result is re-appended in its previous order.
+            new_order = []
+            for lbl in sorted_labels:
+                mapped = label_to_sample.get(lbl)
+                if mapped is not None and mapped not in new_order:
+                    new_order.append(mapped)
+            for s_ in included_order:
+                if s_ not in new_order:
+                    new_order.append(s_)
+            for s_ in excluded_samples_list:
+                if s_ not in new_order:
+                    new_order.append(s_)
             if new_order != st.session_state.sample_order:
                 st.session_state.sample_order = new_order
                 st.rerun()
@@ -4524,7 +5658,7 @@ with tab2:
                     for idx, s in enumerate(st.session_state.sample_order)
                 ]
             )
-            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+            st.dataframe(mapping_df, width='stretch', hide_index=True)
 
         # Run analysis
         st.subheader("Run Full Analysis (DDCt + Statistics)")
@@ -4560,27 +5694,72 @@ with tab2:
                     "**P-value References:** Used for statistical comparison (t-test). Choose one or two conditions for comparison."
                 )
 
+            # These four selectboxes carry SAMPLE KEYS as their options, with the
+            # condition name supplied by format_func. Condition names cannot be
+            # the option values: Streamlit derives a keyed widget's identity from
+            # its key alone and validates the stored value against the CURRENT
+            # options, so renaming the selected condition — or un-including its
+            # sample — removed that value from the list and Streamlit silently
+            # reset the widget to options[0] AND wrote it back to session_state.
+            # Every fold change and p-value was then recomputed against a
+            # reference the operator never chose, with analysis_stale still False
+            # and the summary panel re-rendering self-consistently, so nothing
+            # indicated the choice had been discarded (observed: p 0.0158 ->
+            # 0.000335, ** -> ***). A sample key survives a rename, so only the
+            # displayed label changes.
+            _ref_options = [sample_to_condition[c] for c in condition_list]
+            _cond_of = {
+                s: st.session_state.sample_mapping.get(s, {}).get("condition", s)
+                for s in _ref_options
+            }
+
+            def _fmt_cond(sample_key):
+                return _cond_of.get(sample_key, sample_key)
+
+            # Keying on sample identity stops a RENAME from silently moving the
+            # reference, but removal still can: un-including the reference
+            # sample, or losing it to QC, genuinely takes it out of the options,
+            # and Streamlit then resets the widget to options[0] and recomputes
+            # everything against it. That reset is legitimate — being silent
+            # about it is not.
+            for _wkey, _wlabel in (
+                ("ref_choice_ddct", "ΔΔCt reference"),
+                ("cmp_choice_pval", "p-value reference (*)"),
+                ("cmp_choice_pval_2", "p-value reference (#)"),
+                ("cmp_choice_pval_3", "p-value reference (†)"),
+            ):
+                _stored = st.session_state.get(_wkey)
+                if _stored is not None and _stored not in _ref_options:
+                    st.warning(
+                        f"The {_wlabel} was sample **{_stored}**, which is no "
+                        "longer included. It has been reset to "
+                        f"**{_fmt_cond(_ref_options[0])}**, so the fold changes "
+                        "and p-values below are relative to that instead."
+                    )
+
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1:
-                ref_condition = st.selectbox(
+                ref_sample_key = st.selectbox(
                     "🎯 ΔΔCt Reference Condition",
-                    condition_list,
+                    _ref_options,
                     index=0,
                     key="ref_choice_ddct",
+                    format_func=_fmt_cond,
                     help="Baseline for relative expression calculation",
                 )
-                ref_sample_key = sample_to_condition[ref_condition]
+                ref_condition = _fmt_cond(ref_sample_key)
                 st.caption(f"→ Sample: **{ref_sample_key}**")
 
             with col_r2:
-                cmp_condition = st.selectbox(
+                cmp_sample_key = st.selectbox(
                     "📈 P-value Reference 1 (*)",
-                    condition_list,
+                    _ref_options,
                     index=0,
                     key="cmp_choice_pval",
+                    format_func=_fmt_cond,
                     help="Primary control group for statistical testing (asterisk symbols)",
                 )
-                cmp_sample_key = sample_to_condition[cmp_condition]
+                cmp_condition = _fmt_cond(cmp_sample_key)
                 st.caption(f"→ Sample: **{cmp_sample_key}**")
 
             with col_r3:
@@ -4593,16 +5772,17 @@ with tab2:
                 )
 
                 if use_second_comparison:
-                    condition_list_2 = [c for c in condition_list if c != cmp_condition]
-                    if condition_list_2:
-                        cmp_condition_2 = st.selectbox(
+                    options_2 = [s for s in _ref_options if s != cmp_sample_key]
+                    if options_2:
+                        cmp_sample_key_2 = st.selectbox(
                             "P-value Reference 2 (#)",
-                            condition_list_2,
+                            options_2,
                             index=0,
                             key="cmp_choice_pval_2",
+                            format_func=_fmt_cond,
                             help="Secondary control group for statistical testing (hashtag symbols)",
                         )
-                        cmp_sample_key_2 = sample_to_condition[cmp_condition_2]
+                        cmp_condition_2 = _fmt_cond(cmp_sample_key_2)
                         st.caption(f"→ Sample: **{cmp_sample_key_2}**")
                     else:
                         st.warning("Need at least 3 conditions for dual comparison")
@@ -4620,17 +5800,22 @@ with tab2:
                 ) if use_second_comparison else False
 
                 if use_third_comparison:
-                    used = {cmp_condition, cmp_condition_2} if use_second_comparison and cmp_sample_key_2 else {cmp_condition}
-                    condition_list_3 = [c for c in condition_list if c not in used]
-                    if condition_list_3:
-                        cmp_condition_3 = st.selectbox(
+                    used = (
+                        {cmp_sample_key, cmp_sample_key_2}
+                        if use_second_comparison and cmp_sample_key_2
+                        else {cmp_sample_key}
+                    )
+                    options_3 = [s for s in _ref_options if s not in used]
+                    if options_3:
+                        cmp_sample_key_3 = st.selectbox(
                             "P-value Reference 3 (†)",
-                            condition_list_3,
+                            options_3,
                             index=0,
                             key="cmp_choice_pval_3",
+                            format_func=_fmt_cond,
                             help="Third control group for statistical testing (dagger symbols)",
                         )
-                        cmp_sample_key_3 = sample_to_condition[cmp_condition_3]
+                        cmp_condition_3 = _fmt_cond(cmp_sample_key_3)
                         st.caption(f"→ Sample: **{cmp_sample_key_3}**")
                     else:
                         st.warning("Need at least 4 conditions for triple comparison")
@@ -4663,11 +5848,15 @@ with tab2:
                 - Symbols: `*` p<0.05, `**` p<0.01, `***` p<0.001
                 - Respects QC exclusions (uses only included wells)
                 
-                **📏 Error Bars**  
-                - **SEM** (Standard Error of Mean): Shows precision of mean estimate = `SD / √n`
-                - **SD** (Standard Deviation): Shows data spread/variability
-                - Choose SEM for publication (smaller bars, shows reliability)
-                - Choose SD to show full data variation
+                **📏 Error Bars** (chosen in Graphs -> Stats)
+                - All options are plotted in the **fold-change domain**, matching
+                  the axis: the Ct-domain spread is transformed through the same
+                  asymmetric `2^-x` as the bar itself.
+                - **Livak ±SD**: spread of the target replicates.
+                - **±SEM**: `SD / √n` — precision of the mean.
+                - **95% CI**: t-based, `n-1` degrees of freedom.
+                - Spread comes from the **target** replicates only; housekeeping
+                  variability is not propagated into it.
                 """)
 
             stat_col1, stat_col2 = st.columns(2)
@@ -4686,17 +5875,17 @@ with tab2:
                 # Note: Widget with key="ttest_type" auto-syncs to session state
 
             with stat_col2:
-                error_bar_type = st.radio(
-                    "Error Bar Type",
-                    ["sem", "sd"],
-                    format_func=lambda x: "SEM (Standard Error of Mean)"
-                    if x == "sem"
-                    else "SD (Standard Deviation)",
-                    index=0,
-                    key="error_bar_type",
-                    help="SEM shows precision of mean estimate; SD shows data variability",
+                # The "Error Bar Type" radio that used to live here wrote
+                # st.session_state["error_bar_type"], which NOTHING read — while
+                # the help text above told the user to pick SEM for publication.
+                # They picked SEM, exported, and got the default bars with a
+                # caption saying so. The live control is "Error bar type" in the
+                # Graphs tab's Stats sub-tab (graph_settings["error_bar_mode"]).
+                st.info(
+                    "Error bars are chosen in **Graphs -> Stats -> Error bar "
+                    "type** (Livak +/-SD, +/-SEM, or 95% CI). The choice applies "
+                    "to every gene and is printed under each chart."
                 )
-                # Note: Widget with key="error_bar_type" auto-syncs to session state
 
             # Visual summary
             col_sum1, col_sum2, col_sum3 = st.columns([1, 2, 1])
@@ -4721,7 +5910,7 @@ with tab2:
             st.session_state['_last_cmp_sample_key_3'] = cmp_sample_key_3 if use_third_comparison else None
 
             # Run button
-            if st.button("Run Full Analysis", type="primary", use_container_width=True):
+            if st.button("Run Full Analysis", type="primary", width='stretch'):
                 ok = AnalysisEngine.run_full_analysis(
                     ref_sample_key,
                     cmp_sample_key,
@@ -4794,9 +5983,19 @@ with tab_ov:
                     return c
             return None
 
-        bench_default = _match(controls.get("positive"))
+        bench_default = _match(controls.get("positive")) or _match(
+            controls.get("positive_display")
+        )
+        # "baseline" is not a key in any EFFICACY_CONFIG entry, so that lookup was
+        # dead; the real keys are negative / negative_display / positive /
+        # compare_to. Missing negative_display is what let the INDUCER (e.g. the
+        # condition named "UVB 40 mj/cm2" while the config says "UVB only") fall
+        # through into `treatments` — where, being by construction the biggest
+        # mover vs the untreated control, it was auto-selected as the highlighted
+        # test article and graded as if it were the sample.
         control_conditions = {ref_condition} | {
-            _match(controls.get(r)) for r in ("negative", "positive", "baseline")
+            _match(controls.get(r))
+            for r in ("negative", "negative_display", "positive", "positive_display")
         }
         control_conditions.discard(None)
         treatments = [c for c in conditions if c not in control_conditions] or [
@@ -4847,8 +6046,11 @@ with tab_ov:
 
         # experiment header
         cell = cfg.get("cell", "—")
-        desc = cfg.get("description", "") or ""
-        eng = desc.split(" - ")[0].split(" – ")[0].strip()
+        # No EFFICACY_CONFIG entry defines "description", so this subtitle was
+        # always an empty span. Show the treatment time instead, which every
+        # entry does define and which this tab displayed nowhere.
+        _tt = cfg.get("treatment_time", "")
+        eng = f"{_tt} treatment" if _tt else ""
         st.markdown(
             "<div style='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap'>"
             f"<span style='font-size:22px;font-weight:700'>{eff or 'Results'}</span>"
@@ -4862,21 +6064,61 @@ with tab_ov:
         )
 
         # benchmark + highlight selectors (auto, overridable)
+        bopts = ["(none)"] + conditions
+
+        # Both are AUTO-SELECTED, and a keyed widget derives its identity from
+        # the key alone — so the recomputed index= was thrown away on every
+        # rerun after the first and these never re-selected. _RESET_WIDGET_KEYS
+        # clears them on a NEW UPLOAD, but switching efficacy category or
+        # reference condition moves the auto-default without clearing anything:
+        # arriving at 탄력 by switching left the benchmark on "(none)" showing
+        # "Median % of benchmark —", while starting on 탄력 picked
+        # "TGFβ 10 ng/ml" and showed 252%. Same data, two answers, and the help
+        # text promised auto-selection either way.
+        #
+        # Re-seed the widget key when the auto-default itself moves, which is
+        # the pattern tasks/lessons.md prescribes: assign the key BEFORE
+        # instantiation. index= is dropped entirely — passing it alongside a
+        # session_state write is what triggers Streamlit's "created with a
+        # default value but also had its value set" warning.
+        _auto_sig = (
+            st.session_state.get("selected_efficacy"),
+            st.session_state.get("analysis_ref_condition"),
+            bench_default,
+            hl_default,
+        )
+        if st.session_state.get("_overview_auto_sig") != _auto_sig:
+            st.session_state["_overview_auto_sig"] = _auto_sig
+            st.session_state["overview_benchmark"] = (
+                bench_default if bench_default in bopts else "(none)"
+            )
+            if treatments:
+                st.session_state["overview_highlight"] = (
+                    hl_default if hl_default in treatments else treatments[0]
+                )
+        # An override can also be invalidated by the conditions changing under
+        # it; without this the stored value is silently reset to options[0].
+        elif st.session_state.get("overview_benchmark") not in bopts:
+            st.session_state["overview_benchmark"] = (
+                bench_default if bench_default in bopts else "(none)"
+            )
+
         sc1, sc2 = st.columns(2)
         with sc1:
-            bopts = ["(none)"] + conditions
-            bidx = bopts.index(bench_default) if bench_default in bopts else 0
             benchmark = st.selectbox(
-                "Benchmark (positive control)", bopts, index=bidx,
+                "Benchmark (positive control)", bopts,
                 key="overview_benchmark",
                 help="Auto-selected from the efficacy category's positive control; override if needed.",
             )
             benchmark = None if benchmark == "(none)" else benchmark
         with sc2:
             if treatments:
-                hidx = treatments.index(hl_default) if hl_default in treatments else 0
+                if st.session_state.get("overview_highlight") not in treatments:
+                    st.session_state["overview_highlight"] = (
+                        hl_default if hl_default in treatments else treatments[0]
+                    )
                 highlight = st.selectbox(
-                    "Highlight active", treatments, index=hidx, key="overview_highlight",
+                    "Highlight active", treatments, key="overview_highlight",
                     help="Test article summarized in the verdict and %-of-benchmark.",
                 )
             else:
@@ -4906,7 +6148,16 @@ with tab_ov:
             pct = None
             if benchmark and highlight:
                 bf = _fold(g, benchmark)
-                if bf is not None and hl_fold is not None and abs(bf - 1) > 1e-6:
+                # Guarding only against bf == 1 made this meaningless whenever the
+                # benchmark barely moved: a positive control at 1.01x turned a
+                # sample at 1.50x into "+4999%". And when the two moved in
+                # OPPOSITE directions the ratio came out negative, which then
+                # cancelled a genuine positive in the flat mean below. Require the
+                # benchmark to have moved at least 10% and in the same direction
+                # as the sample for the ratio to mean anything.
+                if (bf is not None and hl_fold is not None
+                        and abs(bf - 1) >= 0.10
+                        and (bf - 1) * (hl_fold - 1) > 0):
                     pct = (hl_fold - 1) / (bf - 1) * 100
                     bench_pcts.append(pct)
             row = {"Gene": g}
@@ -4920,34 +6171,70 @@ with tab_ov:
             rows.append(row)
         matrix = pd.DataFrame(rows)
 
+        # Genes with no expected_direction entry for this category contributed to
+        # neither `passes` nor `graded`, so they vanished from the headline
+        # entirely — a panel where two markers matched and two moved the WRONG way
+        # still read "2/2 markers moved in the expected direction" behind a green
+        # tick. Name them instead of dropping them.
+        ungraded = [g for g in gene_list if not expected_map.get(g)]
+
         # verdict banner
         if graded:
-            allpass = passes == graded
+            allpass = passes == graded and not ungraded
             color = "#2f7d5b" if allpass else "#B8860B"
-            avg_bench = (f" · reaches ~{sum(bench_pcts)/len(bench_pcts):.0f}% of {benchmark}"
+            # Median: these are ratios, so one gene with a small benchmark
+            # denominator dominates a mean.
+            avg_bench = (f" · reaches ~{statistics.median(bench_pcts):.0f}% of {benchmark}"
                          if bench_pcts else "")
+            _ungraded_note = (
+                f" · {len(ungraded)} not graded: {', '.join(ungraded)}"
+                if ungraded else ""
+            )
             st.markdown(
                 "<div style='display:flex;gap:14px;align-items:center;background:var(--surface,#fff);"
                 "border:1px solid var(--line,#e6e1db);border-left:4px solid " + color + ";"
                 "border-radius:12px;padding:14px 18px;margin:14px 0'>"
                 "<div style='font-size:18px;font-weight:700;color:" + color + "'>"
                 + ("✓" if allpass else "!") + "</div><div>"
-                f"<div style='font-weight:700'>{passes}/{graded} markers moved in the expected direction</div>"
-                f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active <b>{highlight}</b>{avg_bench}.</div>"
+                f"<div style='font-weight:700'>{passes}/{graded} graded markers moved "
+                f"in the expected direction "
+                f"<span style='font-weight:400;color:var(--ink-faint)'>"
+                f"(of {len(gene_list)} analysed)</span></div>"
+                f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active "
+                f"<b>{highlight}</b>{avg_bench}{_ungraded_note}.</div>"
                 "</div></div>",
                 unsafe_allow_html=True,
             )
-        else:
+            if ungraded:
+                st.caption(
+                    f"⚠️ No expected direction is defined for {', '.join(ungraded)} "
+                    f"in **{st.session_state.selected_efficacy}**, so they are not "
+                    f"part of the verdict — check their fold changes in the matrix "
+                    f"below before concluding."
+                )
+        elif not expected_map:
             st.info(
                 f"{sig_count}/{len(gene_list)} genes significant vs control "
                 "(no expected-direction defined for this category)."
+            )
+        else:
+            # The category DOES define expected directions — none of these gene
+            # names are in it. Saying "none defined for this category" here was
+            # simply false, and hid a spelling mismatch.
+            st.warning(
+                f"{sig_count}/{len(gene_list)} genes significant vs control. "
+                f"No verdict was graded: none of these marker names "
+                f"({', '.join(gene_list)}) appear in "
+                f"**{st.session_state.selected_efficacy}**'s expected-direction "
+                f"list ({', '.join(sorted(expected_map))}) — likely a spelling "
+                f"difference between the plate and the catalog."
             )
 
         m1, m2, m3 = st.columns(3)
         m1.metric("Markers as expected", f"{passes}/{graded}" if graded else "—")
         m2.metric("Significant vs control", f"{sig_count}/{len(gene_list)}")
-        m3.metric("Avg % of benchmark",
-                  f"{sum(bench_pcts)/len(bench_pcts):.0f}%" if bench_pcts else "—")
+        m3.metric("Median % of benchmark",
+                  f"{statistics.median(bench_pcts):.0f}%" if bench_pcts else "—")
 
         # gene panel (auto-styled small multiples, consistent with Graphs)
         st.markdown("##### Gene panel")
@@ -4960,12 +6247,12 @@ with tab_ov:
                 if g in _ov_errs:
                     st.warning(f"{g}: chart unavailable ({_ov_errs[g]})")
                 elif g in _ov_figs:
-                    st.plotly_chart(_ov_figs[g], use_container_width=True, key=f"ov_fig_{g}")
+                    st.plotly_chart(_ov_figs[g], width='stretch', key=f"ov_fig_{g}")
 
         # fold-change matrix
         st.markdown("##### Fold-change matrix")
         st.caption("Fold change vs reference; significance markers are vs the p-value comparison control.")
-        st.dataframe(matrix, use_container_width=True, hide_index=True)
+        st.dataframe(matrix, width='stretch', hide_index=True)
         st.caption("Download the full Excel / PowerPoint report from the **Export** tab.")
 
 
@@ -4987,9 +6274,15 @@ with tab3:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Genes", len(st.session_state.processed_data))
         col2.metric("Conditions", all_results["Condition"].nunique())
-        sig_count = (all_results["p_value"] < 0.05).sum()
-        total_testable = all_results["p_value"].notna().sum()
-        col3.metric("Sig. (p<0.05)", f"{sig_count}/{total_testable}")
+        # Guarded like _pval() in the Overview tab: if no gene carries a p_value
+        # (a stats step that could not run at all), report it as unavailable
+        # rather than raising KeyError and taking the whole tab down.
+        if "p_value" in all_results.columns:
+            sig_count = (all_results["p_value"] < 0.05).sum()
+            total_testable = all_results["p_value"].notna().sum()
+            col3.metric("Sig. (p<0.05)", f"{sig_count}/{total_testable}")
+        else:
+            col3.metric("Sig. (p<0.05)", "—")
         excluded_well_count = sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells)
         col4.metric("Excluded", excluded_well_count)
 
@@ -4997,8 +6290,9 @@ with tab3:
         with st.expander("🔬 Analysis Provenance (reproducibility record)", expanded=False):
             st.code(format_provenance_text(_current_provenance()), language=None)
             st.caption(
-                "This record — method, reference gene/condition, comparisons, test, "
-                "and every excluded well — is downloadable on the Export tab."
+                "This record — method, reference gene/condition, comparisons, "
+                "test, and every excluded well — ships as the **Provenance** "
+                "sheet of the Excel report, together with the MIQE checklist."
             )
 
         # Show results per gene
@@ -5039,9 +6333,11 @@ with tab3:
                 # Filter to existing columns
                 display_df = gene_df[[c for c in display_cols if c in gene_df.columns]]
 
-                # Style the dataframe
-                styled = display_df.style.background_gradient(
-                    subset=["Fold_Change"], cmap="RdYlGn", vmin=0, vmax=3
+                # Style the dataframe. Not Styler.background_gradient: it
+                # imports matplotlib at call time, which this project does not
+                # ship (see qpcr/utils.gradient_styles).
+                styled = display_df.style.apply(
+                    gradient_styles, subset=["Fold_Change"], vmin=0, vmax=3
                 ).format(
                     {
                         "Fold_Change": "{:.3f}",
@@ -5059,12 +6355,12 @@ with tab3:
                     na_rep="—",
                 )
 
-                st.dataframe(styled, use_container_width=True)
+                st.dataframe(styled, width='stretch')
                 st.download_button(
                     "⬇️ Download CSV",
                     data=display_df.to_csv(index=False).encode("utf-8-sig"),
                     file_name=f"{gene}_results_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv", key=f"csv_{gene}", use_container_width=True,
+                    mime="text/csv", key=f"csv_{gene}", width='stretch',
                 )
 
         # ---- Auto-Analyze (deterministic, reproducible — no external LLM) ----
@@ -5085,7 +6381,7 @@ with tab3:
         # collapsed). On Streamlit Cloud's constrained tier that repeated native
         # + memory load crashed the process with a segfault. Run once on click,
         # cache in session_state, and render from the cache.
-        if st.button("▶ Run Auto-Analyze", key="run_auto_analyze", use_container_width=True):
+        if st.button("▶ Run Auto-Analyze", key="run_auto_analyze", width='stretch'):
             with st.spinner("Analyzing..."):
                 st.session_state["_auto_analyze"] = {
                     "screening": screen_data(st.session_state.get("data"), st.session_state.get("hk_gene")),
@@ -5133,7 +6429,7 @@ with tab3:
                              "Recommended test": v["test"], "Why": v["reason"]}
                             for g, v in _recs.items()
                         ]),
-                        use_container_width=True, hide_index=True,
+                        width='stretch', hide_index=True,
                     )
                     st.caption("Advisory — the app computes the test selected in the Mapping "
                                "tab; use this to sanity-check that choice.")
@@ -5183,7 +6479,7 @@ with tab4:
             with gene_cols[idx % len(gene_cols)]:
                 if st.button(
                     f"{'✓ ' if idx == st.session_state.selected_gene_idx else ''}{gene}",
-                    key=f"gene_btn_{gene}", use_container_width=True,
+                    key=f"gene_btn_{gene}", width='stretch',
                     type="primary" if idx == st.session_state.selected_gene_idx else "secondary",
                 ):
                     st.session_state.selected_gene_idx = idx
@@ -5261,19 +6557,17 @@ with tab5:
             excl = st.session_state.get("excluded_wells", {})
 
             if st.session_state.get("data") is not None:
-                excl_flat = set()
-                if isinstance(excl, dict):
-                    for well_set in excl.values():
-                        excl_flat.update(well_set)
-                elif excl:
-                    excl_flat = set(excl)
-
+                # Dict-aware, matching the QC tab: flattening the per-(gene,
+                # sample) exclusions to bare well IDs dropped that coordinate for
+                # every gene sharing it, so the workbook's QC sheet disagreed
+                # with both the screen and the DDCt the report is built on.
                 qc_data = st.session_state.data.copy()
-                if excl_flat:
-                    qc_data = qc_data[~qc_data["Well"].isin(excl_flat)]
+                _exp_mask = QualityControl.excluded_mask(qc_data, excl)
+                if _exp_mask.any():
+                    qc_data = qc_data[~_exp_mask]
 
                 replicate_stats_df = get_replicate_stats(qc_data)
-                qc_summary = get_qc_summary_stats(st.session_state.data, excl_flat or None)
+                qc_summary = get_qc_summary_stats(st.session_state.data, excl or None)
                 qc_stats = qc_summary if qc_summary else None
 
             return qc_stats, replicate_stats_df, excl
@@ -5310,6 +6604,79 @@ with tab5:
                 "field will be blank. Fill it in before sending the report out."
             )
 
+        # ---- Staleness guard for generated files ----
+        # Generating a report parks the bytes in session_state and the download
+        # button serves them until the next generate. Nothing invalidated them, so
+        # editing a chart (or re-running the analysis) and then pressing Download
+        # handed over a file built from the previous state — under a filename
+        # stamped with the current timestamp. Fingerprint what a report depends on
+        # and refuse to serve a file that no longer matches.
+        # "Date" is excluded: it is datetime.now() to the minute, so including it
+        # would expire every report after 60 seconds for no reason.
+        _export_fp = _digest({
+            "params": {k: v for k, v in analysis_params.items() if k != "Date"},
+            "settings": st.session_state.get("graph_settings"),
+            "display_names": st.session_state.get("gene_display_names"),
+            # Reordering samples is a drag-and-drop that changes every chart's
+            # bar order, but it is deliberately kept out of the analysis
+            # snapshot, so without it here a reordered panel still served the
+            # previously generated deck.
+            "order": st.session_state.get("sample_order"),
+            "genes": {
+                g: _df_fingerprint(df)
+                for g, df in st.session_state.processed_data.items()
+            },
+            "bar_settings": {
+                g: st.session_state.get(f"{g}_bar_settings")
+                for g in st.session_state.processed_data
+            },
+            # Staleness is part of the identity of a generated file. Without it
+            # an export built from superseded results fingerprints that same
+            # superseded state and therefore matches itself, so _get_export
+            # vouched for it. A file made while stale must never look current.
+            "stale": bool(st.session_state.get("analysis_stale")),
+            # The gene-image render parameters. These were absent, so changing
+            # the format or the pixel size left the cached images looking
+            # current and the download served the PREVIOUS render — at the old
+            # size, in the old format. Width/Height were also unkeyed, so their
+            # values were not addressable here at all.
+            "img_fmt": st.session_state.get("pub_img_format"),
+            "img_w": st.session_state.get("pub_img_width"),
+            "img_h": st.session_state.get("pub_img_height"),
+        })
+
+        def _put_export(slot: str, data) -> None:
+            st.session_state[slot] = {"fp": _export_fp, "data": data}
+
+        def _get_export(slot: str):
+            """Return ``(data, is_stale)`` for a previously generated export."""
+            entry = st.session_state.get(slot)
+            if not isinstance(entry, dict) or "data" not in entry:
+                return None, False
+            # _digest returns None when the state cannot be hashed; treat an
+            # unknown fingerprint as stale rather than vouching for the file.
+            if _export_fp is None or entry.get("fp") != _export_fp:
+                return None, True
+            return entry["data"], False
+
+        # A deliverable must never be built from results the app already knows
+        # are superseded. analysis_stale was written in one place and read in
+        # none, so an export generated after a change that could not be re-run
+        # carried the OLD numbers while _current_provenance() reported the NEW
+        # QC state beside them: the reproducibility record asserted a state that
+        # never produced those values, and nothing on the artifact said so.
+        # Generation is blocked until the analysis matches its inputs again.
+        _stale = bool(st.session_state.get("analysis_stale"))
+        if _stale:
+            st.error(
+                "**These results are out of date.** The inputs changed and the "
+                "analysis could not be re-run, so the numbers below no longer "
+                "match the current QC, mapping and settings. Report generation "
+                "is disabled until you re-run the analysis from the **Mapping** "
+                "tab — otherwise the report would carry the old numbers beside "
+                "a provenance record describing the new state."
+            )
+
         # ---- Reports (Excel + PowerPoint only) ----
         st.subheader("Reports")
 
@@ -5317,28 +6684,44 @@ with tab5:
         with rpt_cols[0]:
             # Gated behind a button + spinner: export_to_excel post-processes chart
             # XML per gene, so running it on every rerun would be wasteful.
-            if st.button("Generate Excel report", key="gen_excel", use_container_width=True):
+            # `and not _stale` as well as `disabled`: disabled is only a UI
+            # affordance, and a programmatic or already-queued click still
+            # reaches the handler. The banner above says why nothing happened.
+            if st.button("Generate Excel report", key="gen_excel", width='stretch',
+                         disabled=_stale) and not _stale:
                 with st.spinner("Building Excel report..."):
                     try:
                         _qc, _rep, _excl = _build_export_extras()
-                        st.session_state["_excel_export"] = export_to_excel(
+                        _put_export("_excel_export", export_to_excel(
                             st.session_state.data, st.session_state.processed_data,
                             analysis_params, st.session_state.sample_mapping,
                             qc_stats=_qc, replicate_stats=_rep, excluded_wells=_excl,
                             gene_display_names=st.session_state.get("gene_display_names", {}),
-                        )
+                            # The PPT writer already receives these; Excel did
+                            # not, so the workbook silently plotted SD whatever
+                            # the operator selected.
+                            graph_settings=st.session_state.get("graph_settings", {}),
+                            provenance=_current_provenance(),
+                        ))
                     except Exception as e:
                         st.error(f"Excel generation failed: {e}")
-            if "_excel_export" in st.session_state:
+            _xl_data, _xl_stale = _get_export("_excel_export")
+            if _xl_data is not None:
                 st.download_button(
-                    "Download Excel report", data=st.session_state["_excel_export"],
+                    "Download Excel report", data=_xl_data,
                     file_name=f"qPCR_{efficacy}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
+                    width='stretch',
+                )
+            elif _xl_stale:
+                st.caption(
+                    "Results or chart settings changed since the last Excel report — "
+                    "generate it again to download the current version."
                 )
 
         with rpt_cols[1]:
-            if st.button("Generate PowerPoint", key="gen_ppt", use_container_width=True):
+            if st.button("Generate PowerPoint", key="gen_ppt", width='stretch',
+                         disabled=_stale) and not _stale:
                 with st.spinner("Generating PPT..."):
                     try:
                         ppt_bytes = PPTGenerator.generate_presentation(
@@ -5347,17 +6730,22 @@ with tab5:
                             gene_display_names=st.session_state.get("gene_display_names", {}),
                         )
                         if ppt_bytes:
-                            st.session_state["_ppt_export"] = ppt_bytes
+                            _put_export("_ppt_export", ppt_bytes)
                     except Exception as e:
                         st.error(f"PPT generation failed: {e}")
-            if "_ppt_export" in st.session_state:
-                ppt_data = st.session_state["_ppt_export"]
+            ppt_data, _ppt_stale = _get_export("_ppt_export")
+            if ppt_data is not None:
                 st.download_button(
                     "Download PowerPoint",
                     data=ppt_data.getvalue() if hasattr(ppt_data, "getvalue") else ppt_data,
                     file_name=f"qPCR_Report_{efficacy}_{timestamp}.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True,
+                    width='stretch',
+                )
+            elif _ppt_stale:
+                st.caption(
+                    "Results or chart settings changed since the last PowerPoint — "
+                    "generate it again to download the current version."
                 )
 
         # ---- Gene Images ----
@@ -5368,9 +6756,14 @@ with tab5:
         with img_col1:
             img_format = st.selectbox("Format", ["PNG (300 DPI)", "SVG (Vector)", "PDF (Vector)"], key="pub_img_format")
         with img_col2:
-            img_width = st.number_input("Width (px)", min_value=400, max_value=3000, value=1200, step=100)
+            # Keyed so the value is addressable and can reach _export_fp.
+            img_width = st.number_input(
+                "Width (px)", min_value=400, max_value=3000, value=1200,
+                step=100, key="pub_img_width")
         with img_col3:
-            img_height = st.number_input("Height (px)", min_value=300, max_value=2000, value=800, step=100)
+            img_height = st.number_input(
+                "Height (px)", min_value=300, max_value=2000, value=800,
+                step=100, key="pub_img_height")
 
         if st.session_state.graphs:
             fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
@@ -5378,7 +6771,8 @@ with tab5:
             scale = 3 if fmt == "png" else 1
             # Rendering each figure launches headless Chrome (~seconds each), so gate
             # it behind an explicit button instead of re-rendering on every rerun.
-            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images", use_container_width=True):
+            if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images",
+                         width='stretch', disabled=_stale) and not _stale:
                 rendered, failed = {}, []
                 prog = st.progress(0.0, text="Rendering images...")
                 genes = list(st.session_state.graphs.items())
@@ -5396,27 +6790,50 @@ with tab5:
                         failed.append(f"{gene}: {e}")
                     prog.progress((idx + 1) / len(genes), text=f"Rendered {idx + 1}/{len(genes)}")
                 prog.empty()
-                st.session_state["_gene_images"] = {"fmt": fmt, "images": rendered}
+                _put_export("_gene_images", {"fmt": fmt, "images": rendered})
                 if failed:
                     st.warning("Some images failed:\n" + "\n".join(failed))
 
-            cached = st.session_state.get("_gene_images")
+            cached, _img_stale = _get_export("_gene_images")
+            if _img_stale:
+                st.caption(
+                    "Results or chart settings changed since these images were "
+                    "rendered — generate them again to download the current version."
+                )
             if cached and cached.get("images"):
                 _cfmt = cached["fmt"]
                 _cmime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[_cfmt]
                 today = datetime.now().strftime("%Y%m%d")
+                # Display name, not the raw target: Excel and PPT honour the
+                # rename and only the images did not. Sanitised because a target
+                # containing "/" became a directory inside the zip.
+                #
+                # Built with a uniqueness counter rather than a dict
+                # comprehension keyed on the stem: two genes renamed to the same
+                # display name collapsed to ONE entry and a gene vanished from
+                # the download silently, while its own per-gene button still
+                # worked. _sanitize_sheet_name already takes a used-names set for
+                # exactly this reason on the Excel side.
+                _zip_entries = {}
+                _used_stems: dict = {}
+                for _g, _b in cached["images"].items():
+                    _stem = _safe_image_stem(_g)
+                    _n = _used_stems.get(_stem, 0) + 1
+                    _used_stems[_stem] = _n
+                    _name = _stem if _n == 1 else f"{_stem}_{_n}"
+                    _zip_entries[f"{_name}.{_cfmt}"] = _b
                 st.download_button(
-                    f"⬇️ Download All Images (.zip, {len(cached['images'])})",
-                    data=build_zip({f"{g}.{_cfmt}": b for g, b in cached["images"].items()}),
+                    f"⬇️ Download All Images (.zip, {len(_zip_entries)})",
+                    data=build_zip(_zip_entries),
                     file_name=f"qPCR_images_{efficacy}_{today}.zip",
-                    mime="application/zip", use_container_width=True, key="dl_images_zip",
+                    mime="application/zip", width='stretch', key="dl_images_zip",
                 )
                 img_cols = st.columns(min(len(cached["images"]), 4))
                 for idx, (gene, img_bytes) in enumerate(cached["images"].items()):
                     with img_cols[idx % len(img_cols)]:
-                        st.download_button(label=f"{gene}.{_cfmt}", data=img_bytes,
-                            file_name=f"{gene}_{today}.{_cfmt}",
-                            mime=_cmime, key=f"img_{gene}", use_container_width=True)
+                        st.download_button(label=f"{_safe_image_stem(gene)}.{_cfmt}", data=img_bytes,
+                            file_name=f"{_safe_image_stem(gene)}_{today}.{_cfmt}",
+                            mime=_cmime, key=f"img_{gene}", width='stretch')
     else:
         st.warning("Complete analysis first.")
 

@@ -1,38 +1,119 @@
 """QualityControl — QC checks, outlier detection, and triplicate statistics.
 
-Provides Grubbs test, plate heatmap, replicate stats, and well-level diagnostics.
+Provides Grubbs test, replicate stats, and well-level diagnostics.
 No Streamlit dependency — all methods are pure computation.
 """
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 from scipy import stats
 from typing import Tuple
 
 
 class QualityControl:
+    # IMMUTABLE DEFAULTS. Do NOT reassign these at runtime.
+    #
+    # The QC Settings widgets used to write straight onto these class
+    # attributes. A class attribute is PROCESS state while a Streamlit session
+    # is not: one container runs one Python process and every browser session
+    # shares module and class state, so one user's thresholds silently became
+    # every concurrent user's thresholds — and persisted across a refresh, so a
+    # fresh session inherited them instead of these documented defaults. On a
+    # validated instrument tool that is also a provenance problem:
+    # build_provenance would record thresholds the operator never set.
+    #
+    # They feed QC DISPLAY and the provenance record, not exclusion —
+    # apply_auto_qc passes its own sd_threshold explicitly to
+    # auto_select_replicates — so no published fold change moved. That is what
+    # makes this Major rather than Critical.
+    #
+    # Callers now pass a per-session `thresholds` dict; these remain the
+    # fallback. See resolve_thresholds.
     CT_HIGH_THRESHOLD = 35.0
     CT_LOW_THRESHOLD = 10.0
     CV_THRESHOLD = 0.05
     HK_VARIATION_THRESHOLD = 1.0
+
+    THRESHOLD_KEYS = ("ct_high", "ct_low", "cv", "hk_variation")
+
     GRUBBS_ALPHA = 0.05
 
     @staticmethod
+    def resolve_thresholds(thresholds: dict = None) -> dict:
+        """Fill a partial per-session threshold dict from the class defaults.
+
+        Accepts None so every method keeps working for callers that do not care
+        (the tests, and any pure-computation use), while the app threads the
+        session's own values through.
+        """
+        base = {
+            "ct_high": QualityControl.CT_HIGH_THRESHOLD,
+            "ct_low": QualityControl.CT_LOW_THRESHOLD,
+            "cv": QualityControl.CV_THRESHOLD,
+            "hk_variation": QualityControl.HK_VARIATION_THRESHOLD,
+        }
+        if not thresholds:
+            return base
+        for key in QualityControl.THRESHOLD_KEYS:
+            value = thresholds.get(key)
+            if value is not None:
+                try:
+                    base[key] = float(value)
+                except (TypeError, ValueError):
+                    pass
+        return base
+
+    @staticmethod
+    def excluded_mask(df: pd.DataFrame, excluded_wells) -> pd.Series:
+        """Boolean mask of the rows excluded by ``excluded_wells``.
+
+        Accepts a flat set of well IDs OR the per-(gene, sample) dict the app
+        actually stores. The dict form is what makes this correct: ``Well`` is the
+        raw plate coordinate with no per-file disambiguation, and the app's data
+        frame is a concat of every uploaded file, so "A1" recurs once per plate
+        (and once per target on a multiplex plate). Every QC *display* path used
+        to flatten the dict to a bare set of well IDs, which then excluded that
+        coordinate for EVERY gene and sample sharing it — so the QC screen showed
+        a housekeeping triplicate at n=2 while ΔΔCt used all three wells. Two
+        plates uploaded together is the normal workflow here, so this was live.
+        """
+        if df is None or len(df) == 0:
+            return pd.Series(dtype=bool, index=getattr(df, "index", None))
+        if not excluded_wells:
+            return pd.Series(False, index=df.index)
+        if isinstance(excluded_wells, dict):
+            if not {"Target", "Sample"} <= set(df.columns):
+                flat = set()
+                for wells in excluded_wells.values():
+                    flat |= set(wells or ())
+                return df["Well"].isin(flat)
+            return pd.Series(
+                [
+                    well in excluded_wells.get((target, sample), ())
+                    for target, sample, well in zip(
+                        df["Target"], df["Sample"], df["Well"]
+                    )
+                ],
+                index=df.index,
+            )
+        return df["Well"].isin(excluded_wells)
+
+    @staticmethod
     def get_triplicate_data(
-        data: pd.DataFrame, excluded_wells: set = None
+        data: pd.DataFrame, excluded_wells: set = None, thresholds: dict = None
     ) -> pd.DataFrame:
         """
         Build a comprehensive triplicate-level view of all CT values.
         Returns DataFrame with one row per well, grouped by Sample+Target.
         """
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
         excluded_wells = excluded_wells or set()
 
         df = data[["Well", "Sample", "Target", "CT"]].copy()
-        df["Excluded"] = df["Well"].isin(excluded_wells)
+        df["Excluded"] = QualityControl.excluded_mask(df, excluded_wells)
 
         group_stats = (
             df[~df["Excluded"]]
@@ -53,6 +134,24 @@ class QualityControl:
             "Wells",
         ]
 
+        # Restore the (Sample, Target) groups that lost every well to exclusions.
+        # Grouping only the survivors dropped them entirely instead of leaving an
+        # n=0 row that trips the "Low n" check below — so excluding a whole bad
+        # triplicate RAISED the health score (2 groups / 50% healthy became
+        # 1 group / 100%).
+        all_groups = df[["Sample", "Target"]].drop_duplicates()
+        if len(all_groups) > len(group_stats):
+            group_stats = all_groups.merge(
+                group_stats, on=["Sample", "Target"], how="left"
+            ).reset_index(drop=True)
+            group_stats["n"] = group_stats["n"].fillna(0).astype(int)
+            group_stats["CT_Values"] = group_stats["CT_Values"].apply(
+                lambda v: v if isinstance(v, list) else []
+            )
+            group_stats["Wells"] = group_stats["Wells"].apply(
+                lambda v: v if isinstance(v, list) else []
+            )
+
         # FIX-17: Return NaN instead of 0 when mean CT is non-positive (invalid)
         group_stats["CV_pct"] = np.where(
             group_stats["Mean_CT"] > 0,
@@ -68,13 +167,13 @@ class QualityControl:
             if row["n"] < 2:
                 issues.append("Low n")
                 severity = "warning"
-            if pd.notna(row["CV_pct"]) and row["CV_pct"] > QualityControl.CV_THRESHOLD * 100:
+            if pd.notna(row["CV_pct"]) and row["CV_pct"] > _qct["cv"] * 100:
                 issues.append(f"High CV ({row['CV_pct']:.1f}%)")
                 severity = "warning"
-            if row["Mean_CT"] > QualityControl.CT_HIGH_THRESHOLD:
+            if row["Mean_CT"] > _qct["ct_high"]:
                 issues.append("High CT")
                 severity = "warning"
-            if row["Mean_CT"] < QualityControl.CT_LOW_THRESHOLD:
+            if row["Mean_CT"] < _qct["ct_low"]:
                 issues.append("Low CT")
                 severity = "warning"
             if row["Range"] > 1.0 and row["n"] >= 2:
@@ -107,11 +206,12 @@ class QualityControl:
 
     @staticmethod
     def get_wells_for_triplicate(
-        data: pd.DataFrame, sample: str, target: str
+        data: pd.DataFrame, sample: str, target: str, thresholds: dict = None
     ) -> pd.DataFrame:
         """
         Get all wells for a specific Sample+Target combination with detailed info.
         """
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
@@ -139,9 +239,9 @@ class QualityControl:
 
         def well_status(row):
             issues = []
-            if row["CT"] > QualityControl.CT_HIGH_THRESHOLD:
+            if row["CT"] > _qct["ct_high"]:
                 issues.append("High CT")
-            if row["CT"] < QualityControl.CT_LOW_THRESHOLD:
+            if row["CT"] < _qct["ct_low"]:
                 issues.append("Low CT")
             if row["Is_Outlier"]:
                 issues.append("Grubbs outlier")
@@ -165,18 +265,21 @@ class QualityControl:
         ]
 
     @staticmethod
-    def get_qc_summary_stats(data: pd.DataFrame, excluded_wells: set = None) -> dict:
+    def get_qc_summary_stats(data: pd.DataFrame, excluded_wells: set = None,
+                             thresholds: dict = None) -> dict:
         """
         Calculate overall QC summary statistics for the dataset.
         """
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return {}
 
         excluded_wells = excluded_wells or set()
-        active_data = data[~data["Well"].isin(excluded_wells)]
+        _excl_mask = QualityControl.excluded_mask(data, excluded_wells)
+        active_data = data[~_excl_mask]
 
         total_wells = len(data)
-        excluded_count = len(data[data["Well"].isin(excluded_wells)])
+        excluded_count = int(_excl_mask.sum())
         active_wells = total_wells - excluded_count
 
         ct_mean = active_data["CT"].mean()
@@ -185,10 +288,10 @@ class QualityControl:
         ct_max = active_data["CT"].max()
 
         high_ct_count = len(
-            active_data[active_data["CT"] > QualityControl.CT_HIGH_THRESHOLD]
+            active_data[active_data["CT"] > _qct["ct_high"]]
         )
         low_ct_count = len(
-            active_data[active_data["CT"] < QualityControl.CT_LOW_THRESHOLD]
+            active_data[active_data["CT"] < _qct["ct_low"]]
         )
 
         triplicate_stats = QualityControl.get_triplicate_data(data, excluded_wells)
@@ -301,14 +404,13 @@ class QualityControl:
 
         df = data.copy()
 
-        # Normalize excluded_wells and filter
-        if isinstance(excluded_wells, dict):
-            excl_flat = set()
-            for well_set in excluded_wells.values():
-                excl_flat.update(well_set)
-            df = df[~df["Well"].isin(excl_flat)]
-        elif excluded_wells:
-            df = df[~df["Well"].isin(excluded_wells)]
+        # Scope the exclusion to its own (gene, sample) — see excluded_mask.
+        # Flattening removed the coordinate from every group sharing it, which
+        # hid genuine high-SD groups from this suggestion list.
+        if excluded_wells:
+            _mask = QualityControl.excluded_mask(df, excluded_wells)
+            if _mask.any():
+                df = df[~_mask]
 
         if gene_filter:
             df = df[df["Target"] == gene_filter]
@@ -379,16 +481,16 @@ class QualityControl:
         if data is None or getattr(data, "empty", True):
             return exclusions, audit
 
-        pre_excluded = set()
-        if isinstance(excluded_wells, dict):
-            for s in excluded_wells.values():
-                pre_excluded.update(s)
-        elif excluded_wells:
-            pre_excluded.update(excluded_wells)
-
         df = data[["Well", "Sample", "Target", "CT"]].copy()
-        if pre_excluded:
-            df = df[~df["Well"].isin(pre_excluded)]
+        # Scope the pre-exclusion to its own (gene, sample) via excluded_mask.
+        # Flattening to bare well IDs dropped that plate coordinate from EVERY
+        # group sharing it, so auto-QC evaluated an unrelated gene's triplicate
+        # on the wrong wells: a group carrying a 10-Ct outlier was reported at
+        # SD 0.00 and left untrimmed, while DDCt kept using the outlier.
+        if excluded_wells:
+            _pre_mask = QualityControl.excluded_mask(df, excluded_wells)
+            if _pre_mask.any():
+                df = df[~_pre_mask]
         # Only real numeric CTs participate in pair selection.
         df = df[pd.to_numeric(df["CT"], errors="coerce").notna()]
 
@@ -456,17 +558,19 @@ class QualityControl:
         return g_stat > g_crit, int(max_idx)
 
     @staticmethod
-    def detect_outliers(data: pd.DataFrame, hk_gene: str = None) -> pd.DataFrame:
+    def detect_outliers(data: pd.DataFrame, hk_gene: str = None,
+                        thresholds: dict = None) -> pd.DataFrame:
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
         qc_df = data[["Well", "Sample", "Target", "CT"]].copy()
 
-        ct_high = qc_df["CT"] > QualityControl.CT_HIGH_THRESHOLD
-        ct_low = qc_df["CT"] < QualityControl.CT_LOW_THRESHOLD
+        ct_high = qc_df["CT"] > _qct["ct_high"]
+        ct_low = qc_df["CT"] < _qct["ct_low"]
 
-        high_ct_issue = f"CT > {QualityControl.CT_HIGH_THRESHOLD} (low expression)"
-        low_ct_issue = f"CT < {QualityControl.CT_LOW_THRESHOLD} (unusually high)"
+        high_ct_issue = f"CT > {_qct["ct_high"]} (low expression)"
+        low_ct_issue = f"CT < {_qct["ct_low"]} (unusually high)"
 
         qc_df["Issues"] = pd.DataFrame(
             {
@@ -488,7 +592,7 @@ class QualityControl:
             cv_stats["std"] / cv_stats["mean"],
             np.nan,
         )
-        high_cv_groups = cv_stats[cv_stats["cv"] > QualityControl.CV_THRESHOLD][
+        high_cv_groups = cv_stats[cv_stats["cv"] > _qct["cv"]][
             ["Sample", "Target", "cv"]
         ]
 
@@ -545,7 +649,7 @@ class QualityControl:
 
                 deviations = (hk_by_sample - overall_hk_mean).abs()
                 flagged_samples = deviations[
-                    deviations > QualityControl.HK_VARIATION_THRESHOLD
+                    deviations > _qct["hk_variation"]
                 ]
 
                 if not flagged_samples.empty:
@@ -572,7 +676,9 @@ class QualityControl:
         return qc_df
 
     @staticmethod
-    def get_replicate_stats(data: pd.DataFrame) -> pd.DataFrame:
+    def get_replicate_stats(data: pd.DataFrame,
+                            thresholds: dict = None) -> pd.DataFrame:
+        _qct = QualityControl.resolve_thresholds(thresholds)
         if data is None or data.empty:
             return pd.DataFrame()
 
@@ -588,8 +694,18 @@ class QualityControl:
             rep_stats["Mean CT"] > 0, (rep_stats["SD"] / rep_stats["Mean CT"]) * 100, np.nan
         )
 
+        # Use the configured thresholds, not literals. These were hardcoded to
+        # 10 / 35 / 5, so the QC Settings sliders moved the summary counts but
+        # never this table's Status column — raising CT_HIGH to 40 took the
+        # "high CT" count to zero while these rows still read "Low Expression".
+        # (_cached_replicate_stats also puts the threshold tuple in its cache key,
+        # which advertised a dependency that did not exist until now.)
         rep_stats["Status"] = np.select(
-            [rep_stats["Mean CT"] < 10, rep_stats["Mean CT"] > 35, rep_stats["CV%"] > 5],
+            [
+                rep_stats["Mean CT"] < _qct["ct_low"],
+                rep_stats["Mean CT"] > _qct["ct_high"],
+                rep_stats["CV%"] > _qct["cv"] * 100,
+            ],
             ["Check Signal", "Low Expression", "High CV"],
             default="OK",
         )
@@ -600,89 +716,3 @@ class QualityControl:
         rep_stats["n"] = rep_stats["n"].astype(int)
 
         return rep_stats[["Sample", "Target", "n", "Mean CT", "SD", "CV%", "Status"]]
-
-    @staticmethod
-    def create_plate_heatmap(
-        data: pd.DataFrame, value_col: str = "CT", excluded_wells: set = None
-    ) -> go.Figure:
-        if data is None or data.empty:
-            return go.Figure()
-
-        if isinstance(excluded_wells, dict):
-            _flat: set = set()
-            for _ws in excluded_wells.values():
-                _flat.update(_ws)
-            excluded_wells = _flat
-        else:
-            excluded_wells = excluded_wells or set()
-
-        rows = list("ABCDEFGH")
-        cols = list(range(1, 13))
-
-        plate_values = np.full((8, 12), np.nan)
-        plate_text = [["" for _ in range(12)] for _ in range(8)]
-        plate_colors = [[0 for _ in range(12)] for _ in range(8)]
-
-        for _, row in data.iterrows():
-            well = row["Well"]
-            if len(well) >= 2:
-                well_row = well[0].upper()
-                try:
-                    well_col = int(well[1:])
-                except ValueError:
-                    continue
-
-                if well_row in rows and 1 <= well_col <= 12:
-                    r_idx = rows.index(well_row)
-                    c_idx = well_col - 1
-
-                    ct_val = row[value_col]
-                    plate_values[r_idx, c_idx] = ct_val
-
-                    sample_short = str(row["Sample"])[:10]
-                    target_short = str(row["Target"])[:8]
-                    excluded_marker = " [X]" if well in excluded_wells else ""
-                    plate_text[r_idx][c_idx] = (
-                        f"{well}{excluded_marker}<br>{sample_short}<br>{target_short}<br>CT: {ct_val:.1f}"
-                    )
-
-                    if well in excluded_wells:
-                        plate_colors[r_idx][c_idx] = -1
-
-        fig = go.Figure(
-            data=go.Heatmap(
-                z=plate_values,
-                x=[str(c) for c in cols],
-                y=rows,
-                text=plate_text,
-                hoverinfo="text",
-                colorscale=[[0, "#2ecc71"], [0.5, "#f1c40f"], [1, "#e74c3c"]],
-                zmin=15,
-                zmax=40,
-                colorbar=dict(title="CT Value"),
-            )
-        )
-
-        for r_idx, row_letter in enumerate(rows):
-            for c_idx, col_num in enumerate(cols):
-                well_name = f"{row_letter}{col_num}"
-                well_name_padded = f"{row_letter}{col_num:02d}"
-                if well_name in excluded_wells or well_name_padded in excluded_wells:
-                    fig.add_annotation(
-                        x=str(col_num),
-                        y=row_letter,
-                        text="X",
-                        showarrow=False,
-                        font=dict(size=20, color="red"),
-                        opacity=0.8,
-                    )
-
-        fig.update_layout(
-            title="96-Well Plate Overview",
-            xaxis=dict(title="Column", side="top", dtick=1),
-            yaxis=dict(title="Row", autorange="reversed"),
-            height=400,
-            width=800,
-        )
-
-        return fig
