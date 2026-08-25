@@ -1237,6 +1237,118 @@ def gene_figure_for_display(gene, gene_data, efficacy_config):
     return fig
 
 
+# ==================== SCREEN GEOMETRY ====================
+# ONE figure object per gene is memoized and it is the EXPORT figure: 1058x604px
+# with every font multiplied so the smallest text clears 10pt once the PNG is
+# placed 9.11in wide on a slide (qpcr/graph.py, font_scale).
+#
+# Streamlit ships that whole spec to the browser and its frontend replaces
+# layout.width with the measured container width — but KEEPS layout.height, every
+# font and every margin. So a chart authored 1058px wide is drawn ~700px wide in
+# the editor and ~350px in the Overview panel, still 604px tall: the aspect
+# collapses from 1.75:1 to 1.16:1 and then to 0.58:1 (portrait), while the fixed
+# 80px left margin becomes 23% of the element. That is the "squished" look. The
+# tell is that switching PPT Half -> PPT Full changes on-screen text by 1.79x
+# though the browser width never moved.
+#
+# The browser therefore gets a COPY, scaled UNIFORMLY: height, all four margins
+# and every font size by the same factor. Uniform is the whole point — both
+# captions are anchored as a FRACTION of plot height and the stacked significance
+# symbols are spaced in data units derived from it, so scaling height and margins
+# by one number leaves every one of those relationships describing the same
+# place. No annotation has to be rewritten, which is what makes this safe.
+#
+# Nothing here touches st.session_state["graphs"]. The PPT, Excel and image
+# writers keep receiving the untouched export figure.
+SCREEN_CHART_WIDTH_PX = {"editor": 900, "overview": 400}
+
+
+def _scale_figure_for_screen(fig, target_px: int):
+    """A uniformly scaled copy of ``fig`` for display at ``target_px`` wide.
+
+    Returns ``fig`` itself when it carries no explicit width, or is already no
+    wider than the target — there is nothing to correct in either case.
+    """
+    src_w = getattr(fig.layout, "width", None) or 0
+    src_h = getattr(fig.layout, "height", None) or 0
+    if not src_w or not src_h or src_w <= target_px:
+        return fig
+
+    s = float(target_px) / float(src_w)
+
+    def _sc(v, lo=1):
+        return max(lo, int(round(float(v) * s))) if v else v
+
+    out = go.Figure(fig)
+    m = fig.layout.margin
+    out.update_layout(
+        # width=None + width='stretch' at the call site: Plotly fits the
+        # container, so the figure can never overflow and be clipped by the
+        # `overflow:hidden` on [data-testid="stPlotlyChart"].
+        width=None,
+        height=max(int(round(src_h * s)), 160),
+        margin=dict(l=_sc(m.l), r=_sc(m.r), t=_sc(m.t), b=_sc(m.b)),
+        font=dict(size=_sc(getattr(fig.layout.font, "size", None) or 14)),
+    )
+    if getattr(fig.layout.xaxis, "tickfont", None) is not None:
+        out.update_xaxes(
+            tickfont=dict(size=_sc(fig.layout.xaxis.tickfont.size)),
+            ticklen=_sc(getattr(fig.layout.xaxis, "ticklen", None)),
+        )
+    _yt = getattr(fig.layout.yaxis, "title", None)
+    if _yt is not None and getattr(_yt, "font", None) is not None:
+        out.update_yaxes(
+            title=dict(font=dict(size=_sc(_yt.font.size)),
+                       standoff=_sc(getattr(_yt, "standoff", None))),
+        )
+    # y tickfont is unset and inherits layout.font, so it follows for free.
+    for i, ann in enumerate(fig.layout.annotations or ()):
+        upd = {}
+        if getattr(ann, "font", None) is not None and ann.font.size:
+            upd["font"] = dict(size=_sc(ann.font.size))
+        if getattr(ann, "yshift", None):
+            upd["yshift"] = _sc(ann.yshift, lo=0)
+        if getattr(ann, "borderpad", None):
+            upd["borderpad"] = _sc(ann.borderpad, lo=0)
+        if upd:
+            out.layout.annotations[i].update(**upd)
+    for i, tr in enumerate(fig.data):
+        mk = getattr(tr, "marker", None)
+        if mk is not None and getattr(mk, "size", None):
+            try:
+                out.data[i].marker.size = _sc(mk.size)
+            except (TypeError, ValueError):
+                pass
+        ey = getattr(tr, "error_y", None)
+        if ey is not None:
+            if getattr(ey, "width", None):
+                out.data[i].error_y.width = _sc(ey.width, lo=0)
+            if getattr(ey, "thickness", None):
+                out.data[i].error_y.thickness = _sc(ey.thickness, lo=0)
+    return out
+
+
+def _screen_figure(gene: str, fig, where: str):
+    """Cache-fronted screen copy. Keyed on the EXPORT figure's own signature.
+
+    A signature-keyed entry cannot be served stale: the signature changes
+    whenever the figure would be rebuilt. When it is None the data could not be
+    fingerprinted, so always copy.
+    """
+    target = SCREEN_CHART_WIDTH_PX.get(where, 900)
+    sig = st.session_state.get("_graph_signatures", {}).get(gene)
+    if sig is None:
+        return _scale_figure_for_screen(fig, target)
+    cache = st.session_state.setdefault("_screen_graphs", {})
+    key = (gene, where)
+    hit = cache.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    scaled = _scale_figure_for_screen(fig, target)
+    cache[key] = (sig, scaled)
+    return scaled
+
+
 def figures_for_genes(gene_list, efficacy_config: dict):
     """Return ``(figures, errors)`` for ``gene_list``, rebuilding only what changed.
 
@@ -1623,7 +1735,8 @@ def render_gene_editor(current_gene):
     # Memoized: reuses the figure the Graphs/Overview pass already built when
     # nothing changed, and rebuilds here on a fragment-scoped rerun when it did.
     fig = gene_figure_for_display(current_gene, gene_data, efficacy_config)
-    st.plotly_chart(fig, width='stretch', key=f"main_fig_{current_gene}")
+    st.plotly_chart(_screen_figure(current_gene, fig, "editor"),
+                    width='stretch', key=f"main_fig_{current_gene}")
 
 
 # ==================== PAGE CONFIG ====================
@@ -5844,7 +5957,10 @@ with tab_ov:
 
         # gene panel (auto-styled small multiples, consistent with Graphs)
         st.markdown("##### Gene panel")
-        _cols = st.columns(min(len(gene_list), 3) or 1)
+        # TWO columns, not three. At three a thumbnail is ~300px wide, and
+        # uniform scaling then puts the tick labels at ~6px — legible to nobody.
+        # Two gives ~430px and ~9px ticks. Costs one more row of scrolling.
+        _cols = st.columns(min(len(gene_list), 2) or 1)
         # Shares the Graphs tab's memo — these figures are identical, so this
         # panel costs nothing on a rerun where no chart input changed.
         _ov_figs, _ov_errs = figures_for_genes(gene_list, efficacy_config)
@@ -5853,7 +5969,8 @@ with tab_ov:
                 if g in _ov_errs:
                     st.warning(f"{g}: chart unavailable ({_ov_errs[g]})")
                 elif g in _ov_figs:
-                    st.plotly_chart(_ov_figs[g], width='stretch', key=f"ov_fig_{g}")
+                    st.plotly_chart(_screen_figure(g, _ov_figs[g], "overview"),
+                                    width='stretch', key=f"ov_fig_{g}")
 
         # fold-change matrix
         st.markdown("##### Fold-change matrix")
