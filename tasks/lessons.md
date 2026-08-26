@@ -212,3 +212,61 @@ unimportable, one fails if any source file calls `.background_gradient(` again.
 **Caught by CI**, which existed for one day at that point (PR #17). It was
 merged ahead of the audit PR precisely so the audit would be gated, and this is
 the defect it caught.
+
+---
+
+## 2026-08-26: DECLINED — the significance stack stays in DATA units, not pixel `yshift`
+
+This trailed the #21–#26 chart-geometry series as "still deferred, never
+started" and kept resurfacing. It is now **considered and declined**, not
+pending. Do not re-raise it without the trigger at the bottom.
+
+**The proposal.** `qpcr/graph.py` (~line 670) places each stacked significance
+glyph in data units, converting the pixel step through the plot height:
+
+```python
+_data_per_px = (y_max_auto / plot_h_px) if plot_h_px else 0.0
+```
+
+Moving those annotations to pixel `yshift` would remove the last consumer of the
+hand-computed `plot_h_px` and make `xaxis automargin` usable. Both are real
+gains. Neither is worth the cost.
+
+**Why declined — 1. The blast radius is larger than the entire series that
+preceded it.** The mechanism does not just position glyphs; when a stack would
+overflow it **rewrites the axis range** (~lines 697-700):
+
+```python
+if (settings.get("y_min") is None and settings.get("y_max") is None
+        and not is_log and _stack_top > y_max_auto):
+    y_max_auto = _stack_top
+```
+
+That extension is why bars read as compressed today, and dropping it makes them
+visibly taller. It fires on every chart carrying a significance marker — which
+is most real reports. #26 moved 4 of 48 matrix cases and could name them; this
+moves nearly every deck, to fix nothing anyone reported.
+
+**Why declined — 2. The 48-case pixel gate is blind to it.** That matrix is
+4 label modes x 4 `FIGURE_SIZE_PRESETS` x {Latin short, Latin long, Korean}.
+There is **no significance dimension in it at all.** The one instrument that made
+#21–#26 safe cannot observe the thing this change alters, so "the gate is green"
+would be meaningless here. Extending the matrix is a prerequisite, not a
+follow-up.
+
+**Why declined — 3. It trades a guarantee for a hazard.** Data units *guarantee*
+containment: the range is extended until the stack fits. Pixel-shifted
+annotations are not considered by autorange, so a tall stack on a short figure
+can render into the top margin or clip. That swaps a cosmetic, self-correcting
+issue (slightly compressed bars) for a correctness defect in an exported deck —
+the wrong direction for a report generator.
+
+**Rule — "removes a coupling" is not on its own a reason to change rendering
+code that ships images.** Internal tidiness does not justify reprinting every
+deck. Weigh it against blast radius, and against whether the existing gate can
+even see the change.
+
+**What would reopen this:** a real chart where the axis extension visibly ruins
+the output — a tall three-line stack squashing bars until the effect is
+unreadable. If that appears, the first step is **adding a significance dimension
+to the render matrix**, not editing `graph.py`.
