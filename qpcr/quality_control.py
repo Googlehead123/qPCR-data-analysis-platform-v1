@@ -294,7 +294,9 @@ class QualityControl:
             active_data[active_data["CT"] < _qct["ct_low"]]
         )
 
-        triplicate_stats = QualityControl.get_triplicate_data(data, excluded_wells)
+        triplicate_stats = QualityControl.get_triplicate_data(
+            data, excluded_wells, thresholds=thresholds
+        )
         if not triplicate_stats.empty:
             total_triplicates = len(triplicate_stats)
             healthy_triplicates = len(
@@ -569,8 +571,8 @@ class QualityControl:
         ct_high = qc_df["CT"] > _qct["ct_high"]
         ct_low = qc_df["CT"] < _qct["ct_low"]
 
-        high_ct_issue = f"CT > {_qct["ct_high"]} (low expression)"
-        low_ct_issue = f"CT < {_qct["ct_low"]} (unusually high)"
+        high_ct_issue = f"CT > {_qct['ct_high']} (low expression)"
+        low_ct_issue = f"CT < {_qct['ct_low']} (unusually high)"
 
         qc_df["Issues"] = pd.DataFrame(
             {
@@ -613,7 +615,7 @@ class QualityControl:
             qc_df.loc[has_high_cv, "Flagged"] = True
             qc_df = qc_df.drop(columns=["cv"])
 
-        grubbs_outliers = set()
+        grubbs_outliers = set()  # (Sample, Target, Well): bare Well IDs collide across genes/samples
         for (sample, target), group in data.groupby(["Sample", "Target"]):
             if len(group) >= 3:
                 ct_vals = group["CT"].values
@@ -622,10 +624,13 @@ class QualityControl:
                 )
                 if is_outlier:
                     outlier_well = group.iloc[outlier_idx]["Well"]
-                    grubbs_outliers.add(outlier_well)
+                    grubbs_outliers.add((sample, target, outlier_well))
 
         if grubbs_outliers:
-            grubbs_mask = qc_df["Well"].isin(grubbs_outliers)
+            grubbs_mask = pd.Series(
+                list(zip(qc_df["Sample"], qc_df["Target"], qc_df["Well"])),
+                index=qc_df.index,
+            ).isin(grubbs_outliers)
 
             def add_grubbs_issue(current_issue):
                 grubbs_issue = "Grubbs outlier"

@@ -2930,11 +2930,15 @@ class PPTGenerator:
         # go.Figure(None) is a VALID empty figure, so a gene whose chart failed
         # to build used to be placed as a blank white picture and the except
         # branch below — which writes the visible "Graph Error" box — never ran.
+        # The raise itself happens INSIDE the try below: raised out here it aborted
+        # the whole deck instead of producing this gene's visible error box.
+        _no_fig_msg = None
         if fig is None:
-            raise ValueError(
+            _no_fig_msg = (
                 f"No chart could be built for {gene}, so it cannot be placed on "
                 f"the slide."
             )
+            fig = go.Figure()
 
         # Render at the figure's OWN pixel size where it has one. graph.py
         # auto-widens the figure for many bars (max(configured, n_bars*1.4) cm),
@@ -2962,6 +2966,8 @@ class PPTGenerator:
         fig_copy.update_layout(width=_px_w, height=_px_h)
 
         try:
+            if _no_fig_msg:
+                raise ValueError(_no_fig_msg)
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
             img_stream = io.BytesIO(img_bytes)
 
@@ -3200,7 +3206,13 @@ def export_to_excel(
     _disp = lambda g: str(gene_display_names.get(g, g))
     output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    # Uploaded sample/gene names are written verbatim: without these options
+    # xlsxwriter turns a cell like "=1+1" into a live formula and "http://..." into a link.
+    with pd.ExcelWriter(
+        output,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_formulas": False, "strings_to_urls": False}},
+    ) as writer:
         # Workbook default font. The generated workbook defaulted to Calibri,
         # which has no Hangul, so 대조군 / 시료 1 처리 (10 ppm) in Sample_Mapping,
         # every *_Analysis sheet, FC_Matrix and the *_Chart sheets all rendered
@@ -3546,7 +3558,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
 
         for i in range(n_rows):
             r = data_start + i
-            ws.cell(row=r, column=3, value=conditions[i])
+            _cond_cell = ws.cell(row=r, column=3, value=conditions[i])
+            if _cond_cell.data_type == "f":
+                # openpyxl turns any string starting with "=" into a formula;
+                # a condition name comes from the uploaded file, so keep it text.
+                _cond_cell.data_type = "s"
             fc = fold_changes[i]
             ws.cell(row=r, column=4, value=fc if pd.notna(fc) else 0)
             sem = sems[i]

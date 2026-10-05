@@ -5,6 +5,7 @@ with automatic detection, encoding fallback, and file size validation.
 """
 
 import streamlit as st
+import numpy as np
 import pandas as pd
 
 
@@ -68,7 +69,9 @@ class QPCRParser:
             return None
 
         well_col = next(
-            (c for c in ["Well Position", "Well"] if c in df.columns), df.columns[0]
+            (c for name in ("well position", "well") for c in df.columns
+             if str(c).strip().lower() == name),
+            df.columns[0],
         )
 
         # Case-insensitive CT column detection
@@ -88,10 +91,10 @@ class QPCRParser:
         # produced Sample=<the target name> and Target=<the CT value>, reported
         # "2 wells parsed", and listed CT values as gene names.
         sample_col_name = next(
-            (c for c in df.columns if str(c).strip() in ("Sample Name", "Sample")), None
+            (c for c in df.columns if str(c).strip().lower() in ("sample name", "sample")), None
         )
         target_col_name = next(
-            (c for c in df.columns if str(c).strip() in ("Target Name", "Target")), None
+            (c for c in df.columns if str(c).strip().lower() in ("target name", "target")), None
         )
         if sample_col_name is None or target_col_name is None:
             missing = [
@@ -117,6 +120,8 @@ class QPCRParser:
                 "CT": pd.to_numeric(df[ct_col], errors="coerce"),
             }
         )
+        # inf/-inf survive to_numeric and dropna, then become clipped fold changes.
+        parsed["CT"] = parsed["CT"].where(np.isfinite(parsed["CT"]))
         parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
         parsed["Target"] = parsed["Target"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
         parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
@@ -181,6 +186,7 @@ class QPCRParser:
                     "CT": pd.to_numeric(df[ct_col], errors="coerce"),
                 }
             )
+            parsed["CT"] = parsed["CT"].where(np.isfinite(parsed["CT"]))
             parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
             parsed["Target"] = parsed["Target"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
             parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
@@ -247,9 +253,11 @@ class QPCRParser:
                     candidate = pd.read_csv(
                         file, encoding=enc, low_memory=False, skip_blank_lines=False,
                         keep_default_na=False,
-                        na_values=["", "NA", "N/A", "NaN", "#N/A", "#N/A N/A",
-                                   "#NA", "-NaN", "-nan", "nan", "<NA>",
-                                   "Undetermined", "undetermined"],
+                        # Only blanks and "Undetermined" are NaN. A longer list
+                        # (NA, N/A, nan...) applied to EVERY column silently
+                        # deleted any Sample/Target literally named "NA"; non-numeric
+                        # CT text is coerced to NaN later by pd.to_numeric anyway.
+                        na_values=["", "Undetermined", "undetermined"],
                     )
                 except (UnicodeDecodeError, UnicodeError):
                     file.seek(0)

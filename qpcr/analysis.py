@@ -58,7 +58,12 @@ class AnalysisEngine:
             if excluded_wells_dict is None or df.empty:
                 return df
             mask = df.apply(
-                lambda r: r["Well"] in excluded_wells_dict.get((gene_key, r["Sample"]), set()),
+                lambda r: r["Well"] in excluded_wells_dict.get(
+                    # Row's own Target: HK matching is case-insensitive, so a row
+                    # may be labelled "gapdh" while gene_key is "GAPDH".
+                    (r["Target"] if "Target" in df.columns else gene_key, r["Sample"]),
+                    set(),
+                ),
                 axis=1,
             )
             return df[~mask]
@@ -89,7 +94,7 @@ class AnalysisEngine:
                     continue
 
                 hk_data = data[
-                    (data["Condition"] == condition) & (data["Target"] == hk_gene)
+                    (data["Condition"] == condition) & (data["Target"].str.upper() == hk_gene.upper())
                 ]
 
                 # Per-gene-sample well exclusion: filter HK wells row-wise
@@ -121,7 +126,7 @@ class AnalysisEngine:
                 # Get reference DCt (ref_sample) — must also respect exclusions
                 ref_target = target_data[target_data["Condition"] == ref_sample]
                 ref_hk = data[
-                    (data["Condition"] == ref_sample) & (data["Target"] == hk_gene)
+                    (data["Condition"] == ref_sample) & (data["Target"].str.upper() == hk_gene.upper())
                 ]
 
                 # Apply per-gene-sample exclusion to reference wells too (row-wise)
@@ -366,12 +371,12 @@ class AnalysisEngine:
                 lambda s: sample_mapping.get(s, {}).get("condition", s)
             )
 
-            hk_rows = raw_data[raw_data["Target"] == hk_gene].copy()
+            hk_rows = raw_data[raw_data["Target"].str.upper() == hk_gene.upper()].copy()
 
             # Per-gene-sample well exclusion for HK gene
             if excluded_wells_dict is not None:
                 hk_exclude_mask = hk_rows.apply(
-                    lambda r: r["Well"] in excluded_wells_dict.get((hk_gene, r["Sample"]), set()),
+                    lambda r: r["Well"] in excluded_wells_dict.get((r["Target"], r["Sample"]), set()),
                     axis=1,
                 )
                 hk_rows = hk_rows[~hk_exclude_mask]
