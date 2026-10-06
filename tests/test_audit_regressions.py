@@ -303,3 +303,47 @@ class TestExcelExportFidelity:
         assert re.search(r'<(?:c:)?max val="5(\.0)?"', xml)
         assert re.search(r'<(?:c:)?min val="0\.5"', xml)
         assert "logBase" in xml
+
+
+class TestCodexReviewFollowups2:
+    def test_exact_comparison_name_wins_over_case_variant(self):
+        from qpcr.auto.interpret import fold_vs_comparison
+
+        gd = pd.DataFrame({"Condition": ["CTL", "Ctl", "Trt"],
+                           "Fold_Change": [1.0, 4.0, 2.0]})
+        rows = gd[gd["Condition"] == "Trt"]
+        assert np.isclose(fold_vs_comparison(rows, gd, "Ctl", "Fold_Change").iloc[0], 0.5)
+
+    def test_infinite_comparison_falls_back(self):
+        from qpcr.auto.interpret import fold_vs_comparison
+
+        gd = pd.DataFrame({"Condition": ["Ctl", "Trt"], "Fold_Change": [np.inf, 2.0]})
+        rows = gd[gd["Condition"] == "Trt"]
+        assert np.isclose(fold_vs_comparison(rows, gd, "Ctl", "Fold_Change").iloc[0], 2.0)
+
+    def test_generated_well_ids_never_collide_with_existing_ones(self):
+        from qpcr.utils import make_well_ids_unique
+
+        data = pd.DataFrame({"Well": ["A1", "A1", "A1 (2)"], "Sample": ["S"] * 3,
+                             "Target": ["G"] * 3, "CT": [20.0, 20.1, 20.2]})
+        out, n = make_well_ids_unique(data)
+        assert out["Well"].is_unique and n == 1
+        assert out["Well"].iloc[0] == "A1" and out["Well"].iloc[2] == "A1 (2)"
+
+    def test_missing_wells_get_distinct_ids(self):
+        from qpcr.utils import make_well_ids_unique
+
+        data = pd.DataFrame({"Well": [pd.NA, pd.NA, "A1"], "Sample": ["S"] * 3,
+                             "Target": ["G"] * 3, "CT": [20.0, 20.1, 20.2]})
+        out, _ = make_well_ids_unique(data)
+        assert out["Well"].is_unique and out["Well"].notna().all()
+
+    def test_display_name_suffix_cannot_collide_with_another_label(self, mock_streamlit):
+        from importlib import import_module
+
+        spec = import_module("streamlit qpcr analysis v1")
+        names = spec._unique_display_names(
+            {"G1": 0, "G2": 0, "G3": 0},
+            {"G1": "Same", "G2": "Same", "G3": "Same (G1)"},
+        )
+        assert len(set(names.values())) == 3

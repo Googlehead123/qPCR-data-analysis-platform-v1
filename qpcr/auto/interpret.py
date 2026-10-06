@@ -10,6 +10,7 @@ only, never recomputes them.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 _DIR_EN = {"up": "upregulation", "down": "downregulation", "flat": "no change"}
@@ -49,12 +50,16 @@ def fold_vs_comparison(rows: pd.DataFrame, gene_data: pd.DataFrame,
     fc = pd.to_numeric(rows[fc_col], errors="coerce")
     if not compare_to or "Condition" not in gene_data.columns:
         return fc
-    norm = gene_data["Condition"].astype(str).str.strip().str.lower()
-    match = gene_data[norm == str(compare_to).strip().lower()]
+    # Exact name first (the statistics match conditions exactly), then a
+    # case/space-insensitive fallback — "CTL" and "Ctl" can both exist.
+    cond = gene_data["Condition"].astype(str)
+    match = gene_data[cond == str(compare_to)]
+    if match.empty:
+        match = gene_data[cond.str.strip().str.lower() == str(compare_to).strip().lower()]
     if match.empty or fc_col not in match.columns:
         return fc
     cmp_fc = pd.to_numeric(match[fc_col], errors="coerce").iloc[0]
-    if pd.isna(cmp_fc) or cmp_fc <= 0:
+    if not np.isfinite(cmp_fc) or cmp_fc <= 0:
         return fc
     return fc / cmp_fc
 

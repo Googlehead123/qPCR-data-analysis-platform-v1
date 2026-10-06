@@ -3529,15 +3529,25 @@ def _unique_display_names(processed_data, gene_display_names) -> dict:
 
     Two genes renamed to the same label collapsed into one FC_Matrix row
     (pivot aggfunc="first") and one Summary group, silently discarding a gene.
+    The suffixed label is checked against EVERY label in use, so it cannot itself
+    collide with another gene's display name.
     """
     names = dict(gene_display_names or {})
+    genes = list(processed_data or {})
     shown: dict = {}
-    for g in (processed_data or {}):
+    for g in genes:
         shown.setdefault(str(names.get(g, g)), []).append(g)
-    for label, genes in shown.items():
-        if len(genes) > 1:
-            for g in genes:
-                names[g] = f"{label} ({g})"
+    taken = {str(names.get(g, g)) for g in genes}
+    for label, group in shown.items():
+        if len(group) > 1:
+            for g in group:
+                cand = f"{label} ({g})"
+                n = 2
+                while cand in taken:
+                    cand = f"{label} ({g}) #{n}"
+                    n += 1
+                taken.add(cand)
+                names[g] = cand
     return names
 
 
