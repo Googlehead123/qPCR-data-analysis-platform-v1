@@ -343,57 +343,6 @@ class QualityControl:
         }
 
     @staticmethod
-    def suggest_exclusions(
-        data: pd.DataFrame,
-        sample: str,
-        target: str,
-        excluded_wells: set = None,
-        strategy: str = "outlier",
-    ) -> list:
-        """
-        Suggest wells to exclude based on different strategies.
-
-        Strategies:
-        - 'outlier': Exclude statistical outliers (Grubbs test)
-        - 'worst': Exclude the well with highest deviation from mean
-        - 'keep_best_2': Keep the 2 closest values, exclude others
-        """
-        excluded_wells = excluded_wells or set()
-        wells_df = QualityControl.get_wells_for_triplicate(data, sample, target)
-
-        if wells_df.empty:
-            return []
-
-        active_wells = wells_df[~wells_df["Well"].isin(excluded_wells)]
-
-        if len(active_wells) < 2:
-            return []
-
-        suggestions = []
-
-        if strategy == "outlier":
-            outliers = active_wells[active_wells["Is_Outlier"]]
-            suggestions = outliers["Well"].tolist()
-
-        elif strategy == "worst":
-            if len(active_wells) > 2:
-                worst_idx = active_wells["Deviation"].abs().idxmax()
-                suggestions = [active_wells.loc[worst_idx, "Well"]]
-
-        elif strategy == "keep_best_2":
-            if len(active_wells) > 2:
-                median_ct = active_wells["CT"].median()
-                active_wells_sorted = active_wells.copy()
-                active_wells_sorted["Dist_to_Median"] = abs(
-                    active_wells_sorted["CT"] - median_ct
-                )
-                active_wells_sorted = active_wells_sorted.sort_values("Dist_to_Median")
-                to_exclude = active_wells_sorted.iloc[2:]["Well"].tolist()
-                suggestions = to_exclude
-
-        return suggestions
-
-    @staticmethod
     def find_high_sd_outliers(
         data: pd.DataFrame,
         excluded_wells,

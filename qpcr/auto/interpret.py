@@ -35,6 +35,30 @@ def expected_direction_for(gene: str, expected_direction: dict | None) -> str | 
     return low.get(str(gene).lower())
 
 
+def fold_vs_comparison(rows: pd.DataFrame, gene_data: pd.DataFrame,
+                       compare_to: str | None, fc_col: str) -> pd.Series:
+    """Fold change of ``rows`` relative to the comparison control.
+
+    The significance marker on a treatment row is a test AGAINST the comparison
+    control, but ``fc_col`` is relative to the reference sample. Judging direction
+    on the reference-relative fold change could stamp "efficacy" on a treatment
+    that sits significantly BELOW the very control it was tested against. When the
+    comparison condition is absent, non-positive or non-finite this falls back to
+    the reference-relative value (identical when the comparison IS the reference).
+    """
+    fc = pd.to_numeric(rows[fc_col], errors="coerce")
+    if not compare_to or "Condition" not in gene_data.columns:
+        return fc
+    norm = gene_data["Condition"].astype(str).str.strip().str.lower()
+    match = gene_data[norm == str(compare_to).strip().lower()]
+    if match.empty or fc_col not in match.columns:
+        return fc
+    cmp_fc = pd.to_numeric(match[fc_col], errors="coerce").iloc[0]
+    if pd.isna(cmp_fc) or cmp_fc <= 0:
+        return fc
+    return fc / cmp_fc
+
+
 def interpret_gene(gene: str, gene_df: pd.DataFrame, expected: str | None = None,
                    ref_condition: str | None = None) -> dict:
     """Interpret one gene's result frame. Returns per-condition rows + narrative."""

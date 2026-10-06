@@ -165,3 +165,141 @@ class TestCodexReviewFollowups:
         )
         trt = res[res["Condition"] == "Trt"].iloc[0]
         assert np.isclose(trt["Relative_Expression"], 1.0)
+
+
+class TestVerdictDirectionVsComparisonControl:
+    def test_ratio_is_taken_against_the_comparison_condition(self):
+        from qpcr.auto.interpret import fold_vs_comparison
+
+        gd = pd.DataFrame({"Condition": ["Ref", "Ctl", "Trt"],
+                           "Fold_Change": [1.0, 4.0, 2.0]})
+        rows = gd[gd["Condition"] == "Trt"]
+        out = fold_vs_comparison(rows, gd, "Ctl", "Fold_Change")
+        assert np.isclose(out.iloc[0], 0.5)  # below its own control: not "up"
+
+    def test_falls_back_to_reference_relative_when_comparison_missing(self):
+        from qpcr.auto.interpret import fold_vs_comparison
+
+        gd = pd.DataFrame({"Condition": ["Ref", "Trt"], "Fold_Change": [1.0, 2.0]})
+        rows = gd[gd["Condition"] == "Trt"]
+        assert np.isclose(fold_vs_comparison(rows, gd, "Nope", "Fold_Change").iloc[0], 2.0)
+        assert np.isclose(fold_vs_comparison(rows, gd, None, "Fold_Change").iloc[0], 2.0)
+        assert np.isclose(fold_vs_comparison(rows, gd, "ref", "Fold_Change").iloc[0], 2.0)
+
+
+class TestDuplicateWellIdentity:
+    def test_repeated_wells_become_distinct_and_exclusion_hits_only_one(self):
+        from qpcr.utils import make_well_ids_unique
+
+        data = pd.DataFrame(
+            {"Well": ["A1", "A2", "A1"], "Sample": ["S"] * 3,
+             "Target": ["G"] * 3, "CT": [20.0, 20.0, 30.0]}
+        )
+        out, n = make_well_ids_unique(data)
+        assert n == 1
+        assert list(out["Well"]) == ["A1", "A2", "A1 (2)"]
+        excl, audit = QualityControl.auto_select_replicates(out)
+        assert excl == {("G", "S"): {"A1 (2)"}}
+        assert set(audit[0]["kept_wells"]) == {"A1", "A2"}
+
+    def test_unique_ids_are_left_alone(self):
+        from qpcr.utils import make_well_ids_unique
+
+        data = pd.DataFrame({"Well": ["A1", "A1"], "Sample": ["S1", "S2"],
+                             "Target": ["G", "G"], "CT": [20.0, 21.0]})
+        out, n = make_well_ids_unique(data)
+        assert n == 0 and list(out["Well"]) == ["A1", "A1"]
+
+
+class TestAutoQcTrimIsDeclared:
+    def test_summary_states_trim_and_bias(self, mock_streamlit):
+        from importlib import import_module
+
+        spec = import_module("streamlit qpcr analysis v1")
+        audit = [{"status": "trimmed", "dropped_wells": ["A3"]},
+                 {"status": "unresolved", "dropped_wells": ["B3"]}]
+        txt = spec.auto_qc_trim_summary(audit, 0.3)
+        assert "1 group(s) trimmed" in txt and "1 still above" in txt
+        assert "2 well(s) dropped" in txt and "anti-conservative" in txt
+
+    def test_summary_when_nothing_trimmed(self, mock_streamlit):
+        from importlib import import_module
+
+        spec = import_module("streamlit qpcr analysis v1")
+        assert "nothing trimmed" in spec.auto_qc_trim_summary([], 0.3)
+
+    def test_provenance_and_miqe_carry_it(self, mock_streamlit):
+        from importlib import import_module
+        from qpcr.auto import build_miqe_checklist
+
+        spec = import_module("streamlit qpcr analysis v1")
+        prov = spec.build_provenance(
+            efficacy="x", hk_gene="GAPDH", ref_condition="Ctl", cmp_conditions=[],
+            ttest_type="welch", excluded_wells={}, excluded_samples=set(),
+            n_genes=1, n_samples=2, timestamp="t",
+            auto_qc_audit=[{"status": "trimmed", "dropped_wells": ["A3"]}],
+            auto_qc_threshold=0.3,
+        )
+        assert "trimmed" in prov["auto_qc_trim"]
+        assert "Auto-QC replicate trim" in spec.format_provenance_text(prov)
+        assert "Automatic replicate trim" in build_miqe_checklist(prov)
+
+
+def _frame(gene, ref_fc=1.0, trt_fc=2.0):
+    return pd.DataFrame({
+        "Target": [gene, gene],
+        "Condition": ["Non-treated", "Treatment"],
+        "Group": ["Negative Control", "Treatment"],
+        "Fold_Change": [ref_fc, trt_fc],
+        "Relative_Expression": [ref_fc, trt_fc],
+        "SEM": [0.05, 0.1],
+    })
+
+
+def _export(spec, processed, **kw):
+    genes = list(processed)
+    raw = pd.DataFrame(
+        [{"Well": "A1", "Sample": s_, "Target": g, "CT": 20.0}
+         for g in genes for s_ in ("Non-treated", "Treatment")]
+    )
+    mapping = {"Non-treated": {"condition": "Non-treated", "group": "Negative Control"},
+               "Treatment": {"condition": "Treatment", "group": "Treatment"}}
+    out = spec.export_to_excel(
+        raw, processed, {"Housekeeping_Gene": "GAPDH", "Efficacy_Type": "Anti-Aging"},
+        mapping, **kw,
+    )
+    return out.getvalue() if hasattr(out, "getvalue") else out
+
+
+class TestExcelExportFidelity:
+    def test_two_genes_with_one_display_name_both_survive_in_fc_matrix(self, mock_streamlit):
+        from importlib import import_module
+
+        import openpyxl
+
+        spec = import_module("streamlit qpcr analysis v1")
+        xlsx = _export(
+            spec, {"G1": _frame("G1", trt_fc=2.0), "G2": _frame("G2", trt_fc=5.0)},
+            gene_display_names={"G1": "Same", "G2": "Same"},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(xlsx))
+        ws = wb["FC_Matrix"]
+        labels = [r[0].value for r in ws.iter_rows(min_row=2) if r[0].value]
+        assert len(labels) == 2 and len(set(labels)) == 2
+
+    def test_per_gene_axis_settings_reach_the_chart(self, mock_streamlit):
+        import re
+        import zipfile
+        from importlib import import_module
+
+        spec = import_module("streamlit qpcr analysis v1")
+        xlsx = _export(
+            spec, {"G1": _frame("G1")},
+            graph_settings={"G1_y_min": 0.5, "G1_y_max": 5, "G1_y_log": True},
+        )
+        zf = zipfile.ZipFile(io.BytesIO(xlsx))
+        chart = next(n for n in zf.namelist() if re.match(r"xl/charts/chart\d+\.xml", n))
+        xml = zf.read(chart).decode("utf-8")
+        assert re.search(r'<(?:c:)?max val="5(\.0)?"', xml)
+        assert re.search(r'<(?:c:)?min val="0\.5"', xml)
+        assert "logBase" in xml

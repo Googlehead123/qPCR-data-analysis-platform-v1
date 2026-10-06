@@ -168,3 +168,27 @@ def is_cell_selected(session_state, gene: str, sample: str) -> bool:
         return False
 
     return selected[0] == gene and selected[1] == sample
+
+
+def make_well_ids_unique(df):
+    """Give every row a Well ID that is unique within its (Target, Sample).
+
+    Exclusions, auto-QC and Grubbs/CV flags all identify a measurement by
+    (gene, sample, Well). When the same Well repeats for a gene+sample (the same
+    plate position in two uploaded files, or a repeated row), those rows were
+    indistinguishable: excluding one removed every copy, and auto-QC reported
+    keeping wells it had actually dropped. The 2nd and later occurrences get a
+    " (2)", " (3)"... suffix; first occurrences keep their original ID.
+
+    Returns ``(frame, n_renamed)``; the input is not modified.
+    """
+    if df is None or df.empty or not {"Target", "Sample", "Well"} <= set(df.columns):
+        return df, 0
+    out = df.copy()
+    nth = out.groupby(["Target", "Sample", "Well"], sort=False).cumcount()
+    dup = nth > 0
+    if dup.any():
+        out.loc[dup, "Well"] = (
+            out.loc[dup, "Well"].astype(str) + " (" + (nth[dup] + 1).astype(str) + ")"
+        )
+    return out, int(dup.sum())

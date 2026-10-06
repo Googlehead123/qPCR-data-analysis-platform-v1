@@ -13,7 +13,7 @@ mutates results.
 from qpcr.auto.screening import screen_data
 from qpcr.auto.stats_advisor import recommend_test
 from qpcr.auto.interpret import (
-    interpret_results, interpret_gene, expected_direction_for,
+    interpret_results, interpret_gene, expected_direction_for, fold_vs_comparison,
 )
 from qpcr.auto.miqe import build_miqe_checklist
 
