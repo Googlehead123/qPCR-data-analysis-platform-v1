@@ -25,7 +25,7 @@ pytest tests/                                      # 411 tests
 ```
 
 ## Key Files
-- `streamlit qpcr analysis v1.py` — the Streamlit app (~5.7k lines). Holds the UI
+- `streamlit qpcr analysis v1.py` — the Streamlit app (~6.6k lines). Holds the UI
   for all seven tabs plus the report/export writers that live nowhere else:
   - `ReportGenerator` / `PPTGenerator` — PowerPoint generation
   - `export_to_excel` — workbook + native Excel charts
@@ -48,7 +48,7 @@ pytest tests/                                      # 411 tests
 - `requirements-dev.txt` — test-only pins, kept out of `requirements.txt` so
   Cloud does not ship test tooling. CI installs both.
 - `requirements.txt` — GENERATED from it by `uv pip compile --universal`, pinning
-  all 63 packages including transitives. Streamlit Cloud installs from this
+  all 52 packages including transitives. Streamlit Cloud installs from this
   filename, which is why the lock lives here rather than in a separate file;
   editing it by hand silently loses the lock. Regenerate and then verify on
   **both** 3.12 and 3.13 — the recipe is in `requirements.in`'s header, and
