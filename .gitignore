@@ -56,3 +56,6 @@ qa_*.png
 test_*.png
 app-running.png
 upload-state.png
+
+# Local client data export (kept on disk, not tracked)
++qPCR_*.xlsx
