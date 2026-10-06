@@ -11,7 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.13 is what production runs (runtime.txt); 3.12 is the local dev version.
+        # 3.13 is what production runs (set in the Streamlit Cloud deploy dialog,
+        # not by a file in the repo); 3.12 is the local dev version.
         # Both are tested because #16 was a Cloud-only break that a 3.12-only job
         # would have passed straight through.
         python-version: ["3.12", "3.13"]
