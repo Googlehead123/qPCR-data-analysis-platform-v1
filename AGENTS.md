@@ -38,7 +38,7 @@ streamlit run "streamlit qpcr analysis v1.py" --server.port 8501
 pytest tests/ -v
 
 # Run with coverage report
-pytest tests/ --cov="streamlit qpcr analysis v1" --cov-report=term-missing
+pytest tests/ --cov=qpcr --cov-report=term-missing   # needs pytest-cov (not in requirements-dev.txt)
 
 # Run single test file
 pytest tests/test_parser.py -v
@@ -47,13 +47,8 @@ pytest tests/test_parser.py -v
 pytest tests/test_parser.py::TestQPCRParserDetectFormat::test_detect_format1_with_well_position -v
 ```
 
-### Linting (Recommended)
-```bash
-# No linter configured. Recommended setup:
-# pip install ruff
-# ruff check .
-# ruff format .
-```
+### Linting
+No linter or formatter is configured (no config file, nothing in CI).
 
 ---
 
@@ -66,9 +61,9 @@ pytest tests/test_parser.py::TestQPCRParserDetectFormat::test_detect_format1_wit
   qpcr/                          # Computational core -- the single definition
                                  # of parser, quality_control, analysis, graph,
                                  # constants, export_utils, utils, auto/
-  tests/                         # 20 modules
+  tests/                         # 22 modules
   requirements.in                # Direct dependencies -- EDIT THIS ONE
-  requirements.txt               # GENERATED lock (all 63 pins); Cloud reads it
+  requirements.txt               # GENERATED lock (all 52 pins); Cloud reads it
   CLAUDE.md                      # Authoritative project instructions
   AGENTS.md                      # This file
 ```
