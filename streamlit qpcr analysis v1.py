@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 from scipy import stats
 import gc
 import hashlib
+import html as _html
 import io
 import logging
 import warnings
@@ -30,7 +31,7 @@ from qpcr.constants import (
     PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
-from qpcr.utils import natural_sort_key, gradient_styles
+from qpcr.utils import natural_sort_key, gradient_styles, make_well_ids_unique
 from qpcr.slide_geometry import (EMU_PER_INCH, SLIDE_MAX_PICTURE_H_IN,
                                  placement_size_in, render_size_px)
 from qpcr.parser import QPCRParser
@@ -39,7 +40,7 @@ from qpcr.graph import GraphGenerator
 from qpcr.analysis import AnalysisEngine as _CoreAnalysisEngine
 from qpcr.auto import (
     screen_data, recommend_test, interpret_results, build_miqe_checklist,
-    expected_direction_for,
+    expected_direction_for, fold_vs_comparison,
 )
 
 try:
@@ -222,8 +223,8 @@ def render_sidebar_rail():
             st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
             st.markdown(
                 '<div class="rail-ctx">'
-                f'<div class="row"><span class="k">Efficacy</span><span class="v">{eff}</span></div>'
-                f'<div class="row"><span class="k">Ref gene</span><span class="v">{hk}</span></div>'
+                f'<div class="row"><span class="k">Efficacy</span><span class="v">{_html.escape(str(eff))}</span></div>'
+                f'<div class="row"><span class="k">Ref gene</span><span class="v">{_html.escape(str(hk))}</span></div>'
                 f'<div class="row"><span class="k">Genes</span><span class="v">{n_genes}</span></div>'
                 f'<div class="row"><span class="k">Samples</span><span class="v">{n_samples}</span></div>'
                 f'<div class="row"><span class="k">Excluded wells</span><span class="v">{n_excl}</span></div>'
@@ -232,9 +233,33 @@ def render_sidebar_rail():
             )
 
 
+def auto_qc_trim_summary(audit, threshold=None) -> str:
+    """One-sentence record of the automatic best-2-of-3 replicate trim (pure).
+
+    Trimming the replicate farthest from the mean until SD <= threshold shrinks
+    the variance that the t-test then uses, so p-values for the trimmed groups
+    are anti-conservative (simulated: ~8% false positives at sigma 0.25 Ct and
+    ~13% at 0.40, against a nominal 5%). Declared so a reviewer can weigh it.
+    """
+    thr = f" at SD <= {float(threshold):.2f}" if threshold is not None else ""
+    audit = audit or []
+    trimmed = [a for a in audit if a.get("status") == "trimmed"]
+    unresolved = [a for a in audit if a.get("status") == "unresolved"]
+    if not trimmed and not unresolved:
+        return f"automatic best-2-of-3 replicate QC{thr}: no group exceeded the threshold, nothing trimmed"
+    n_wells = sum(len(a.get("dropped_wells") or ()) for a in audit)
+    return (
+        f"automatic best-2-of-3 replicate QC{thr}: {len(trimmed)} group(s) trimmed, "
+        f"{len(unresolved)} still above threshold, {n_wells} well(s) dropped. "
+        f"Trimming reduces replicate variance, so p-values for those groups are "
+        f"anti-conservative (false-positive rate above the nominal 5%)."
+    )
+
+
 def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_type,
                      excluded_wells, excluded_samples, n_genes, n_samples, timestamp,
-                     app_version="qPCR Analysis Suite v3.1"):
+                     app_version="qPCR Analysis Suite v3.1",
+                     auto_qc_audit=None, auto_qc_threshold=None):
     """Build a reproducibility/provenance record for an analysis run.
 
     Pure function (no Streamlit / global state) so it is unit-testable. Captures
@@ -252,6 +277,7 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
             for w in sorted(wells):
                 excl_list.append({"gene": str(gene), "sample": str(sample), "well": str(w)})
     excl_list.sort(key=lambda d: (d["gene"], d["sample"], d["well"]))
+    auto_qc_trim = auto_qc_trim_summary(auto_qc_audit, auto_qc_threshold)
     return {
         "generated": timestamp,
         "software": app_version,
@@ -286,6 +312,7 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
         "excluded_samples": sorted(excluded_samples) if excluded_samples else [],
         "excluded_wells_count": len(excl_list),
         "excluded_wells": excl_list,
+        "auto_qc_trim": auto_qc_trim,
     }
 
 
@@ -308,6 +335,7 @@ def format_provenance_text(prov: dict) -> str:
         f"Samples:              {prov.get('n_samples')}",
         f"Excluded samples:     {excl_s}",
         f"Excluded wells:       {prov.get('excluded_wells_count')}",
+        f"Auto-QC replicate trim: {prov.get('auto_qc_trim') or 'not recorded'}",
     ]
     for e in prov.get("excluded_wells") or []:
         lines.append(f"    - {e['gene']} / {e['sample']} / well {e['well']}")
@@ -337,6 +365,8 @@ def _current_provenance():
         n_genes=n_genes,
         n_samples=n_samples,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        auto_qc_audit=st.session_state.get("auto_qc_audit"),
+        auto_qc_threshold=st.session_state.get("qc_sd_threshold"),
     )
 
 
@@ -972,6 +1002,67 @@ def _clear_well_checkbox_state() -> None:
         st.session_state.pop(key, None)
 
 
+def _reset_session_for_new_data() -> None:
+    """Complete state reset for a new (or removed) upload, preventing stale data.
+
+    Everything derived from the previous experiment — results, graphs, mapping,
+    exclusions, selections, per-gene styling — is dropped so nothing downstream
+    describes the wrong file.
+    """
+    st.session_state.processed_data = {}
+    st.session_state.graphs = {}
+    st.session_state.sample_mapping = {}
+    st.session_state.excluded_wells = {}
+    st.session_state.excluded_wells_history = []
+    # Which exclusions auto-QC owns, so manual ones survive a
+    # threshold change. Must be dropped with the exclusions or the
+    # new file's first auto-QC treats the old file's wells as manual.
+    st.session_state._auto_qc_owned = {}
+    st.session_state.excluded_samples = set()
+    st.session_state.hk_gene = None
+    st.session_state.selected_efficacy = None
+    st.session_state.gene_display_names = {}
+    st.session_state.qc_reviewed = False
+    for key in [
+        "selected_gene_idx",
+        "analysis_cmp_condition",
+        "analysis_cmp_condition_2",
+        "analysis_cmp_condition_3",
+        "analysis_ref_condition",
+        "mapping_finalized",
+        "_exclusion_snapshot",
+        "_last_ref_sample_key",
+        "_last_cmp_sample_key",
+        "_last_cmp_sample_key_2",
+        "_last_cmp_sample_key_3",
+        "hk_select",
+        "hk_select_manual",
+    ]:
+        if key in st.session_state:
+            del st.session_state[key]
+    # Re-initialize graph_settings to defaults
+    st.session_state.graph_settings = {
+        "color_scheme": "plotly_white",
+        "font_size": 14,
+        "figure_height": 16,
+        "figure_width": 28,
+        "show_error": True,
+        "show_significance": True,
+        "show_legend": False,
+        "bar_gap": 0.45,
+        "bar_opacity": 0.85,
+        "marker_line_width": 1,
+        "y_log_scale": False,
+        "y_min": None,
+        "y_max": None,
+        "plot_bgcolor": "#FFFFFF",
+    }
+    # graph_settings above is only half the state: the per-gene editor
+    # keeps its values in widget keys, which would repopulate it on the
+    # next render and carry the previous file's styling over.
+    _clear_all_gene_style_state()
+
+
 def resolve_gene_settings(gene: str) -> dict:
     """Fold a gene's per-gene overrides onto the global graph_settings.
 
@@ -1461,7 +1552,7 @@ def _render_per_bar_table(current_gene, gene_data):
         rc = st.columns([3, 0.8, 2.5])
         lbl = condition if len(condition) <= 22 else condition[:19] + "..."
         rc[0].markdown(
-            f"<small>{lbl} <span style='color:#888;'>({group})</span></small>",
+            f"<small>{_html.escape(str(lbl))} <span style='color:#888;'>({_html.escape(str(group))})</span></small>",
             unsafe_allow_html=True,
         )
         _active_pn = gs.get(f"{current_gene}_color_preset", DEFAULT_GRAPH_PRESET)
@@ -2858,8 +2949,9 @@ class PPTGenerator:
                         # the change to markers that can actually be judged.
                         _verdict = "有"
                     else:
-                        _fc = pd.to_numeric(
-                            _rows.loc[_sig_mask, _fc_col], errors="coerce"
+                        _fc = fold_vs_comparison(
+                            _rows.loc[_sig_mask], gene_data,
+                            analysis_params.get("Compare_To"), _fc_col,
                         ).dropna()
                         _agree = (
                             (_fc > 1.0) if _expected == "up" else (_fc < 1.0)
@@ -2930,11 +3022,15 @@ class PPTGenerator:
         # go.Figure(None) is a VALID empty figure, so a gene whose chart failed
         # to build used to be placed as a blank white picture and the except
         # branch below — which writes the visible "Graph Error" box — never ran.
+        # The raise itself happens INSIDE the try below: raised out here it aborted
+        # the whole deck instead of producing this gene's visible error box.
+        _no_fig_msg = None
         if fig is None:
-            raise ValueError(
+            _no_fig_msg = (
                 f"No chart could be built for {gene}, so it cannot be placed on "
                 f"the slide."
             )
+            fig = go.Figure()
 
         # Render at the figure's OWN pixel size where it has one. graph.py
         # auto-widens the figure for many bars (max(configured, n_bars*1.4) cm),
@@ -2962,6 +3058,8 @@ class PPTGenerator:
         fig_copy.update_layout(width=_px_w, height=_px_h)
 
         try:
+            if _no_fig_msg:
+                raise ValueError(_no_fig_msg)
             img_bytes = ReportGenerator._fig_to_image(fig_copy, format="png", scale=2)
             img_stream = io.BytesIO(img_bytes)
 
@@ -3196,11 +3294,17 @@ def export_to_excel(
     operator actually chose. Two exports of one run disagreed about what the bars
     meant, and the Excel chart carries no caption of its own to give it away.
     """
-    gene_display_names = gene_display_names or {}
+    gene_display_names = _unique_display_names(processed_data, gene_display_names)
     _disp = lambda g: str(gene_display_names.get(g, g))
     output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    # Uploaded sample/gene names are written verbatim: without these options
+    # xlsxwriter turns a cell like "=1+1" into a live formula and "http://..." into a link.
+    with pd.ExcelWriter(
+        output,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_formulas": False, "strings_to_urls": False}},
+    ) as writer:
         # Workbook default font. The generated workbook defaulted to Calibri,
         # which has no Hangul, so 대조군 / 시료 1 처리 (10 ppm) in Sample_Mapping,
         # every *_Analysis sheet, FC_Matrix and the *_Chart sheets all rendered
@@ -3420,6 +3524,33 @@ def _write_qc_report_sheet(writer, qc_stats=None, replicate_stats=None):
         replicate_stats.to_excel(writer, sheet_name="QC_Report", index=False, startrow=start_row)
 
 
+def _unique_display_names(processed_data, gene_display_names) -> dict:
+    """Display names with collisions resolved by appending the raw gene name.
+
+    Two genes renamed to the same label collapsed into one FC_Matrix row
+    (pivot aggfunc="first") and one Summary group, silently discarding a gene.
+    The suffixed label is checked against EVERY label in use, so it cannot itself
+    collide with another gene's display name.
+    """
+    names = dict(gene_display_names or {})
+    genes = list(processed_data or {})
+    shown: dict = {}
+    for g in genes:
+        shown.setdefault(str(names.get(g, g)), []).append(g)
+    taken = {str(names.get(g, g)) for g in genes}
+    for label, group in shown.items():
+        if len(group) > 1:
+            for g in group:
+                cand = f"{label} ({g})"
+                n = 2
+                while cand in taken:
+                    cand = f"{label} ({g}) #{n}"
+                    n += 1
+                taken.add(cand)
+                names[g] = cand
+    return names
+
+
 def _add_gene_chart_sheets(output_buf, processed_data, params,
                            gene_display_names=None, graph_settings=None):
     """Post-process Excel bytes to add per-gene chart sheets using openpyxl.
@@ -3453,7 +3584,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
     if not processed_data:
         return output_buf
 
-    gene_display_names = gene_display_names or {}
+    gene_display_names = _unique_display_names(processed_data, gene_display_names)
     _disp = lambda g: str(gene_display_names.get(g, g))
 
     output_buf.seek(0)
@@ -3546,7 +3677,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
 
         for i in range(n_rows):
             r = data_start + i
-            ws.cell(row=r, column=3, value=conditions[i])
+            _cond_cell = ws.cell(row=r, column=3, value=conditions[i])
+            if _cond_cell.data_type == "f":
+                # openpyxl turns any string starting with "=" into a formula;
+                # a condition name comes from the uploaded file, so keep it text.
+                _cond_cell.data_type = "s"
             fc = fold_changes[i]
             ws.cell(row=r, column=4, value=fc if pd.notna(fc) else 0)
             sem = sems[i]
@@ -3649,10 +3784,13 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         # set, so the axis limits typed in the Graphs tab reached the screen and
         # the deck but not the workbook. The lab reference workbook sets
         # max=32 min=0 by hand, so bounds ARE part of how these charts are read.
+        # Per-gene keys first ({gene}_y_min, ...) — that is where the Graphs tab
+        # stores them; the unprefixed keys are only the global default, so
+        # reading those alone ignored every per-gene axis the operator set.
         _gs_gene = (graph_settings or {})
-        _y_min = _gs_gene.get("y_min")
-        _y_max = _gs_gene.get("y_max")
-        _y_log = bool(_gs_gene.get("y_log_scale"))
+        _y_min = _gs_gene.get(f"{gene}_y_min", _gs_gene.get("y_min"))
+        _y_max = _gs_gene.get(f"{gene}_y_max", _gs_gene.get("y_max"))
+        _y_log = bool(_gs_gene.get(f"{gene}_y_log", _gs_gene.get("y_log_scale")))
         if _y_log:
             # A log axis cannot start at 0, so the hardcoded floor must not
             # survive into one. openpyxl writes logBase on the scaling object.
@@ -4057,62 +4195,26 @@ with tab1:
                 st.session_state._uploaded_file_hashes = current_file_hashes
 
             if all_data:
-                st.session_state.data = pd.concat(all_data, ignore_index=True)
+                _combined_raw = pd.concat(all_data, ignore_index=True)
+                # Measure overlap BEFORE the Well IDs are made unique (below).
+                _dup_check = ["Target", "Well", "Sample"]
+                _dup_mask = _combined_raw.duplicated(subset=_dup_check, keep=False)
+                _cross_file_dups = _within_file_dups = 0
+                if _dup_mask.any():
+                    _dup_sources = _combined_raw[_dup_mask].groupby(_dup_check)[
+                        "Source_File"
+                    ].apply(lambda x: list(x.unique()))
+                    _cross_file_dups = int((_dup_sources.apply(len) > 1).sum())
+                    _within_file_dups = int((_dup_sources.apply(len) == 1).sum())
+                # A repeated Target+Well+Sample made exclusions and auto-QC
+                # ambiguous (excluding one copy removed all of them).
+                st.session_state.data, _n_wells_renamed = make_well_ids_unique(
+                    _combined_raw
+                )
 
                 # FIX-02: Complete state reset on new upload to prevent stale data
                 had_previous_analysis = bool(st.session_state.get("processed_data"))
-                st.session_state.processed_data = {}
-                st.session_state.graphs = {}
-                st.session_state.sample_mapping = {}
-                st.session_state.excluded_wells = {}
-                st.session_state.excluded_wells_history = []
-                # Which exclusions auto-QC owns, so manual ones survive a
-                # threshold change. Must be dropped with the exclusions or the
-                # new file's first auto-QC treats the old file's wells as manual.
-                st.session_state._auto_qc_owned = {}
-                st.session_state.excluded_samples = set()
-                st.session_state.hk_gene = None
-                st.session_state.selected_efficacy = None
-                st.session_state.gene_display_names = {}
-                st.session_state.qc_reviewed = False
-                for key in [
-                    "selected_gene_idx",
-                    "analysis_cmp_condition",
-                    "analysis_cmp_condition_2",
-                    "analysis_cmp_condition_3",
-                    "analysis_ref_condition",
-                    "mapping_finalized",
-                    "_exclusion_snapshot",
-                    "_last_ref_sample_key",
-                    "_last_cmp_sample_key",
-                    "_last_cmp_sample_key_2",
-                    "_last_cmp_sample_key_3",
-                    "hk_select",
-                    "hk_select_manual",
-                ]:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                # Re-initialize graph_settings to defaults
-                st.session_state.graph_settings = {
-                    "color_scheme": "plotly_white",
-                    "font_size": 14,
-                    "figure_height": 16,
-                    "figure_width": 28,
-                    "show_error": True,
-                    "show_significance": True,
-                    "show_legend": False,
-                    "bar_gap": 0.45,
-                    "bar_opacity": 0.85,
-                    "marker_line_width": 1,
-                    "y_log_scale": False,
-                    "y_min": None,
-                    "y_max": None,
-                    "plot_bgcolor": "#FFFFFF",
-                }
-                # graph_settings above is only half the state: the per-gene editor
-                # keeps its values in widget keys, which would repopulate it on the
-                # next render and carry the previous file's styling over.
-                _clear_all_gene_style_state()
+                _reset_session_for_new_data()
 
                 st.session_state._uploaded_file_hashes = current_file_hashes
 
@@ -4123,39 +4225,37 @@ with tab1:
                 if had_previous_analysis:
                     st.info("Previous analysis results cleared due to new data upload.")
 
-                # FIX-05: Detect overlapping data across files AND within one.
-                # This whole block used to sit behind `len(all_data) > 1`, so two
-                # identical Target+Well+Sample rows inside a SINGLE file became
-                # silent extra replicates — inflating n and tightening the SD.
-                combined = st.session_state.data
-                dup_check_cols = ["Target", "Well", "Sample"]
-                duplicated_mask = combined.duplicated(subset=dup_check_cols, keep=False)
-                if duplicated_mask.any():
-                    dup_rows = combined[duplicated_mask]
-                    dup_sources = dup_rows.groupby(dup_check_cols)["Source_File"].apply(
-                        lambda x: list(x.unique())
+                # FIX-05: Detect overlapping data across files AND within one
+                # (counted above, before Well IDs were made unique).
+                if _cross_file_dups:
+                    st.warning(
+                        f"⚠️ Found {_cross_file_dups} overlapping data point(s) "
+                        f"across files (same Target+Well+Sample in different "
+                        f"files). Each is kept as its own well (repeats get a "
+                        f"' (2)' suffix) and counted as an extra replicate. "
+                        f"Consider deduplicating your input files."
                     )
-                    cross_file_dups = dup_sources[dup_sources.apply(len) > 1]
-                    within_file_dups = dup_sources[dup_sources.apply(len) == 1]
-                    if len(cross_file_dups) > 0:
-                        st.warning(
-                            f"⚠️ Found {len(cross_file_dups)} overlapping data "
-                            f"point(s) across files (same Target+Well+Sample in "
-                            f"different files). This may cause duplicated results. "
-                            f"Consider deduplicating your input files."
-                        )
-                    if len(within_file_dups) > 0:
-                        st.warning(
-                            f"⚠️ Found {len(within_file_dups)} repeated "
-                            f"Target+Well+Sample row(s) within a single file. They "
-                            f"are counted as extra replicates, which inflates n "
-                            f"and narrows the error bars."
-                        )
+                if _within_file_dups:
+                    st.warning(
+                        f"⚠️ Found {_within_file_dups} repeated Target+Well+Sample "
+                        f"row(s) within a single file. They are counted as extra "
+                        f"replicates (repeats get a ' (2)' suffix), which inflates "
+                        f"n and narrows the error bars."
+                    )
 
                 unique_samples = sorted(
                     st.session_state.data["Sample"].unique(), key=natural_sort_key
                 )
                 st.session_state.sample_order = unique_samples
+
+    elif st.session_state.get("_uploaded_file_hashes"):
+        # The uploader was emptied (the X on the last file). With no else branch
+        # the previous experiment stayed live and kept driving metrics, QC,
+        # analysis and exports under an empty uploader.
+        st.session_state.data = None
+        _reset_session_for_new_data()
+        st.session_state._uploaded_file_hashes = []
+        st.info("All files were removed, so the previously loaded data was cleared.")
 
     if st.session_state.data is not None:
         col1, col2, col3, col4 = st.columns(4)
@@ -4487,6 +4587,9 @@ with tab_qc:
                     if n_unres:
                         msg += (f"; **{n_unres}** still above threshold — "
                                 "kept best 2, flagged for review")
+                    msg += (". <span style='color:var(--ink-faint)'>Trimming lowers "
+                            "replicate variance, so p-values for trimmed groups are "
+                            "somewhat anti-conservative (recorded in the provenance)</span>")
                     st.markdown(f"<div style='padding-top:28px'>{msg}.</div>",
                                 unsafe_allow_html=True)
                 else:
@@ -4728,7 +4831,7 @@ with tab_qc:
                                 _sample_flag_indicator = " ⚠️ high SD" if _sample_has_flag else ""
                                 st.markdown(
                                     f'<div style="padding:8px 0 4px 0;font-weight:600;font-size:0.9rem;color:#1d1d1f;">'
-                                    f'{sample_name}{_sample_flag_indicator}'
+                                    f'{_html.escape(str(sample_name))}{_sample_flag_indicator}'
                                     f'<span style="font-weight:400;color:#86868b;font-size:0.8rem;margin-left:8px;">'
                                     f'{n_included}/{n_total} included · {stats_str}</span></div>',
                                     unsafe_allow_html=True,
@@ -5205,7 +5308,7 @@ with tab2:
             with col1:
                 _dim = "" if include else "opacity:0.4;"
                 st.markdown(
-                    f"<div style='padding-top:8px; font-size:0.9rem; {_dim}'>{sample}</div>",
+                    f"<div style='padding-top:8px; font-size:0.9rem; {_dim}'>{_html.escape(str(sample))}</div>",
                     unsafe_allow_html=True,
                 )
             with col2:
@@ -5607,13 +5710,13 @@ with tab2:
                 summary_html = f"""
                 <div style='background: #fafafa; padding: 20px; border-radius: 12px; text-align: center; border: 1px solid #f0f0f0;'>
                     <h4>Analysis Summary</h4>
-                    <p><b>Fold Changes:</b> Relative to <code>{ref_condition}</code></p>
-                    <p><b>P-values (*):</b> Compared to <code>{cmp_condition}</code></p>
+                    <p><b>Fold Changes:</b> Relative to <code>{_html.escape(str(ref_condition))}</code></p>
+                    <p><b>P-values (*):</b> Compared to <code>{_html.escape(str(cmp_condition))}</code></p>
                 """
                 if use_second_comparison and cmp_sample_key_2:
-                    summary_html += f"<p><b>P-values (#):</b> Compared to <code>{cmp_condition_2}</code></p>"
+                    summary_html += f"<p><b>P-values (#):</b> Compared to <code>{_html.escape(str(cmp_condition_2))}</code></p>"
                 if use_third_comparison and cmp_sample_key_3:
-                    summary_html += f"<p><b>P-values (†):</b> Compared to <code>{cmp_condition_3}</code></p>"
+                    summary_html += f"<p><b>P-values (†):</b> Compared to <code>{_html.escape(str(cmp_condition_3))}</code></p>"
                 summary_html += "</div>"
                 st.markdown(summary_html, unsafe_allow_html=True)
 
@@ -5767,13 +5870,13 @@ with tab_ov:
         eng = f"{_tt} treatment" if _tt else ""
         st.markdown(
             "<div style='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap'>"
-            f"<span style='font-size:22px;font-weight:700'>{eff or 'Results'}</span>"
+            f"<span style='font-size:22px;font-weight:700'>{_html.escape(str(eff or 'Results'))}</span>"
             f"<span style='color:var(--ink-faint);font-size:15px'>{eng}</span></div>"
             "<div style='color:var(--ink-faint);font-size:13px;margin-top:4px'>"
-            f"Cell line <b style='color:var(--ink)'>{cell}</b> &nbsp;·&nbsp; "
+            f"Cell line <b style='color:var(--ink)'>{_html.escape(str(cell))}</b> &nbsp;·&nbsp; "
             f"Genes <b style='color:var(--ink)'>{len(gene_list)}</b> &nbsp;·&nbsp; "
             f"Conditions <b style='color:var(--ink)'>{len(conditions)}</b> &nbsp;·&nbsp; "
-            f"Reference <b style='color:var(--ink)'>{ref_condition or '—'}</b></div>",
+            f"Reference <b style='color:var(--ink)'>{_html.escape(str(ref_condition or '—'))}</b></div>",
             unsafe_allow_html=True,
         )
 
@@ -5844,7 +5947,7 @@ with tab_ov:
         passes = graded = sig_count = 0
         bench_pcts = []
         for g in gene_list:
-            exp = expected_map.get(g)
+            exp = expected_direction_for(g, expected_map)
             hl_fold = _fold(g, highlight) if highlight else None
             hl_sig = _sig(g, highlight) if highlight else ""
             hl_p = _pval(g, highlight) if highlight else None
@@ -5890,7 +5993,7 @@ with tab_ov:
         # entirely — a panel where two markers matched and two moved the WRONG way
         # still read "2/2 markers moved in the expected direction" behind a green
         # tick. Name them instead of dropping them.
-        ungraded = [g for g in gene_list if not expected_map.get(g)]
+        ungraded = [g for g in gene_list if not expected_direction_for(g, expected_map)]
 
         # verdict banner
         if graded:
@@ -5915,7 +6018,7 @@ with tab_ov:
                 f"<span style='font-weight:400;color:var(--ink-faint)'>"
                 f"(of {len(gene_list)} analysed)</span></div>"
                 f"<div style='color:var(--ink-faint);font-size:13px'>Highlight active "
-                f"<b>{highlight}</b>{avg_bench}{_ungraded_note}.</div>"
+                f"<b>{_html.escape(str(highlight))}</b>{avg_bench}{_html.escape(_ungraded_note)}.</div>"
                 "</div></div>",
                 unsafe_allow_html=True,
             )
@@ -6023,7 +6126,7 @@ with tab3:
                     st.session_state.selected_efficacy, {}
                 )
                 if "expected_direction" in efficacy_config:
-                    direction = efficacy_config["expected_direction"].get(gene)
+                    direction = expected_direction_for(gene, efficacy_config["expected_direction"])
                     if direction:
                         st.caption(
                             f"Expected: {'↑ Increase' if direction == 'up' else '↓ Decrease'}"
@@ -6472,7 +6575,7 @@ with tab5:
 
         img_col1, img_col2, img_col3 = st.columns(3)
         with img_col1:
-            img_format = st.selectbox("Format", ["PNG (300 DPI)", "SVG (Vector)", "PDF (Vector)"], key="pub_img_format")
+            img_format = st.selectbox("Format", ["PNG (3× pixels)", "SVG (Vector)", "PDF (Vector)"], key="pub_img_format")
         with img_col2:
             # Keyed so the value is addressable and can reach _export_fp.
             img_width = st.number_input(
@@ -6487,6 +6590,15 @@ with tab5:
             fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
             mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
             scale = 3 if fmt == "png" else 1
+            # A 3000x2000 canvas at 3x is 54 MP PER GENE — enough to exhaust a
+            # Streamlit Cloud worker. Step the scale down to stay under ~16 MP.
+            while scale > 1 and img_width * img_height * scale * scale > 16_000_000:
+                scale -= 1
+            if fmt == "png" and scale < 3:
+                st.caption(
+                    f"PNG scale reduced to {scale}× to keep each image under ~16 "
+                    f"megapixels at this width/height."
+                )
             # Rendering each figure launches headless Chrome (~seconds each), so gate
             # it behind an explicit button instead of re-rendering on every rerun.
             if st.button(f"🖼️ Generate Images ({fmt.upper()})", key="gen_images",

@@ -35,6 +35,7 @@ def build_miqe_checklist(prov: dict) -> str:
         f"**distinct samples on the plate:** {prov.get('n_samples', '—')}",
         f"- **Excluded wells (QC):** {prov.get('excluded_wells_count', 0)} "
         "(itemised in the provenance record)",
+        f"- **Automatic replicate trim:** {prov.get('auto_qc_trim') or 'not recorded'}",
     ]
     todo = [
         "Sample source, handling, and storage conditions",

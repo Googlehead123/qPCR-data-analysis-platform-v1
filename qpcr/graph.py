@@ -780,6 +780,9 @@ class GraphGenerator:
                 _row = gene_data_indexed.iloc[_idx]
                 _bar_h = _row["Relative_Expression"]
                 _err_h = error_visible_upper[_idx] if _idx < len(error_visible_upper) else 0
+                # None/NaN = no error bar drawn (same coercion as the marker layout)
+                if _err_h is None or pd.isna(_err_h):
+                    _err_h = 0.0
                 _top_y = _bar_h + _err_h
                 if _top_y > max_annotation_y:
                     max_annotation_y = _top_y

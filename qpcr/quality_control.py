@@ -294,7 +294,9 @@ class QualityControl:
             active_data[active_data["CT"] < _qct["ct_low"]]
         )
 
-        triplicate_stats = QualityControl.get_triplicate_data(data, excluded_wells)
+        triplicate_stats = QualityControl.get_triplicate_data(
+            data, excluded_wells, thresholds=thresholds
+        )
         if not triplicate_stats.empty:
             total_triplicates = len(triplicate_stats)
             healthy_triplicates = len(
@@ -339,57 +341,6 @@ class QualityControl:
             if total_triplicates > 0
             else 0,
         }
-
-    @staticmethod
-    def suggest_exclusions(
-        data: pd.DataFrame,
-        sample: str,
-        target: str,
-        excluded_wells: set = None,
-        strategy: str = "outlier",
-    ) -> list:
-        """
-        Suggest wells to exclude based on different strategies.
-
-        Strategies:
-        - 'outlier': Exclude statistical outliers (Grubbs test)
-        - 'worst': Exclude the well with highest deviation from mean
-        - 'keep_best_2': Keep the 2 closest values, exclude others
-        """
-        excluded_wells = excluded_wells or set()
-        wells_df = QualityControl.get_wells_for_triplicate(data, sample, target)
-
-        if wells_df.empty:
-            return []
-
-        active_wells = wells_df[~wells_df["Well"].isin(excluded_wells)]
-
-        if len(active_wells) < 2:
-            return []
-
-        suggestions = []
-
-        if strategy == "outlier":
-            outliers = active_wells[active_wells["Is_Outlier"]]
-            suggestions = outliers["Well"].tolist()
-
-        elif strategy == "worst":
-            if len(active_wells) > 2:
-                worst_idx = active_wells["Deviation"].abs().idxmax()
-                suggestions = [active_wells.loc[worst_idx, "Well"]]
-
-        elif strategy == "keep_best_2":
-            if len(active_wells) > 2:
-                median_ct = active_wells["CT"].median()
-                active_wells_sorted = active_wells.copy()
-                active_wells_sorted["Dist_to_Median"] = abs(
-                    active_wells_sorted["CT"] - median_ct
-                )
-                active_wells_sorted = active_wells_sorted.sort_values("Dist_to_Median")
-                to_exclude = active_wells_sorted.iloc[2:]["Well"].tolist()
-                suggestions = to_exclude
-
-        return suggestions
 
     @staticmethod
     def find_high_sd_outliers(
@@ -569,8 +520,8 @@ class QualityControl:
         ct_high = qc_df["CT"] > _qct["ct_high"]
         ct_low = qc_df["CT"] < _qct["ct_low"]
 
-        high_ct_issue = f"CT > {_qct["ct_high"]} (low expression)"
-        low_ct_issue = f"CT < {_qct["ct_low"]} (unusually high)"
+        high_ct_issue = f"CT > {_qct['ct_high']} (low expression)"
+        low_ct_issue = f"CT < {_qct['ct_low']} (unusually high)"
 
         qc_df["Issues"] = pd.DataFrame(
             {
@@ -613,7 +564,7 @@ class QualityControl:
             qc_df.loc[has_high_cv, "Flagged"] = True
             qc_df = qc_df.drop(columns=["cv"])
 
-        grubbs_outliers = set()
+        grubbs_outliers = set()  # (Sample, Target, Well): bare Well IDs collide across genes/samples
         for (sample, target), group in data.groupby(["Sample", "Target"]):
             if len(group) >= 3:
                 ct_vals = group["CT"].values
@@ -622,10 +573,13 @@ class QualityControl:
                 )
                 if is_outlier:
                     outlier_well = group.iloc[outlier_idx]["Well"]
-                    grubbs_outliers.add(outlier_well)
+                    grubbs_outliers.add((sample, target, outlier_well))
 
         if grubbs_outliers:
-            grubbs_mask = qc_df["Well"].isin(grubbs_outliers)
+            grubbs_mask = pd.Series(
+                list(zip(qc_df["Sample"], qc_df["Target"], qc_df["Well"])),
+                index=qc_df.index,
+            ).isin(grubbs_outliers)
 
             def add_grubbs_issue(current_issue):
                 grubbs_issue = "Grubbs outlier"

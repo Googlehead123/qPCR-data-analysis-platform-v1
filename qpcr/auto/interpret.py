@@ -10,6 +10,7 @@ only, never recomputes them.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 _DIR_EN = {"up": "upregulation", "down": "downregulation", "flat": "no change"}
@@ -33,6 +34,34 @@ def expected_direction_for(gene: str, expected_direction: dict | None) -> str | 
         return str(expected_direction[gene]).lower()
     low = {str(k).lower(): str(v).lower() for k, v in expected_direction.items()}
     return low.get(str(gene).lower())
+
+
+def fold_vs_comparison(rows: pd.DataFrame, gene_data: pd.DataFrame,
+                       compare_to: str | None, fc_col: str) -> pd.Series:
+    """Fold change of ``rows`` relative to the comparison control.
+
+    The significance marker on a treatment row is a test AGAINST the comparison
+    control, but ``fc_col`` is relative to the reference sample. Judging direction
+    on the reference-relative fold change could stamp "efficacy" on a treatment
+    that sits significantly BELOW the very control it was tested against. When the
+    comparison condition is absent, non-positive or non-finite this falls back to
+    the reference-relative value (identical when the comparison IS the reference).
+    """
+    fc = pd.to_numeric(rows[fc_col], errors="coerce")
+    if not compare_to or "Condition" not in gene_data.columns:
+        return fc
+    # Exact name first (the statistics match conditions exactly), then a
+    # case/space-insensitive fallback — "CTL" and "Ctl" can both exist.
+    cond = gene_data["Condition"].astype(str)
+    match = gene_data[cond == str(compare_to)]
+    if match.empty:
+        match = gene_data[cond.str.strip().str.lower() == str(compare_to).strip().lower()]
+    if match.empty or fc_col not in match.columns:
+        return fc
+    cmp_fc = pd.to_numeric(match[fc_col], errors="coerce").iloc[0]
+    if not np.isfinite(cmp_fc) or cmp_fc <= 0:
+        return fc
+    return fc / cmp_fc
 
 
 def interpret_gene(gene: str, gene_df: pd.DataFrame, expected: str | None = None,

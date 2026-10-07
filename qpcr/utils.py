@@ -5,6 +5,8 @@ management, and the RdYlGn table gradient.
 """
 
 import re
+
+import pandas as pd
 from typing import Optional
 
 
@@ -168,3 +170,46 @@ def is_cell_selected(session_state, gene: str, sample: str) -> bool:
         return False
 
     return selected[0] == gene and selected[1] == sample
+
+
+def make_well_ids_unique(df):
+    """Give every row a Well ID that is unique within its (Target, Sample).
+
+    Exclusions, auto-QC and Grubbs/CV flags all identify a measurement by
+    (gene, sample, Well). When the same Well repeats for a gene+sample (the same
+    plate position in two uploaded files, or a repeated row), those rows were
+    indistinguishable: excluding one removed every copy, and auto-QC reported
+    keeping wells it had actually dropped. The 2nd and later occurrences get a
+    " (2)", " (3)"... suffix — skipping any ID already present in the group — and
+    rows with a missing Well get "?" plus a number. First occurrences keep their
+    original ID.
+
+    Returns ``(frame, n_renamed)``; the input is not modified.
+    """
+    if df is None or df.empty or not {"Target", "Sample", "Well"} <= set(df.columns):
+        return df, 0
+    out = df.copy()
+    wells = out["Well"].astype(object).copy()
+    n_renamed = 0
+    for _, idx in out.groupby(["Target", "Sample"], sort=False, dropna=False).groups.items():
+        positions = list(idx)
+        used = {str(w) for w in wells.loc[positions] if pd.notna(w)}
+        seen: set = set()
+        for pos in positions:
+            w = wells.loc[pos]
+            missing = pd.isna(w)
+            base = "?" if missing else str(w)
+            if not missing and base not in seen:
+                seen.add(base)
+                continue
+            k = 2 if not missing else 1
+            cand = f"{base} ({k})" if not missing else f"?{k}"
+            while cand in used or cand in seen:
+                k += 1
+                cand = f"{base} ({k})" if not missing else f"?{k}"
+            wells.loc[pos] = cand
+            seen.add(cand)
+            used.add(cand)
+            n_renamed += 1
+    out["Well"] = wells
+    return out, n_renamed
