@@ -122,7 +122,12 @@ class QPCRParser:
         )
         # inf/-inf survive to_numeric and dropna, then become clipped fold changes.
         parsed["CT"] = parsed["CT"].where(np.isfinite(parsed["CT"]))
-        parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+        # Only a blank cell is a missing sample: read_csv runs with
+        # keep_default_na=False, so blanks arrive as NaN -> "nan" and a Python
+        # None never appears. Mapping the TEXT "None" to NA as well silently
+        # dropped an untreated control named "None" — the reference most
+        # efficacy comparisons are made against.
+        parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "": pd.NA})
         parsed["Target"] = parsed["Target"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
         parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 
@@ -187,7 +192,8 @@ class QPCRParser:
                 }
             )
             parsed["CT"] = parsed["CT"].where(np.isfinite(parsed["CT"]))
-            parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+            # "None" is a valid sample name here too — see parse_format1.
+            parsed["Sample"] = parsed["Sample"].replace({"nan": pd.NA, "": pd.NA})
             parsed["Target"] = parsed["Target"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
             parsed["Well"] = parsed["Well"].replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
 

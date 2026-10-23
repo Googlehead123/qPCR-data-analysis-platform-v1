@@ -78,6 +78,26 @@ class TestParserRobustness:
         assert out is not None
         assert "NA" in set(out["Sample"])
 
+    def test_sample_named_None_is_kept(self):
+        """An untreated control named "None" — the reference most efficacy
+        comparisons are made against — was mapped to NA and dropped at upload."""
+        f = _csv(["A1,None,G,20.0", "A2,None,G,20.1", "A3,S2,G,21.0"])
+        out = QPCRParser.parse(f)
+        assert out is not None
+        assert (out["Sample"] == "None").sum() == 2
+
+    def test_sample_named_None_is_kept_format2(self):
+        df = pd.DataFrame([
+            ["Well", "Sample Name", "Target Name", "Cт"],
+            ["A1", "None", "G", "20.0"],
+            ["A2", "None", "G", "20.1"],
+            ["A3", "", "G", "21.0"],
+        ])
+        out = QPCRParser.parse_format2(df, 0)
+        assert out is not None
+        assert (out["Sample"] == "None").sum() == 2
+        assert len(out) == 2, "a genuinely blank Sample cell must still be dropped"
+
     def test_undetermined_ct_is_still_dropped(self):
         f = _csv(["A1,S1,G,Undetermined", "A2,S1,G,20.1"])
         out = QPCRParser.parse(f)
