@@ -163,6 +163,49 @@ above; the rest of that sweep is still open.
 
 ---
 
+## 2026-10-23: DECIDED — default test is two-tailed Student's, not Welch
+
+**Symptom (Min):** some app p-values were higher than the same comparison
+calculated by hand with a two-tailed Student's t-test.
+
+**Root cause:** `calculate_statistics` defaulted to `ttest_type="welch"`, the
+Analysis-tab radio defaulted to Welch (with "Welch's is recommended" as its
+help), and four `session_state.get("ttest_type", "welch")` fallbacks in the
+app agreed. The maths was otherwise right —
+the app's Student mode equals a hand Student test on the same ΔCt to machine
+precision. With equal group sizes Welch's t statistic equals Student's but its
+degrees of freedom are lower, so its p is never smaller and is strictly larger
+whenever the variances differ (unless t = 0, where both are 1): exactly "some
+p-values higher". With unequal n (2 vs 3 after QC) either can be lower.
+
+Measured on the six plates in `test_data/` (90 comparisons, 3 vs 3 wells):
+
+| | result |
+|---|---|
+| Welch p > Student p | 90/90 (median 2.0x, max 156x) |
+| significance marker changed | 21/90 (e.g. EMILIN1: 0.065 ns -> 0.024 *) |
+| n=2 after QC vs 3 | 0.036 * -> 0.00031 *** (Welch df collapses toward 1) |
+
+**Decision (Min, 2026-10-23):** Student's (pooled variance, Excel
+`T.TEST(...,2,2)`) is the default; Welch stays selectable. This moves markers
+relative to reports shipped with the Welch default — the opposite trade-off to
+the 2026-08-24 uncorrected-marker decision, made deliberately because the user
+specified the test.
+
+**Shape of the fix:** one constant, `qpcr.analysis.DEFAULT_TTEST_TYPE`, read by
+every fallback; an unknown `ttest_type` now raises instead of silently running
+Welch. The legacy Excel label path (`params.get("ttest_type", "welch")` for
+results with no `stat_test_used`) intentionally stays `"welch"` — it labels
+results computed before the switch.
+
+**If hand numbers still differ after this,** check which values the sheet
+tests. The app tests per-well ΔCt (target Ct - that condition's mean HK Ct).
+Testing per-well 2^-ΔΔCt instead (a common Excel layout) changed the marker in
+7/90 comparisons on the same plates; pairing each target well with "its" HK
+well changed 36/90. Those are different statistics, not rounding.
+
+---
+
 ## 2026-08-25: "No `import X` anywhere" does NOT mean X is unused
 
 **What went wrong:** The audit dropped the `matplotlib` and `seaborn` pins as
