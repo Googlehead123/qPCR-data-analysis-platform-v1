@@ -11,6 +11,18 @@ import pandas as pd
 import streamlit as st
 from scipy import stats
 
+# Two-tailed Student's t-test (pooled variance — Excel T.TEST type 2) is the
+# default. It was Welch until 2026-10-23, and Min's hand calculations came out
+# LOWER than the app's: with equal n, Welch has the same t statistic but fewer
+# degrees of freedom, so its p is never smaller and is strictly larger whenever
+# the variances differ (and t != 0). On the six test_data plates that was 90/90 comparisons
+# (median 2x, max 156x), moving the marker in 21; at n=2 after QC it can turn
+# '***' into '*'. Decision (Min, 2026-10-23): Student by default, Welch
+# selectable. Every fallback in the app reads this constant — do not
+# re-introduce a literal.
+TTEST_TYPES = ("student", "welch")
+DEFAULT_TTEST_TYPE = "student"
+
 
 class AnalysisEngine:
     @staticmethod
@@ -306,13 +318,21 @@ class AnalysisEngine:
         raw_data: pd.DataFrame = None,
         hk_gene: str = None,
         sample_mapping: dict = None,
-        ttest_type: str = "welch",
+        ttest_type: str = DEFAULT_TTEST_TYPE,
         excluded_wells=None,
     ) -> pd.DataFrame:
-        """T-test comparing each condition to compare_condition (and optionally 2nd/3rd).
+        """Two-tailed t-test comparing each condition to compare_condition
+        (and optionally 2nd/3rd), on per-well ΔCt.
 
+        ``ttest_type`` is "student" (pooled variance, the default) or "welch".
         Significance symbols: * (1st), # (2nd), † (3rd).
         """
+        # Anything but "student" used to fall through to Welch silently, so a
+        # mistyped value would quietly reintroduce the higher p-values.
+        if ttest_type not in TTEST_TYPES:
+            raise ValueError(
+                f"ttest_type must be one of {TTEST_TYPES}, got {ttest_type!r}"
+            )
 
         # Use session_state fallbacks
         raw_data = raw_data if raw_data is not None else st.session_state.get("data")

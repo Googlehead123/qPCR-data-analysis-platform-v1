@@ -37,7 +37,8 @@ from qpcr.slide_geometry import (EMU_PER_INCH, SLIDE_MAX_PICTURE_H_IN,
 from qpcr.parser import QPCRParser
 from qpcr.quality_control import QualityControl
 from qpcr.graph import GraphGenerator
-from qpcr.analysis import AnalysisEngine as _CoreAnalysisEngine
+from qpcr.analysis import (AnalysisEngine as _CoreAnalysisEngine,
+                           DEFAULT_TTEST_TYPE, TTEST_TYPES)
 from qpcr.auto import (
     screen_data, recommend_test, interpret_results, build_miqe_checklist,
     expected_direction_for, fold_vs_comparison,
@@ -303,7 +304,8 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
         # condition (deliberate — Min, 2026-08-24), which MIQE requires be
         # declared because it sets the degrees of freedom.
         "statistical_test": (
-            f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test on ΔCt, "
+            f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test "
+            f"(two-tailed) on ΔCt, "
             f"n = technical replicate wells pooled per condition"
         ),
         "replicate_unit": "technical wells (pooled across samples per condition)",
@@ -359,7 +361,7 @@ def _current_provenance():
             st.session_state.get("analysis_cmp_condition_2"),
             st.session_state.get("analysis_cmp_condition_3"),
         ],
-        ttest_type=st.session_state.get("ttest_type", "welch"),
+        ttest_type=st.session_state.get("ttest_type", DEFAULT_TTEST_TYPE),
         excluded_wells=st.session_state.get("excluded_wells", {}),
         excluded_samples=st.session_state.get("excluded_samples", set()),
         n_genes=n_genes,
@@ -679,7 +681,7 @@ def _analysis_state_snapshot() -> dict:
             str(k): sorted(v) for k, v in st.session_state.get("excluded_wells", {}).items()
         },
         "excluded_samples": sorted(st.session_state.get("excluded_samples", set())),
-        "ttest_type": st.session_state.get("ttest_type", "welch"),
+        "ttest_type": st.session_state.get("ttest_type", DEFAULT_TTEST_TYPE),
         "mapping": {
             # Group is included because it reaches the results as `Group` and is
             # shown in the results table and the Excel Summary grouping.
@@ -2405,7 +2407,7 @@ class AnalysisEngine(_CoreAnalysisEngine):
                     )
 
                 # --- Statistical test ---
-                ttest_type = st.session_state.get("ttest_type", "welch")
+                ttest_type = st.session_state.get("ttest_type", DEFAULT_TTEST_TYPE)
                 # Pre-filter raw_data by excluded samples so statistics
                 # never sees data the user chose to exclude
                 stats_raw = data[
@@ -3368,7 +3370,10 @@ def export_to_excel(
                         gene_export["stat_test_used"].fillna("").astype(str)
                     )
                 else:
-                    # Older stored result with no stat_test_used column.
+                    # Older stored result with no stat_test_used column. The
+                    # "welch" fallback is deliberately not DEFAULT_TTEST_TYPE:
+                    # results that old were computed when an unset choice
+                    # meant Welch (the default until 2026-10-23).
                     ttest_type = params.get("ttest_type", "welch")
                     _label = "Welch" if ttest_type == "welch" else "Student"
                     for idx, row in gene_export.iterrows():
@@ -5661,7 +5666,10 @@ with tab2:
                 
                 **🎯 P-value Testing**  
                 - Statistical significance between conditions
-                - Uses t-test to compare treatment vs control groups
+                - Two-tailed **Student's t-test** by default — the same as Excel
+                  `=T.TEST(control, sample, 2, 2)` — on each well's ΔCt
+                  (target Ct − that condition's mean housekeeping Ct)
+                - n = wells left after QC (2 or 3 per condition typically)
                 - Symbols: `*` p<0.05, `**` p<0.01, `***` p<0.001
                 - Respects QC exclusions (uses only included wells)
                 
@@ -5681,13 +5689,19 @@ with tab2:
             with stat_col1:
                 ttest_type = st.radio(
                     "T-test Type",
-                    ["welch", "student"],
+                    list(TTEST_TYPES),
                     format_func=lambda x: "Welch's t-test (unequal variance)"
                     if x == "welch"
-                    else "Student's t-test (equal variance)",
-                    index=0,
+                    else "Student's t-test (equal variance, two-tailed)",
+                    index=TTEST_TYPES.index(DEFAULT_TTEST_TYPE),
                     key="ttest_type",
-                    help="Welch's is recommended - more robust when group variances differ",
+                    help=(
+                        "Student's matches a manual Excel T.TEST(..., 2, 2). "
+                        "Welch's assumes unequal variances; when both groups "
+                        "have the same number of wells its p-value is never "
+                        "lower than Student's, and with 2-3 wells it is often "
+                        "several-fold higher."
+                    ),
                 )
                 # Note: Widget with key="ttest_type" auto-syncs to session state
 
@@ -6363,7 +6377,7 @@ with tab5:
             "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
             "Excluded_Samples": len(st.session_state.excluded_samples),
             "Genes_Analyzed": len(st.session_state.processed_data),
-            "ttest_type": st.session_state.get("ttest_type", "welch"),
+            "ttest_type": st.session_state.get("ttest_type", DEFAULT_TTEST_TYPE),
             # Treatment time comes from the efficacy catalog (per-assay) so the
             # PPT "Treatment time:" field is accurate (4 h / 6 h / 24 h / 48 h).
             "treatment_time": EFFICACY_CONFIG.get(

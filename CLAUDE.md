@@ -21,7 +21,7 @@ Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/derma
 ## How to Run
 ```bash
 streamlit run "streamlit qpcr analysis v1.py"    # http://localhost:8501
-pytest tests/                                      # 436 tests
+pytest tests/                                      # 450 tests
 ```
 
 ## Key Files
@@ -39,7 +39,7 @@ pytest tests/                                      # 436 tests
   `auto/` (screening, test advice, MIQE).
   **Do not re-declare any of these in the monolith** — that dual-copy hazard is
   documented in `tasks/lessons.md` and has bitten this project repeatedly.
-- `tests/` — 22 modules, 436 tests. Note `conftest.py` replaces `streamlit` with
+- `tests/` — 24 modules, 450 tests. Note `conftest.py` replaces `streamlit` with
   a MagicMock, so widget behaviour is invisible to most of the suite; the tests
   that need real Streamlit drive the app through `AppTest` **in a subprocess**
   (see `tests/test_gene_editor_state.py`).
@@ -91,5 +91,11 @@ Repository: Googlehead123/qPCR-data-analysis-platform-v1
   contract that samples sharing a condition name are replicates. Declared in the
   provenance record and as its own MIQE item, since the replicate unit sets the
   degrees of freedom. Rationale in `tasks/lessons.md`.
+- The default test is a **two-tailed Student's t-test** (pooled variance, Excel
+  `T.TEST(..., 2, 2)`) on per-well ΔCt — Min's decision 2026-10-23, after the
+  former Welch default produced p-values higher than hand calculation. Welch
+  stays selectable. `qpcr.analysis.DEFAULT_TTEST_TYPE` is the single default;
+  every app fallback reads it. `tests/test_student_ttest.py` pins
+  mean/SD/SEM/p to hand-computed values.
 - Uses streamlit-sortables for drag-and-drop sample ordering
 - python-pptx for automated PowerPoint report generation

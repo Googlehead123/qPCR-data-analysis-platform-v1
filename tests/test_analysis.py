@@ -420,5 +420,6 @@ class TestSingletonComparisons:
         ])
         row = result[result["Condition"] == "T"].iloc[0]
         assert pd.notna(row["p_value"]), "n=3 vs n=3 must still produce a p-value"
-        assert "Welch t-test" in row["stat_test_used"]
+        # Default is Student's since 2026-10-23 (tests/test_student_ttest.py).
+        assert "Student t-test" in row["stat_test_used"]
         assert row["n_reference"] == 3
