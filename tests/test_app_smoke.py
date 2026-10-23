@@ -68,6 +68,42 @@ def test_full_pipeline_runs_without_exceptions():
     assert set(at.session_state["processed_data"]) <= set(graphs)
 
 
+def test_pvalues_default_to_two_tailed_student():
+    """With the T-test radio untouched, the shipped p-value is Student's.
+
+    The radio used to default to Welch, which on these wells reports 0.0162
+    ('*') against a hand Student / Excel T.TEST(...,2,2) of 0.00168 ('**').
+    Per-well ΔCt: Non-treated 4.00/4.05/3.95, Active 1.9/2.5/1.6 — the
+    control-vs-A ΔCt of tests/test_student_ttest.py shifted by a constant, so
+    t and p are identical to the value pinned there by hand calculation.
+    """
+    from streamlit.testing.v1 import AppTest
+    rows = []
+    for sample, col1a1 in [("Non-treated", [22.0, 22.05, 21.95]),
+                           ("Active", [19.9, 20.5, 19.6])]:
+        for r in range(3):
+            rows.append({"Well": f"AC{sample[:2]}{r}", "Sample": sample,
+                         "Target": "ACTIN", "CT": 18.0})
+            rows.append({"Well": f"CO{sample[:2]}{r}", "Sample": sample,
+                         "Target": "COL1A1", "CT": col1a1[r]})
+    at = AppTest.from_file(SCRIPT, default_timeout=90)
+    at.session_state["data"] = pd.DataFrame(rows)
+    at.session_state["hk_gene"] = "ACTIN"
+    at.session_state["selected_efficacy"] = "광노화"
+    at.run()
+    assert not at.exception, at.exception
+    assert at.radio(key="ttest_type").value == "student"
+
+    run_btns = [b for b in at.button if "Run Full Analysis" in (b.label or "")]
+    run_btns[0].click().run()
+    assert not at.exception, at.exception
+    col1a1 = at.session_state["processed_data"]["COL1A1"]
+    row = col1a1[col1a1["p_value"].notna()].iloc[0]
+    assert row["p_value"] == pytest.approx(0.0016784148735, rel=1e-9)
+    assert row["significance"] == "**"
+    assert row["stat_test_used"].startswith("Student t-test")
+
+
 def _gene_df(up):
     folds = {"UVB only": 1.0, "TGFβ": 1.8, "Active": 1.56} if up \
         else {"UVB only": 1.0, "TGFβ": 0.45, "Active": 0.62}
