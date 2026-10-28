@@ -203,6 +203,54 @@ tests. The app tests per-well ΔCt (target Ct - that condition's mean HK Ct).
 Testing per-well 2^-ΔΔCt instead (a common Excel layout) changed the marker in
 7/90 comparisons on the same plates; pairing each target well with "its" HK
 well changed 36/90. Those are different statistics, not rounding.
+(**Resolved 2026-10-28** — Min's sheet does test per-well 2^-ΔΔCt; the app now
+does too. See the next entry.)
+
+---
+
+## 2026-10-28: DECIDED — every reported number is the hand sheet's per-well fold change
+
+**Ask (Min):** the hand sheet uses each well's fold change for the mean, SD/SEM
+and the t-test — make the app match, all of it.
+
+**What changed.** Per well, FC_i = 2^-(Ct_target_i − the condition's mean HK Ct
+− the reference condition's mean ΔCt). `calculate_ddct` now reports the
+**simple mean** of FC_i as Fold_Change, and `SD` (n−1) / `SEM` / 95% CI over
+FC_i; the `FC_Error_*` / `FC_SEM_*` / `FC_CI_*` columns carry those same values
+(symmetric, fold units), so `graph.py` and the Excel/PPT writers needed no code
+change. `calculate_statistics` tests FC_i. Before: bar 2^-(mean ΔΔCt) (Livak),
+asymmetric 2^-x transforms of the Ct SD, test on ΔCt.
+
+**Verified alignment, two ways.** (1) `tests/test_fold_change_method.py` pins
+bar, SD, SEM, CI, p — including n=2 after QC and an HK-well exclusion — to
+hand-computed values, and asserts the bar, SD and p reproduce from the
+Replicate_FC data points. (2) On the six `test_data/` plates, all 90 bars, SDs
+and p-values equal an independent hand-sheet computation (p to 1e-13).
+
+**Impact:** 7/90 significance markers on those plates differ from the
+2026-10-23 (ΔCt) version. Fold changes are right-skewed, so a wide condition can
+come out less significant than its ΔCt test said (unit fixture: 0.00168 ** ->
+0.0117 *). This is the trade-off the hand sheet makes; it was chosen knowingly.
+
+**Choices made without asking — revisit if the hand sheet differs:**
+- HK enters as the condition **mean**, not paired well-by-well. Pairing has no
+  defined well order and breaks when QC leaves 2 target vs 3 HK wells; the app's
+  data points already worked this way.
+- The reference condition's mean is **not** renormalised to exactly 1 — the
+  simple mean of 2^-x_i is >= 1 (e.g. 1.0004), exactly as the sheet computes it.
+- The p-value is computed on 2^-ΔCt_i, which differs from the displayed FC_i by
+  one per-gene constant; t is scale-invariant, so p is identical (tested) and
+  does not depend on which condition is the ΔΔCt reference.
+
+**Consumers aligned in the same change (found by the Codex review):** the
+Overview's up/down call and "% of benchmark" now measure from the reference
+condition's reported mean instead of a literal 1, and the Excel `Summary` sheet
+is now one row per gene x condition (n, Fold_Change, SD, SEM, p, marker) — it
+used to be a mean/SD of condition means with the minimum p.
+
+`Target_Ct_*`, `HK_Ct_*`, `Delta_Ct` and `Delta_Delta_Ct` stay Ct-domain and
+informational. The error-bar setting's stored key stays `livak_sd` so saved
+graph settings resolve; only its label changed to "±SD".
 
 ---
 

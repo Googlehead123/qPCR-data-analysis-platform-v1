@@ -21,7 +21,7 @@ Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/derma
 ## How to Run
 ```bash
 streamlit run "streamlit qpcr analysis v1.py"    # http://localhost:8501
-pytest tests/                                      # 450 tests
+pytest tests/                                      # 461 tests
 ```
 
 ## Key Files
@@ -39,7 +39,7 @@ pytest tests/                                      # 450 tests
   `auto/` (screening, test advice, MIQE).
   **Do not re-declare any of these in the monolith** — that dual-copy hazard is
   documented in `tasks/lessons.md` and has bitten this project repeatedly.
-- `tests/` — 24 modules, 450 tests. Note `conftest.py` replaces `streamlit` with
+- `tests/` — 24 modules, 461 tests. Note `conftest.py` replaces `streamlit` with
   a MagicMock, so widget behaviour is invisible to most of the suite; the tests
   that need real Streamlit drive the app through `AppTest` **in a subprocess**
   (see `tests/test_gene_editor_state.py`).
@@ -74,28 +74,36 @@ Repository: Googlehead123/qPCR-data-analysis-platform-v1
 - **Architecture:** partially modularized. The computational layer lives in
   `qpcr/`; the app file keeps the UI plus the report/export writers. Remaining
   refactor target is those writers.
-- Validation shows <0.001% DDCt error vs reference calculations. Independently
-  re-verified 2026-08-24: ΔΔCt, the asymmetric fold-change error transform and
-  the Benjamini-Hochberg implementation all match hand/reference computation.
+- **Method = Min's hand sheet (2026-10-28).** Per well:
+  FC_i = 2^-(Ct_target_i − the condition's mean HK Ct − the reference
+  condition's mean ΔCt). Fold_Change is the **simple mean** of FC_i; `SD` (n−1)
+  and `SEM` are over FC_i (fold units — `Target_Ct_SD` keeps the Ct spread);
+  the p-value is a t-test on FC_i. Bar, error bars, data points (Replicate_FC)
+  and p-value all come from the same wells — `tests/test_fold_change_method.py`
+  pins every one to hand-computed values, and on the six `test_data/` plates
+  all 90 bars, SDs and p-values match the hand sheet. Before 2026-10-28 the bar
+  was 2^-(mean ΔΔCt) (Livak) with asymmetric Ct-domain error bars and the test
+  ran on ΔCt. BH correction re-verified 2026-08-24.
 - Significance markers shown on charts, slides and summary sheets are
   **uncorrected** p-values — a deliberate choice (2026-08-24), since that is what
   every report shipped so far has used. BH q-values are still computed and reach
   the per-gene Excel sheets as `p_value_fdr` / `significance_fdr`, so the
   corrected view is available; the provenance record and MIQE checklist state
   both. Do not delete those columns as "unused".
-- Error-bar spread is computed from the **target** replicates only; housekeeping
-  variability is not propagated into it. All error-bar modes are plotted in the
-  fold-change domain.
+- Error bars (±SD, ±SEM, t-based 95% CI) are the spread of the per-well fold
+  changes — symmetric, in fold units. Housekeeping enters each well as the
+  condition **mean**, so its well-to-well variability is not propagated. The
+  stored error-bar key is still `livak_sd` so saved settings resolve; only the
+  label changed.
 - The t-test's n is **technical wells** pooled per condition, not biological
   samples — deliberate (2026-08-24), and consistent with the Mapping tab's stated
   contract that samples sharing a condition name are replicates. Declared in the
   provenance record and as its own MIQE item, since the replicate unit sets the
   degrees of freedom. Rationale in `tasks/lessons.md`.
 - The default test is a **two-tailed Student's t-test** (pooled variance, Excel
-  `T.TEST(..., 2, 2)`) on per-well ΔCt — Min's decision 2026-10-23, after the
-  former Welch default produced p-values higher than hand calculation. Welch
-  stays selectable. `qpcr.analysis.DEFAULT_TTEST_TYPE` is the single default;
-  every app fallback reads it. `tests/test_student_ttest.py` pins
-  mean/SD/SEM/p to hand-computed values.
+  `T.TEST(..., 2, 2)`) on per-well fold change — Min's decision 2026-10-23,
+  after the former Welch default produced p-values higher than hand
+  calculation. Welch stays selectable. `qpcr.analysis.DEFAULT_TTEST_TYPE` is
+  the single default; every app fallback reads it.
 - Uses streamlit-sortables for drag-and-drop sample ordering
 - python-pptx for automated PowerPoint report generation

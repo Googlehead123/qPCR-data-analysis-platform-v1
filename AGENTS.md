@@ -210,8 +210,10 @@ st.session_state.graph_settings    # Graph customization settings
 ```
 
 ### Statistical Methods
-- **DDCt**: `2^(-(target_ct - hk_ct) - (ref_target_ct - ref_hk_ct))`
-- **P-values**: Welch's t-test (unequal variance) via `scipy.stats.ttest_ind`
+- **Per-well fold change**: `FC_i = 2^-((target_ct_i - mean hk_ct of the condition) - mean ΔCt of the reference condition)`
+- **Fold_Change**: simple mean of FC_i; **SD** (n-1) / **SEM** / 95% CI over FC_i (fold units)
+- **P-values**: two-tailed Student's t-test on FC_i via `scipy.stats.ttest_ind` (Welch selectable)
+- Bar, error bars, data points and p-value all use the same wells — see `tests/test_fold_change_method.py`
 - **Significance**: * p<0.05, ** p<0.01, *** p<0.001
 
 ---
