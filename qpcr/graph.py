@@ -233,7 +233,7 @@ class GraphGenerator:
             _eu, _el = "FC_SEM_Upper", "FC_SEM_Lower"
             error_caption = "Error bars: ±SEM of target replicates (fold-change domain)"
         elif {"FC_Error_Upper", "FC_Error_Lower"} <= cols:
-            # 'sd' resolves here too: the Livak bars ARE the SD, transformed.
+            # 'sd' resolves here too: FC_Error_* IS the per-well fold-change SD.
             _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
             error_caption = "Error bars: ±SD of target replicates (fold-change domain)"
         else:

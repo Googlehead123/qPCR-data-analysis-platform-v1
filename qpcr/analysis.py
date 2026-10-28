@@ -163,26 +163,30 @@ class AnalysisEngine:
                         continue
 
                 ddct = delta_ct - ref_delta_ct
-                # Guard against overflow: clamp ddct to prevent inf/0 in 2^(-ddct)
-                ddct_clamped = np.clip(ddct, -50, 50)
-                rel_expr = 2 ** (-ddct_clamped)
 
                 target_sd = target_ct_values.std(ddof=1) if len(target_ct_values) > 1 else np.nan
                 hk_sd = hk_ct_values.std(ddof=1) if len(hk_ct_values) > 1 else np.nan
                 n_target = len(target_ct_values)
                 n_hk = len(hk_ct_values)
 
-                target_sem = target_sd / np.sqrt(n_target) if n_target > 1 else np.nan
+                # Per-well fold change, the hand-sheet method (Min, 2026-10-28):
+                # FC_i = 2^-(Ct_target_i - mean HK Ct of this condition
+                #            - mean ΔCt of the reference condition).
+                # The bar is the simple mean of FC_i and SD/SEM/CI are taken
+                # over FC_i, so every number reported for a condition — bar,
+                # error bar, scatter point (compute_replicate_fold_changes) and
+                # p-value (calculate_statistics) — comes from the same wells.
+                # The reference condition's mean is therefore ~1, not exactly 1
+                # (mean of 2^-x_i >= 2^-mean x_i), exactly as on the hand sheet.
+                fc_wells = 2.0 ** -np.clip(
+                    target_ct_values - hk_ct_mean - ref_delta_ct, -50, 50
+                )
+                rel_expr = float(fc_wells.mean())
 
-                # Keep NaN when the SD is undefined (n=1) instead of coercing
-                # to 0. The old coercion reported SD 0.000 / SEM 0.000 and drew a
-                # zero-length error bar — the visual signature of the TIGHTEST
-                # measurement in the panel — for the single well left after QC
-                # dropped the other two. graph.py already does .fillna(0) on both
-                # error arrays, so NaN never reached Plotly in the first place;
-                # the stated reason for the coercion did not hold.
-                sd = target_sd
-                sem = target_sem
+                # NaN, not 0, when n=1: an SD of 0 draws a zero-length bar, the
+                # visual signature of the TIGHTEST measurement in the panel.
+                sd = float(fc_wells.std(ddof=1)) if n_target > 1 else np.nan
+                sem = sd / np.sqrt(n_target) if n_target > 1 else np.nan
 
                 original_sample = cond_data["Sample"].iloc[0]
                 group = sample_mapping.get(original_sample, {}).get(
@@ -195,17 +199,12 @@ class AnalysisEngine:
                 )
                 hk_cv = (hk_sd / hk_ct_mean * 100) if hk_ct_mean > 0 else np.nan
 
-                # Fold-change-domain 95% CI (t-based on the target-replicate SEM;
-                # same asymmetric 2^-x transform as the Livak ±SD bars). Target-
-                # only, matching SD/SEM by design; 0 when n<2. Offered as an
-                # alternative to the ±SD bars (reviewers often prefer CIs).
-                if pd.notna(sem) and n_target >= 2:
-                    _ci = float(stats.t.ppf(0.975, n_target - 1)) * sem
-                    fc_ci_upper = 2 ** (-(np.clip(ddct - _ci, -50, 50))) - rel_expr
-                    fc_ci_lower = rel_expr - 2 ** (-(np.clip(ddct + _ci, -50, 50)))
-                else:
-                    # NaN, not 0: "no CI could be computed" is not "a CI of zero".
-                    fc_ci_upper = fc_ci_lower = np.nan
+                # 95% CI half-width of the mean fold change, t-based with n-1 df.
+                # NaN, not 0: "no CI could be computed" is not "a CI of zero".
+                fc_ci = (
+                    float(stats.t.ppf(0.975, n_target - 1)) * sem
+                    if pd.notna(sem) else np.nan
+                )
 
                 results.append(
                     {
@@ -224,41 +223,22 @@ class AnalysisEngine:
                         "Delta_Ct": delta_ct,
                         "Delta_Delta_Ct": ddct,
                         "Relative_Expression": rel_expr,
+                        # SD / SEM of the per-well fold changes (fold units),
+                        # not of Ct — Target_Ct_SD carries the Ct-domain spread.
                         "SEM": sem,
                         "SD": sd,
                         "Fold_Change": rel_expr,
-                        # Fold-change domain error bars (Livak method)
-                        # Upper/lower bounds account for nonlinear 2^x transform
-                        # pd.notna alone is the right guard: NaN already means
-                        # "undefined" (n=1, no estimable variance). The old
-                        # `sd > 0` also rejected a GENUINE zero — n>=2 identical
-                        # replicates — and exported it as undefined, when the
-                        # correct transformed error there is exactly 0.
-                        "FC_Error_Upper": (
-                            (2 ** (-(np.clip(ddct - sd, -50, 50))) - rel_expr)
-                            if pd.notna(sd) else np.nan
-                        ),
-                        "FC_Error_Lower": (
-                            (rel_expr - 2 ** (-(np.clip(ddct + sd, -50, 50))))
-                            if pd.notna(sd) else np.nan
-                        ),
-                        # Fold-change-domain SEM, same asymmetric transform as
-                        # FC_Error_*. Without these the "SEM" error-bar mode
-                        # plotted the Ct-domain SEM straight onto a fold-change
-                        # axis, which is dimensionally meaningless and inverts the
-                        # comparison: a bar at FC 4.59 got its Ct SEM of 0.23
-                        # while its true fold-domain interval is 0.79, so the tall
-                        # bar looked TIGHTER than a short one.
-                        "FC_SEM_Upper": (
-                            (2 ** (-(np.clip(ddct - sem, -50, 50))) - rel_expr)
-                            if pd.notna(sem) else np.nan
-                        ),
-                        "FC_SEM_Lower": (
-                            (rel_expr - 2 ** (-(np.clip(ddct + sem, -50, 50))))
-                            if pd.notna(sem) else np.nan
-                        ),
-                        "FC_CI_Upper": fc_ci_upper,
-                        "FC_CI_Lower": fc_ci_lower,
+                        # Error-bar columns read by graph.py and the Excel/PPT
+                        # writers. They were asymmetric 2^-x transforms of the
+                        # Ct spread; in fold units the spread is symmetric, so
+                        # upper == lower. The column pairs are kept so every
+                        # consumer's mode ladder works unchanged.
+                        "FC_Error_Upper": sd,
+                        "FC_Error_Lower": sd,
+                        "FC_SEM_Upper": sem,
+                        "FC_SEM_Lower": sem,
+                        "FC_CI_Upper": fc_ci,
+                        "FC_CI_Lower": fc_ci,
                     }
                 )
 
@@ -322,7 +302,7 @@ class AnalysisEngine:
         excluded_wells=None,
     ) -> pd.DataFrame:
         """Two-tailed t-test comparing each condition to compare_condition
-        (and optionally 2nd/3rd), on per-well ΔCt.
+        (and optionally 2nd/3rd), on per-well fold change.
 
         ``ttest_type`` is "student" (pooled variance, the default) or "welch".
         Significance symbols: * (1st), # (2nd), † (3rd).
@@ -406,12 +386,18 @@ class AnalysisEngine:
             )
             hk_means = hk_rows.groupby("Condition")["CT"].mean().to_dict()
 
-            # Per-replicate ΔCt per condition, used for the significance tests.
-            # The t-test runs on ΔCt (≈normally distributed), NOT on 2^-ΔCt
-            # (right-skewed) — testing the exponentiated fold-change violates the
-            # normality assumption and distorts p-values. A two-sided test is
-            # unaffected by the ΔCt→fold-change sign flip.
-            dct_by_cond = {}
+            # Per-well fold change per condition, used for the significance
+            # tests — the same values the bar, SD/SEM and scatter points are
+            # built from (Min, 2026-10-28: matches the hand sheet's T.TEST on
+            # each well's 2^-ΔΔCt). The tested values are 2^-ΔCt_i; the
+            # displayed FC_i are those times one per-gene constant
+            # (2^ΔCt_ref), and a t statistic is unchanged when both groups are
+            # scaled by the same constant, so the p-value is exactly that of
+            # the displayed FC_i — and independent of the ΔΔCt reference choice.
+            # (Holds while no ±50 clip binds: that needs |ΔΔCt| > 50, i.e. Ct
+            # values no instrument reports, so every real plate is covered.)
+            # Until 2026-10-28 the test ran on ΔCt instead.
+            fc_by_cond = {}
             for cond, grp in t_rows.groupby("Condition"):
                 hk_mean = hk_means.get(cond, np.nan)
                 # FIX-09: Removed arbitrary hk_mean > 45 threshold.
@@ -429,14 +415,14 @@ class AnalysisEngine:
                 if ct_vals.size == 0:
                     continue
                 dct = np.clip(ct_vals - hk_mean, -50, 50)
-                dct_by_cond[cond] = dct
+                fc_by_cond[cond] = 2.0 ** -dct
 
             # FIRST COMPARISON: compare_condition
-            ref_vals = dct_by_cond.get(compare_condition, np.array([]))
+            ref_vals = fc_by_cond.get(compare_condition, np.array([]))
             if ref_vals.size == 0:
                 _stats_skipped.append(f"{target}: no data for comparison condition '{compare_condition}'")
             if ref_vals.size >= 1:
-                for cond, vals in dct_by_cond.items():
+                for cond, vals in fc_by_cond.items():
                     if cond == compare_condition or vals.size == 0:
                         continue
 
@@ -463,9 +449,9 @@ class AnalysisEngine:
 
             # SECOND COMPARISON: compare_condition_2 (if provided)
             if compare_condition_2:
-                ref_vals_2 = dct_by_cond.get(compare_condition_2, np.array([]))
+                ref_vals_2 = fc_by_cond.get(compare_condition_2, np.array([]))
                 if ref_vals_2.size >= 1:
-                    for cond, vals in dct_by_cond.items():
+                    for cond, vals in fc_by_cond.items():
                         if cond == compare_condition_2 or vals.size == 0:
                             continue
 
@@ -496,9 +482,9 @@ class AnalysisEngine:
 
             # THIRD COMPARISON: compare_condition_3 (if provided)
             if compare_condition_3:
-                ref_vals_3 = dct_by_cond.get(compare_condition_3, np.array([]))
+                ref_vals_3 = fc_by_cond.get(compare_condition_3, np.array([]))
                 if ref_vals_3.size >= 1:
-                    for cond, vals in dct_by_cond.items():
+                    for cond, vals in fc_by_cond.items():
                         if cond == compare_condition_3 or vals.size == 0:
                             continue
 
@@ -551,7 +537,11 @@ class AnalysisEngine:
         excluded_wells=None,
         excluded_samples=None,
     ) -> pd.DataFrame:
-        """Compute per-replicate fold change values for data point overlay.
+        """Compute per-replicate fold change values (data points, Replicate_FC).
+
+        These are the same FC_i that calculate_ddct averages into the bar and
+        SD/SEM, and that calculate_statistics tests (up to a per-gene constant
+        the t statistic ignores) — tests/test_fold_change_method.py pins that.
 
         For each replicate i in condition c:
           dCt_i = Ct_target_i - Ct_hk_mean_of_condition

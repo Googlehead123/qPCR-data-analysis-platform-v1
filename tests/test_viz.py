@@ -27,7 +27,7 @@ def test_calculate_ddct_emits_ci_columns(mock_streamlit, sample_qpcr_raw_data, s
     assert (spread["FC_CI_Upper"] >= -1e-9).all()
     assert (spread["FC_CI_Lower"] >= -1e-9).all()
     # For n=3, 95% CI half-width = t(.975,2)/sqrt(3) * SD ≈ 2.48*SD > 1*SD,
-    # so the CI bounds must exceed the ±SD Livak bounds.
+    # so the CI bounds must exceed the ±SD bounds.
     n3 = spread[spread["n_replicates"] == 3]
     if not n3.empty:
         assert (n3["FC_CI_Upper"] >= n3["FC_Error_Upper"] - 1e-9).all()

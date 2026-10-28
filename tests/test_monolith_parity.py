@@ -14,9 +14,11 @@ gone):
   them, so fixes applied there never shipped while their tests still passed.
 
 What still earns its keep here is the behavioural contract, not the parity: the
-fold-change error columns must exist and be asymmetric (Livak 2^-x is nonlinear,
-so a symmetric SD bar is wrong), and the cache-fronted replicate fold-change
-wrapper must be wired to the right function with the right argument order.
+fold-change error columns must exist and carry the per-well fold-change spread
+(symmetric, in fold units, since 2026-10-28 — they were asymmetric 2^-x
+transforms of the Ct spread before), and the cache-fronted replicate
+fold-change wrapper must be wired to the right function with the right argument
+order.
 """
 
 from importlib import import_module
@@ -24,12 +26,12 @@ from importlib import import_module
 import numpy as np
 
 
-def test_monolith_calculate_ddct_emits_asymmetric_fc_error_bars(
+def test_monolith_calculate_ddct_emits_fold_unit_error_bars(
     mock_streamlit, sample_qpcr_raw_data, sample_mapping
 ):
-    """The monolith's calculate_ddct must produce fold-change-domain (Livak)
-    error columns, so graphs use asymmetric bars instead of the symmetric
-    SD/SEM fallback. This fix previously lived only in qpcr/analysis.py."""
+    """Every error-bar column graph.py and the writers read must exist and be
+    the per-well fold-change SD / SEM / CI half-width — symmetric, because the
+    spread is now taken in fold units, where the hand sheet takes it."""
     spec = import_module("streamlit qpcr analysis v1")
     result = spec.AnalysisEngine.calculate_ddct(
         data=sample_qpcr_raw_data,
@@ -40,17 +42,17 @@ def test_monolith_calculate_ddct_emits_asymmetric_fc_error_bars(
         sample_mapping=sample_mapping,
     )
 
-    assert "FC_Error_Upper" in result.columns
-    assert "FC_Error_Lower" in result.columns
+    for col in ("FC_Error_Upper", "FC_Error_Lower", "FC_SEM_Upper",
+                "FC_SEM_Lower", "FC_CI_Upper", "FC_CI_Lower"):
+        assert col in result.columns, col
 
-    # For rows with real replicate spread (sd > 0), the 2^-x transform makes the
-    # upper and lower fold-change errors asymmetric, and both must be >= 0.
     spread = result[result["SD"] > 0]
     assert not spread.empty, "fixture should yield replicate spread"
-    assert (spread["FC_Error_Upper"] >= -1e-9).all()
-    assert (spread["FC_Error_Lower"] >= -1e-9).all()
-    # At least one row is meaningfully asymmetric.
-    assert (np.abs(spread["FC_Error_Upper"] - spread["FC_Error_Lower"]) > 1e-6).any()
+    np.testing.assert_allclose(spread["FC_Error_Upper"], spread["SD"])
+    np.testing.assert_allclose(spread["FC_Error_Lower"], spread["SD"])
+    np.testing.assert_allclose(spread["FC_SEM_Upper"], spread["SEM"])
+    np.testing.assert_allclose(spread["FC_SEM_Lower"], spread["SEM"])
+    assert (spread["FC_CI_Upper"] > spread["FC_SEM_Upper"]).all()
 
 
 def test_monolith_matches_package_fc_errors(

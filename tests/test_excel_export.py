@@ -58,8 +58,11 @@ def _yaxis_gene_of_chart(chart_xml, gene_names):
 
 
 def test_chart_error_bars_are_asymmetric_fold_change(mock_streamlit):
-    """Excel native chart error bars must use asymmetric FC bounds (plus != minus
-    columns), matching the Plotly graph — not symmetric SEM in both directions."""
+    """Excel native chart error bars must read the separate FC upper/lower
+    columns (plus and minus wired independently), not a single SEM column.
+    Since 2026-10-28 calculate_ddct fills both with the same per-well
+    fold-change spread; this fixture keeps them unequal so the wiring of each
+    direction stays observable."""
     spec = import_module("streamlit qpcr analysis v1")
 
     genes = ["COL1A1", "MMP1"]

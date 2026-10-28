@@ -29,7 +29,12 @@ def test_build_provenance_captures_run_parameters(mock_streamlit):
     assert prov["statistical_test"].startswith("Welch t-test")
     assert "technical replicate wells" in prov["statistical_test"]
     assert prov["replicate_unit"].startswith("technical wells")
-    assert prov["method"].startswith("Livak")
+    # The record must describe what the numbers are: per-well fold change,
+    # simple mean, spread over the same wells (hand-sheet method, 2026-10-28).
+    assert "per-well fold change" in prov["method"]
+    assert "arithmetic mean" in prov["method"]
+    assert "per-well fold change" in prov["statistical_test"]
+    assert "Livak" not in prov["method"]
     assert prov["excluded_wells_count"] == 3
     assert prov["excluded_samples"] == ["BadSample"]
     # Excluded wells are flattened, sorted, and carry gene+sample+well.

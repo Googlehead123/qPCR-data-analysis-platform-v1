@@ -18,7 +18,9 @@ def build_miqe_checklist(prov: dict) -> str:
     prov = prov or {}
     cmps = ", ".join(prov.get("comparison_conditions") or []) or "—"
     auto = [
-        f"- **Quantification method:** {prov.get('method', 'relative (Livak 2^-ΔΔCt)')}",
+        # No method default: the app reports per-well fold change (since
+        # 2026-10-28), so a "Livak" fallback would misdescribe it.
+        f"- **Quantification method:** {prov.get('method') or 'not stated'}",
         f"- **Reference (housekeeping) gene:** {prov.get('reference_gene') or '—'}",
         f"- **Calibrator / reference condition:** {prov.get('reference_condition') or '—'}",
         f"- **Comparison condition(s):** {cmps}",

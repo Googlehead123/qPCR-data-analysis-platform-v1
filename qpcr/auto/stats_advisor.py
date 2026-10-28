@@ -34,7 +34,8 @@ def recommend_test(groups, alpha: float = 0.05) -> dict:
     """Recommend a significance test for a set of group value-arrays.
 
     Args:
-        groups: list of 1D array-likes (per-replicate values, ideally ΔCt).
+        groups: list of 1D array-likes — the per-replicate values the test
+            runs on (the app passes per-well fold changes).
         alpha: significance threshold for the normality/variance screens.
 
     Returns:
