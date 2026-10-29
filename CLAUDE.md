@@ -94,7 +94,9 @@ Repository: Googlehead123/qPCR-data-analysis-platform-v1
   changes — symmetric, in fold units. Housekeeping enters each well as the
   condition **mean**, so its well-to-well variability is not propagated. The
   stored error-bar key is still `livak_sd` so saved settings resolve; only the
-  label changed.
+  label changed. **Only the upper whisker is drawn, in every output** — app,
+  Overview, PPT (`graph.py`) and the native Excel chart (`errBarType="plus"`)
+  — Min's decision 2026-10-29.
 - The t-test's n is **technical wells** pooled per condition, not biological
   samples — deliberate (2026-08-24), and consistent with the Mapping tab's stated
   contract that samples sharing a condition name are replicates. Declared in the

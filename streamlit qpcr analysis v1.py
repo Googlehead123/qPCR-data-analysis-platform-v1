@@ -3655,10 +3655,8 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
             # as no bar. The _Analysis sheet already writes blank here, so
             # filling with 0 made two sheets of one workbook contradict.
             fc_err_upper = [v if pd.notna(v) else None for v in gene_data[_eu]]
-            fc_err_lower = [v if pd.notna(v) else None for v in gene_data[_el]]
         else:
             fc_err_upper = [s if pd.notna(s) else None for s in sems]
-            fc_err_lower = list(fc_err_upper)
 
         n_rows = len(conditions)
         if n_rows == 0:
@@ -3680,11 +3678,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
             headers.extend(["p_value_3", "significance_3"])
         for ci, h in enumerate(headers):
             ws.cell(row=hdr_row, column=3 + ci, value=h)
-        # Fold-change error columns (upper/lower), appended after the visible data.
+        # Upper error-bar column, appended after the visible data. Upper only:
+        # every chart (app, PPT, Excel) draws just the top whisker (Min,
+        # 2026-10-29), so a lower-bound column would be dead weight.
         err_plus_col = 3 + len(headers)
-        err_minus_col = err_plus_col + 1
         ws.cell(row=hdr_row, column=err_plus_col, value="FC_Err_Upper")
-        ws.cell(row=hdr_row, column=err_minus_col, value="FC_Err_Lower")
         max_cond_len = max((len(str(c)) for c in conditions), default=10)
         ws.column_dimensions["C"].width = max(18, min(max_cond_len + 2, 45))
         for col_letter in ("D", "E", "F", "G"):
@@ -3719,9 +3717,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
                 s3_val = sig_3[i] if i < len(sig_3) else ""
                 ws.cell(row=r, column=p3_col_offset + 1, value=s3_val if pd.notna(s3_val) else "")
             eu = fc_err_upper[i] if i < len(fc_err_upper) else 0
-            el = fc_err_lower[i] if i < len(fc_err_lower) else 0
             ws.cell(row=r, column=err_plus_col, value=float(eu) if pd.notna(eu) else 0)
-            ws.cell(row=r, column=err_minus_col, value=float(el) if pd.notna(el) else 0)
 
         last_data_row = data_start + n_rows - 1
 
@@ -3754,11 +3750,9 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         )
         series.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(bar_sp_xml))
 
-        # Error bars: custom fold-change bounds (upper/lower), gray line
+        # Error bars: custom fold-change upper bound only, gray line
         plus_col_letter = get_column_letter(err_plus_col)
-        minus_col_letter = get_column_letter(err_minus_col)
         plus_formula = f"'{sheet_name}'!${plus_col_letter}${data_start}:${plus_col_letter}${last_data_row}"
-        minus_formula = f"'{sheet_name}'!${minus_col_letter}${data_start}:${minus_col_letter}${last_data_row}"
         eb_sp_xml = (
             '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
             ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
@@ -3771,8 +3765,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         )
         eb_sp = GraphicalProperties.from_tree(etree.fromstring(eb_sp_xml))
         series.errBars = ErrorBars(
-            errValType="cust", errBarType="both", noEndCap=False,
-            minus=NumDataSource(numRef=NumRef(f=minus_formula)),
+            errValType="cust", errBarType="plus", noEndCap=False,
             plus=NumDataSource(numRef=NumRef(f=plus_formula)),
             spPr=eb_sp,
         )
@@ -3833,7 +3826,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         # to column K once a 2nd/3rd comparison exists, so a full-width chart sat
         # on top of significance_2, FC_Err_Upper and FC_Err_Lower — the values
         # were intact but hidden underneath.
-        ws.add_chart(chart, f"{get_column_letter(err_minus_col + 2)}3")
+        ws.add_chart(chart, f"{get_column_letter(err_plus_col + 2)}3")
 
     # ---- Phase 1 complete: save workbook to bytes ----
     phase1_buf = io.BytesIO()

@@ -232,7 +232,7 @@ and p-values equal an independent hand-sheet computation (p to 1e-13).
 come out less significant than its ΔCt test said (unit fixture: 0.00168 ** ->
 0.0117 *). This is the trade-off the hand sheet makes; it was chosen knowingly.
 
-**Choices made without asking — revisit if the hand sheet differs:**
+**Choices made without asking, then CONFIRMED by Min 2026-10-29:**
 - HK enters as the condition **mean**, not paired well-by-well. Pairing has no
   defined well order and breaks when QC leaves 2 target vs 3 HK wells; the app's
   data points already worked this way.
@@ -251,6 +251,13 @@ used to be a mean/SD of condition means with the minimum p.
 `Target_Ct_*`, `HK_Ct_*`, `Delta_Ct` and `Delta_Delta_Ct` stay Ct-domain and
 informational. The error-bar setting's stored key stays `livak_sd` so saved
 graph settings resolve; only its label changed to "±SD".
+
+**DECIDED (Min, 2026-10-29): upper error bar only, everywhere.** `graph.py`
+(app, Overview panel, PPT) already drew top-only whiskers; the native Excel
+chart drew both directions, so one analysis exported two different-looking
+charts. The Excel chart is now `errBarType="plus"` and its sheet no longer
+writes an `FC_Err_Lower` column. Do not reintroduce a lower whisker in one
+output without the others.
 
 ---
 

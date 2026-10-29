@@ -57,20 +57,20 @@ def _yaxis_gene_of_chart(chart_xml, gene_names):
     return None
 
 
-def test_chart_error_bars_are_asymmetric_fold_change(mock_streamlit):
-    """Excel native chart error bars must read the separate FC upper/lower
-    columns (plus and minus wired independently), not a single SEM column.
-    Since 2026-10-28 calculate_ddct fills both with the same per-well
-    fold-change spread; this fixture keeps them unequal so the wiring of each
-    direction stays observable."""
+def test_chart_error_bars_are_upper_only_from_the_fc_error_column(mock_streamlit):
+    """Upper error bar only, everywhere (Min, 2026-10-29). The app/PPT charts
+    (graph.py) were already top-only; the native Excel chart drew both
+    directions, so the two exports of one analysis looked different. The bar
+    must read the per-well fold-change error column (FC_Error_Upper), not the
+    single SEM column (the original bug)."""
     spec = import_module("streamlit qpcr analysis v1")
+    import openpyxl
 
     genes = ["COL1A1", "MMP1"]
     processed = _make_processed(genes)
-    # Give distinct upper/lower fold-change error bounds.
     for g in genes:
         processed[g]["FC_Error_Upper"] = [0.30, 0.55]
-        processed[g]["FC_Error_Lower"] = [0.20, 0.40]
+        processed[g]["FC_Error_Lower"] = [0.30, 0.55]
     raw = _make_raw(genes)
     params = {"Housekeeping_Gene": "GAPDH", "Efficacy_Type": "Anti-Aging"}
     mapping = {"Non-treated": {"condition": "Non-treated", "group": "Negative Control"},
@@ -78,6 +78,7 @@ def test_chart_error_bars_are_asymmetric_fold_change(mock_streamlit):
 
     xlsx = spec.export_to_excel(raw, processed, params, mapping)
     xlsx_bytes = xlsx.getvalue() if hasattr(xlsx, "getvalue") else xlsx
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes))
 
     C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
     from lxml import etree
@@ -91,17 +92,21 @@ def test_chart_error_bars_are_asymmetric_fold_change(mock_streamlit):
         errbars = root.find(".//c:errBars", {"c": C})
         if errbars is None:
             continue
-        plus_f = errbars.find(".//c:plus//c:f", {"c": C})
-        minus_f = errbars.find(".//c:minus//c:f", {"c": C})
-        assert plus_f is not None and minus_f is not None, "errBars missing plus/minus refs"
-        # Asymmetric: the two directions must reference DIFFERENT columns
-        # (the old bug pointed both at the single SEM column).
-        assert plus_f.text != minus_f.text, (
-            f"error bars are symmetric (plus==minus: {plus_f.text}); "
-            f"expected distinct FC_Err_Upper/Lower columns"
+        bar_type = errbars.find("c:errBarType", {"c": C})
+        assert bar_type is not None and bar_type.get("val") == "plus", (
+            "Excel error bars must be upper-only, like the app/PPT charts"
         )
+        assert errbars.find(".//c:minus", {"c": C}) is None
+        plus_f = errbars.find(".//c:plus//c:f", {"c": C})
+        assert plus_f is not None, "errBars missing the plus reference"
+        m = re.match(r"'(.+)'!\$([A-Z]+)\$(\d+):\$([A-Z]+)\$(\d+)$", plus_f.text)
+        assert m, plus_f.text
+        ws = wb[m.group(1)]
+        col, first, last = m.group(2), int(m.group(3)), int(m.group(5))
+        assert ws[f"{col}{first - 1}"].value == "FC_Err_Upper"
+        assert [ws[f"{col}{r}"].value for r in range(first, last + 1)] == [0.30, 0.55]
         checked += 1
-    assert checked > 0, "no gene chart with error bars was verified"
+    assert checked == len(genes), "every gene chart must be verified"
 
 
 def test_chart_axis_titles_match_genes_beyond_ten(mock_streamlit):
