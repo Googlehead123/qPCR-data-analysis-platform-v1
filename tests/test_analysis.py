@@ -41,7 +41,22 @@ class TestAnalysisEngineCalculateDDCT:
         
         ref_row = result[result['Condition'] == 'Non-treated']
         assert len(ref_row) == 1
-        assert abs(ref_row['Relative_Expression'].iloc[0] - 1.0) < 0.01
+        # Since 2026-10-28 the reference's bar is the simple mean of its own
+        # wells' 2^-(ΔCt_i - mean ΔCt): >= 1 (Jensen) and NOT exactly 1, by an
+        # amount that grows with replicate spread. "Within 0.01 of 1" was an
+        # identity under the old 2^-(mean ΔΔCt) and became a coin-flip on this
+        # fixture's random 0.2-Ct noise (failed 6/30 runs) — assert the exact
+        # value instead, which holds for every draw.
+        raw = sample_qpcr_raw_data
+        cond = raw["Sample"].map(lambda s: sample_mapping.get(s, {}).get("condition", s))
+        ref = raw[cond == "Non-treated"]
+        target = ref_row["Target"].iloc[0]
+        dct = (ref[ref["Target"] == target]["CT"].to_numpy()
+               - ref[ref["Target"] == "GAPDH"]["CT"].mean())
+        expected = np.mean(2.0 ** -(dct - dct.mean()))
+        fc = ref_row['Relative_Expression'].iloc[0]
+        assert fc == pytest.approx(expected, rel=1e-12)
+        assert fc >= 1.0 - 1e-12
 
     def test_calculate_ddct_excludes_housekeeping_gene(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
         from importlib import import_module
@@ -170,7 +185,10 @@ class TestAnalysisEngineCalculateDDCT:
         assert not result.empty
 
     def test_calculate_ddct_sd_is_target_only(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
-        """SD and SEM should reflect target gene CT variation only, not combined target+HK."""
+        """SD and SEM reflect the spread of the TARGET wells only: each well's
+        fold change uses the condition's HK *mean*, so HK well-to-well spread is
+        not propagated. Since 2026-10-28 both are in fold units (per-well FC),
+        not Ct — Target_Ct_SD keeps the Ct-domain spread."""
         from importlib import import_module
         spec = import_module('streamlit qpcr analysis v1')
         AnalysisEngine = spec.AnalysisEngine
@@ -185,22 +203,24 @@ class TestAnalysisEngineCalculateDDCT:
         )
 
         assert not result.empty
+        raw = sample_qpcr_raw_data
+        cond_of = raw["Sample"].map(
+            lambda s: sample_mapping.get(s, {}).get("condition", s)
+        )
 
         for _, row in result.iterrows():
-            target_sd = row['Target_Ct_SD']
-            sd = row['SD']
+            cts = raw[(raw["Target"] == row["Target"])
+                      & (cond_of == row["Condition"])]["CT"].to_numpy()
+            ref_dct = row["Delta_Ct"] - row["Delta_Delta_Ct"]
+            fc = 2.0 ** -(cts - row["HK_Ct_Mean"] - ref_dct)
             n = row['n_replicates']
+            assert n == len(cts)
 
-            # SD should equal Target_Ct_SD exactly (not combined with HK)
-            assert abs(sd - target_sd) < 1e-10, (
-                f"SD ({sd}) should equal Target_Ct_SD ({target_sd}) for {row['Condition']}"
+            assert abs(row['SD'] - fc.std(ddof=1)) < 1e-10, (
+                f"SD ({row['SD']}) should be the SD of the target wells' fold "
+                f"changes ({fc.std(ddof=1)}) for {row['Condition']}"
             )
-
-            # SEM should equal Target_Ct_SD / sqrt(n)
-            expected_sem = target_sd / np.sqrt(n) if n > 1 else 0
-            assert abs(row['SEM'] - expected_sem) < 1e-10, (
-                f"SEM ({row['SEM']}) should equal Target_Ct_SD/sqrt(n) ({expected_sem})"
-            )
+            assert abs(row['SEM'] - fc.std(ddof=1) / np.sqrt(n)) < 1e-10
 
     def test_calculate_ddct_respects_excluded_samples(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
         from importlib import import_module
@@ -420,6 +440,6 @@ class TestSingletonComparisons:
         ])
         row = result[result["Condition"] == "T"].iloc[0]
         assert pd.notna(row["p_value"]), "n=3 vs n=3 must still produce a p-value"
-        # Default is Student's since 2026-10-23 (tests/test_student_ttest.py).
+        # Default is Student's since 2026-10-23 (tests/test_fold_change_method.py).
         assert "Student t-test" in row["stat_test_used"]
         assert row["n_reference"] == 3

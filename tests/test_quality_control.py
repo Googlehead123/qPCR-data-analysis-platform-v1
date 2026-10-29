@@ -377,10 +377,12 @@ class TestAnalysisEngineSEMCalculation:
         assert "SEM" in result.columns
         assert "Relative_Expression" in result.columns
 
-        # Reference sample should have fold change ~1.0
+        # Reference sample's mean fold change is >= 1 and close to it: the simple
+        # mean of 2^-(x_i - mean x) (exact value pinned in test_analysis.py).
         ref_rows = result[result["Condition"] == "Non-treated"]
-        if len(ref_rows) > 0:
-            assert abs(ref_rows["Relative_Expression"].iloc[0] - 1.0) < 0.1
+        assert len(ref_rows) == 1
+        ref_fc = ref_rows["Relative_Expression"].iloc[0]
+        assert 1.0 - 1e-12 <= ref_fc < 1.5
 
 
 class TestFindHighSdOutliers:

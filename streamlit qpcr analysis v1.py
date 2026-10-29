@@ -282,7 +282,14 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
     return {
         "generated": timestamp,
         "software": app_version,
-        "method": "Livak 2^-ddCt, single reference gene",
+        # Per-well fold change, the hand-sheet method (Min, 2026-10-28). Was
+        # "Livak 2^-ddCt" — bar 2^-(mean ΔΔCt), Ct-domain spread.
+        "method": (
+            "relative quantification, single reference gene: per-well fold "
+            "change 2^-ΔΔCt_i (ΔCt_i = target Ct − the condition's mean "
+            "reference-gene Ct); bar = arithmetic mean of the per-well fold "
+            "changes, SD/SEM over the same values"
+        ),
         # This said "Benjamini-Hochberg" flatly, which was a false claim in the
         # record that goes out with the report. Reporting UNCORRECTED p-values is
         # a deliberate choice (Min, 2026-08-24); BH q-values are still computed
@@ -305,7 +312,7 @@ def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_
         # declared because it sets the degrees of freedom.
         "statistical_test": (
             f"{'Welch' if ttest_type == 'welch' else 'Student'} t-test "
-            f"(two-tailed) on ΔCt, "
+            f"(two-tailed) on per-well fold change, "
             f"n = technical replicate wells pooled per condition"
         ),
         "replicate_unit": "technical wells (pooled across samples per condition)",
@@ -576,8 +583,9 @@ def get_replicate_stats(data) -> pd.DataFrame:
 
 def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     """Advisory per-gene statistical-test recommendation (ref vs the primary
-    comparison condition), assessed on log-scale per-replicate values
-    (ddCt = -log2(fold change)), which is the normality-correct scale."""
+    comparison condition), assessed on the per-well fold changes — the values
+    the t-test actually runs on since 2026-10-28, so a normality or
+    equal-variance warning describes the test that was used."""
     recs = {}
     if raw is None or not hk or not ref or not processed_data:
         return recs
@@ -589,10 +597,9 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
     except Exception:
         return recs
 
-    def _log(vals):
+    def _clean(vals):
         a = np.asarray(vals, dtype=float)
-        a = a[(~np.isnan(a)) & (a > 0)]
-        return (-np.log2(a)) if a.size else a
+        return a[~np.isnan(a)]
 
     for gene, gdf in processed_data.items():
         if "Condition" not in gdf.columns:
@@ -607,8 +614,8 @@ def _auto_test_recommendations(processed_data, raw, hk, ref, mapping, excluded):
         _user_cmp = st.session_state.get("analysis_cmp_condition")
         cmp_cond = _user_cmp if _user_cmp in others else others[0]
         g = reps[reps["Target"] == gene] if not reps.empty else reps
-        ref_vals = _log(g[g["Condition"] == ref]["Replicate_FC"].values) if not g.empty else []
-        cmp_vals = _log(g[g["Condition"] == cmp_cond]["Replicate_FC"].values) if not g.empty else []
+        ref_vals = _clean(g[g["Condition"] == ref]["Replicate_FC"].values) if not g.empty else []
+        cmp_vals = _clean(g[g["Condition"] == cmp_cond]["Replicate_FC"].values) if not g.empty else []
         rec = recommend_test([ref_vals, cmp_vals])
         recs[gene] = {"comparison": f"{cmp_cond} vs {ref}", **rec}
     return recs
@@ -1618,9 +1625,9 @@ def render_gene_editor(current_gene):
     _ensure_bar_settings(current_gene, gene_data)
 
     label_modes = ["Auto-wrap", "Angled 45°", "Angled 90°", "Horizontal"]
-    # "SD" is gone: it resolved to the very same transformed bars as
-    # "Livak ±SD", so the menu offered one thing twice under two names.
-    _EB_LABELS = {"Livak ±SD": "livak_sd", "SEM": "sem", "95% CI": "ci95"}
+    # Labels describe the per-well fold-change spread (since 2026-10-28). The
+    # stored key stays "livak_sd" so saved graph settings keep resolving.
+    _EB_LABELS = {"±SD": "livak_sd", "±SEM": "sem", "95% CI": "ci95"}
 
     t_style, t_labels, t_colors, t_axis, t_stats = st.tabs(
         ["Style", "Labels", "Colors", "Axis", "Stats"])
@@ -1819,10 +1826,11 @@ def render_gene_editor(current_gene):
                 key="show_legend_global", help="Show the trace legend")
         with c3:
             _cur_mode = gs.get("error_bar_mode", "livak_sd")
-            _cur_label = next((k for k, v in _EB_LABELS.items() if v == _cur_mode), "Livak ±SD")
+            _cur_label = next((k for k, v in _EB_LABELS.items() if v == _cur_mode), "±SD")
             _eb = st.selectbox("Error bar type", list(_EB_LABELS.keys()),
                 index=list(_EB_LABELS.keys()).index(_cur_label), key="eb_mode_global",
-                help="Livak ±SD (fold-change domain) · 95% CI · SEM/SD (Ct domain). Applies to all genes.")
+                help="SD, SEM or t-based 95% CI of the per-well fold changes — "
+                     "the same values the bar averages. Applies to all genes.")
             gs["error_bar_mode"] = _EB_LABELS[_eb]
             gs["show_n"] = st.toggle("Show n=", value=gs.get("show_n", False),
                 key="show_n_global", help="Annotate each bar with its replicate count")
@@ -3396,19 +3404,21 @@ def export_to_excel(
                     d["Target"] = _disp(g)
                 non_empty.append(d)
             if non_empty:
+                # One row per gene x condition with the hand sheet's numbers:
+                # n, mean fold change, SD, SEM, p and marker. This used to group
+                # the CONDITION-level fold changes by Target/Group and report
+                # their mean/SD/count and the minimum p — a mean of means that
+                # matched nothing on the hand sheet.
                 all_data = pd.concat(non_empty, ignore_index=True)
-                agg_dict = {"Relative_Expression": ["mean", "std", "count"]}
-                if "p_value" in all_data.columns:
-                    agg_dict["p_value"] = "min"
-                group_cols = ["Target"]
-                if "Group" in all_data.columns:
-                    group_cols.append("Group")
-                summary = (
-                    all_data.groupby(group_cols)
-                    .agg(agg_dict)
-                    .round(4)
-                )
-                summary.to_excel(writer, sheet_name="Summary")
+                summary = all_data.rename(columns={"n_replicates": "n"})
+                if "Fold_Change" not in summary.columns and "Relative_Expression" in summary.columns:
+                    summary["Fold_Change"] = summary["Relative_Expression"]
+                cols = [c for c in (
+                    "Target", "Condition", "n", "Fold_Change", "SD", "SEM",
+                    "p_value", "significance", "p_value_2", "significance_2",
+                    "p_value_3", "significance_3",
+                ) if c in summary.columns]
+                summary[cols].to_excel(writer, sheet_name="Summary", index=False)
 
         # Fold Change Matrix (pivot table)
         if processed_data:
@@ -3622,7 +3632,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         p_values_3 = gene_data.get("p_value_3", pd.Series()).tolist() if has_p3 else []
         sig_3 = gene_data.get("significance_3", pd.Series()).tolist() if has_p3 else []
 
-        # Fold-change-domain asymmetric error bounds, in the mode the OPERATOR
+        # Fold-change error bounds (per-well FC spread), in the mode the OPERATOR
         # chose. Same precedence ladder as qpcr/graph.py, including its
         # availability guards, so an older stored frame lacking the transformed
         # columns still falls back rather than raising.
@@ -3633,7 +3643,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         elif _eb_mode == "sem" and {"FC_SEM_Upper", "FC_SEM_Lower"} <= _cols:
             _eu, _el = "FC_SEM_Upper", "FC_SEM_Lower"
         elif {"FC_Error_Upper", "FC_Error_Lower"} <= _cols:
-            # 'sd' resolves here too: the Livak bars ARE the SD, transformed.
+            # 'sd' resolves here too: FC_Error_* IS the per-well FC SD.
             _eu, _el = "FC_Error_Upper", "FC_Error_Lower"
         else:
             _eu = _el = None
@@ -3645,10 +3655,8 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
             # as no bar. The _Analysis sheet already writes blank here, so
             # filling with 0 made two sheets of one workbook contradict.
             fc_err_upper = [v if pd.notna(v) else None for v in gene_data[_eu]]
-            fc_err_lower = [v if pd.notna(v) else None for v in gene_data[_el]]
         else:
             fc_err_upper = [s if pd.notna(s) else None for s in sems]
-            fc_err_lower = list(fc_err_upper)
 
         n_rows = len(conditions)
         if n_rows == 0:
@@ -3670,11 +3678,11 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
             headers.extend(["p_value_3", "significance_3"])
         for ci, h in enumerate(headers):
             ws.cell(row=hdr_row, column=3 + ci, value=h)
-        # Asymmetric fold-change error columns, appended after the visible data.
+        # Upper error-bar column, appended after the visible data. Upper only:
+        # every chart (app, PPT, Excel) draws just the top whisker (Min,
+        # 2026-10-29), so a lower-bound column would be dead weight.
         err_plus_col = 3 + len(headers)
-        err_minus_col = err_plus_col + 1
         ws.cell(row=hdr_row, column=err_plus_col, value="FC_Err_Upper")
-        ws.cell(row=hdr_row, column=err_minus_col, value="FC_Err_Lower")
         max_cond_len = max((len(str(c)) for c in conditions), default=10)
         ws.column_dimensions["C"].width = max(18, min(max_cond_len + 2, 45))
         for col_letter in ("D", "E", "F", "G"):
@@ -3709,9 +3717,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
                 s3_val = sig_3[i] if i < len(sig_3) else ""
                 ws.cell(row=r, column=p3_col_offset + 1, value=s3_val if pd.notna(s3_val) else "")
             eu = fc_err_upper[i] if i < len(fc_err_upper) else 0
-            el = fc_err_lower[i] if i < len(fc_err_lower) else 0
             ws.cell(row=r, column=err_plus_col, value=float(eu) if pd.notna(eu) else 0)
-            ws.cell(row=r, column=err_minus_col, value=float(el) if pd.notna(el) else 0)
 
         last_data_row = data_start + n_rows - 1
 
@@ -3744,11 +3750,9 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         )
         series.graphicalProperties = GraphicalProperties.from_tree(etree.fromstring(bar_sp_xml))
 
-        # Error bars: custom asymmetric fold-change bounds (upper/lower), gray line
+        # Error bars: custom fold-change upper bound only, gray line
         plus_col_letter = get_column_letter(err_plus_col)
-        minus_col_letter = get_column_letter(err_minus_col)
         plus_formula = f"'{sheet_name}'!${plus_col_letter}${data_start}:${plus_col_letter}${last_data_row}"
-        minus_formula = f"'{sheet_name}'!${minus_col_letter}${data_start}:${minus_col_letter}${last_data_row}"
         eb_sp_xml = (
             '<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
             ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
@@ -3761,8 +3765,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         )
         eb_sp = GraphicalProperties.from_tree(etree.fromstring(eb_sp_xml))
         series.errBars = ErrorBars(
-            errValType="cust", errBarType="both", noEndCap=False,
-            minus=NumDataSource(numRef=NumRef(f=minus_formula)),
+            errValType="cust", errBarType="plus", noEndCap=False,
             plus=NumDataSource(numRef=NumRef(f=plus_formula)),
             spPr=eb_sp,
         )
@@ -3823,7 +3826,7 @@ def _add_gene_chart_sheets(output_buf, processed_data, params,
         # to column K once a 2nd/3rd comparison exists, so a full-width chart sat
         # on top of significance_2, FC_Err_Upper and FC_Err_Lower — the values
         # were intact but hidden underneath.
-        ws.add_chart(chart, f"{get_column_letter(err_minus_col + 2)}3")
+        ws.add_chart(chart, f"{get_column_letter(err_plus_col + 2)}3")
 
     # ---- Phase 1 complete: save workbook to bytes ----
     phase1_buf = io.BytesIO()
@@ -5509,7 +5512,7 @@ with tab2:
             col_info1, col_info2 = st.columns(2)
             with col_info1:
                 st.info(
-                    "**ΔΔCt Reference:** Used to calculate fold changes. All samples will be relative to this (Fold Change = 1.0)"
+                    "**ΔΔCt Reference:** Used to calculate fold changes. Every well is relative to this condition's mean ΔCt, so its own fold change averages ≈ 1.0"
                 )
             with col_info2:
                 st.info(
@@ -5652,13 +5655,15 @@ with tab2:
             # Statistics Information Box
             with st.expander("ℹ️ Understanding Statistics Options", expanded=False):
                 st.markdown("""
-                **📊 Standard Deviation (SD)**  
-                - Calculated using Excel-like `=STDEV()` function on CT values
-                - Reflects **sample selection** from QC Check tab (excluded wells are NOT included)
-                - Shows **data variability** within replicates (2-3 values typically)
-                - Formula: `SD = sqrt(Σ(xi - mean)² / (n-1))`
-                - Displayed in results as `Target_Ct_SD`, `HK_Ct_SD`, and error bar option
-                
+                **🧮 Fold change (per well)**
+                - Each well: `FC = 2^-ΔΔCt`, where `ΔCt` = that well's target Ct −
+                  the condition's mean housekeeping Ct, and `ΔΔCt` = ΔCt − the
+                  reference condition's mean ΔCt
+                - **Fold_Change** = simple mean (`=AVERAGE()`) of the wells' FC
+                - **SD** = `=STDEV()` (n−1) of the wells' FC; **SEM** = SD / √n
+                - Excluded wells (QC Check tab) are NOT included
+                - `Target_Ct_SD` / `HK_Ct_SD` keep the spread of the raw Ct values
+
                 **📈 Coefficient of Variation (CV%)**  
                 - Calculated as: `CV% = (SD / Mean) × 100`
                 - Normalized measure of variability (allows comparison across different CT ranges)
@@ -5667,21 +5672,21 @@ with tab2:
                 **🎯 P-value Testing**  
                 - Statistical significance between conditions
                 - Two-tailed **Student's t-test** by default — the same as Excel
-                  `=T.TEST(control, sample, 2, 2)` — on each well's ΔCt
-                  (target Ct − that condition's mean housekeeping Ct)
+                  `=T.TEST(control FC, sample FC, 2, 2)` — on each well's fold
+                  change, the same values as the bar and the data points
                 - n = wells left after QC (2 or 3 per condition typically)
                 - Symbols: `*` p<0.05, `**` p<0.01, `***` p<0.001
                 - Respects QC exclusions (uses only included wells)
                 
                 **📏 Error Bars** (chosen in Graphs -> Stats)
-                - All options are plotted in the **fold-change domain**, matching
-                  the axis: the Ct-domain spread is transformed through the same
-                  asymmetric `2^-x` as the bar itself.
-                - **Livak ±SD**: spread of the target replicates.
+                - All options are the spread of the **per-well fold changes**, in
+                  the same units as the bar, drawn symmetrically.
+                - **±SD**: spread of the wells.
                 - **±SEM**: `SD / √n` — precision of the mean.
                 - **95% CI**: t-based, `n-1` degrees of freedom.
-                - Spread comes from the **target** replicates only; housekeeping
-                  variability is not propagated into it.
+                - Spread comes from the **target** wells only: housekeeping
+                  enters as the condition mean, so its well-to-well variability
+                  is not propagated.
                 """)
 
             stat_col1, stat_col2 = st.columns(2)
@@ -5714,7 +5719,7 @@ with tab2:
                 # Graphs tab's Stats sub-tab (graph_settings["error_bar_mode"]).
                 st.info(
                     "Error bars are chosen in **Graphs -> Stats -> Error bar "
-                    "type** (Livak +/-SD, +/-SEM, or 95% CI). The choice applies "
+                    "type** (+/-SD, +/-SEM, or 95% CI). The choice applies "
                     "to every gene and is printed under each chart."
                 )
 
@@ -5969,9 +5974,16 @@ with tab_ov:
             if is_sig:
                 sig_count += 1
             verdict_cell = "—"
+            # Baseline = the reference condition's REPORTED mean. Since
+            # 2026-10-28 that is the simple mean of its per-well fold changes,
+            # ~1 but not exactly 1, so measuring from a literal 1 misplaced
+            # both the up/down call and the % of benchmark.
+            base = _fold(g, ref_condition) if ref_condition else None
+            if base is None:
+                base = 1.0
             if exp and highlight and hl_fold is not None:
                 graded += 1
-                obs = "up" if hl_fold > 1 else "down"
+                obs = "up" if hl_fold > base else "down"
                 ok = (obs == exp) and is_sig
                 if ok:
                     passes += 1
@@ -5987,9 +5999,9 @@ with tab_ov:
                 # benchmark to have moved at least 10% and in the same direction
                 # as the sample for the ratio to mean anything.
                 if (bf is not None and hl_fold is not None
-                        and abs(bf - 1) >= 0.10
-                        and (bf - 1) * (hl_fold - 1) > 0):
-                    pct = (hl_fold - 1) / (bf - 1) * 100
+                        and abs(bf - base) >= 0.10 * base
+                        and (bf - base) * (hl_fold - base) > 0):
+                    pct = (hl_fold - base) / (bf - base) * 100
                     bench_pcts.append(pct)
             row = {"Gene": g}
             for cond in conditions:

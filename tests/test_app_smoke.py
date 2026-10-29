@@ -69,13 +69,14 @@ def test_full_pipeline_runs_without_exceptions():
 
 
 def test_pvalues_default_to_two_tailed_student():
-    """With the T-test radio untouched, the shipped p-value is Student's.
+    """With the T-test radio untouched, the shipped p-value is the hand sheet's:
+    two-tailed Student's t-test on each well's fold change.
 
-    The radio used to default to Welch, which on these wells reports 0.0162
-    ('*') against a hand Student / Excel T.TEST(...,2,2) of 0.00168 ('**').
     Per-well ΔCt: Non-treated 4.00/4.05/3.95, Active 1.9/2.5/1.6 — the
-    control-vs-A ΔCt of tests/test_student_ttest.py shifted by a constant, so
-    t and p are identical to the value pinned there by hand calculation.
+    control-vs-A ΔCt of tests/test_fold_change_method.py shifted by a constant.
+    That scales every fold change by one factor, which leaves t and p
+    unchanged, so the expected value is the one pinned there by hand
+    calculation (Welch would give 0.0478; the old ΔCt-domain test 0.00168).
     """
     from streamlit.testing.v1 import AppTest
     rows = []
@@ -99,8 +100,8 @@ def test_pvalues_default_to_two_tailed_student():
     assert not at.exception, at.exception
     col1a1 = at.session_state["processed_data"]["COL1A1"]
     row = col1a1[col1a1["p_value"].notna()].iloc[0]
-    assert row["p_value"] == pytest.approx(0.0016784148735, rel=1e-9)
-    assert row["significance"] == "**"
+    assert row["p_value"] == pytest.approx(0.0117003895956, rel=1e-9)
+    assert row["significance"] == "*"
     assert row["stat_test_used"].startswith("Student t-test")
 
 
@@ -142,3 +143,38 @@ def test_overview_verdict_and_benchmark():
     # instead: these are ratios, and a mean let a negative ratio from a marker
     # moving the other way cancel a genuine positive.
     assert metrics.get("Median % of benchmark", "—") != "—"
+
+
+def test_overview_measures_from_the_reference_mean_not_from_one():
+    """Since 2026-10-28 the reference bar is the simple mean of its per-well
+    fold changes — ~1, not exactly 1 (wells at FC 2, 1, 0.5 average 1.1667).
+    The benchmark % and the up/down call must be measured from that reported
+    baseline: (1.75 - 1.1667) / (2.3333 - 1.1667) = 50%, where a baseline of 1
+    reported 56%."""
+    from streamlit.testing.v1 import AppTest
+
+    folds = {"UVB only": 7 / 6, "TGFβ": 7 / 3, "Active": 1.75}
+    df = pd.DataFrame([
+        {"Condition": c, "Fold_Change": f, "Relative_Expression": f,
+         "p_value": (np.nan if c == "UVB only" else 0.002),
+         "significance": ("" if c == "UVB only" else "**"),
+         "SEM": 0.05, "SD": 0.08, "Group": "Treatment", "n_replicates": 3,
+         "Target_Ct_Mean": 25.0}
+        for c, f in folds.items()
+    ])
+    at = AppTest.from_file(SCRIPT, default_timeout=60)
+    at.session_state["processed_data"] = {"COL1A1": df}
+    at.session_state["selected_efficacy"] = "광노화"   # expected: COL1A1 up
+    at.session_state["analysis_ref_condition"] = "UVB only"
+    at.session_state["hk_gene"] = "ACTIN"
+    at.session_state["sample_order"] = ["s1", "s2", "s3"]
+    at.session_state["sample_mapping"] = {
+        "s1": {"condition": "UVB only", "group": "Negative Control", "include": True},
+        "s2": {"condition": "TGFβ", "group": "Positive Control", "include": True},
+        "s3": {"condition": "Active", "group": "Treatment", "include": True},
+    }
+    at.run()
+    assert not at.exception, at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics.get("Median % of benchmark") == "50%"
+    assert metrics.get("Markers as expected") == "1/1"
