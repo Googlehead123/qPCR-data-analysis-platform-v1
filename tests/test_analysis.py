@@ -41,7 +41,22 @@ class TestAnalysisEngineCalculateDDCT:
         
         ref_row = result[result['Condition'] == 'Non-treated']
         assert len(ref_row) == 1
-        assert abs(ref_row['Relative_Expression'].iloc[0] - 1.0) < 0.01
+        # Since 2026-10-28 the reference's bar is the simple mean of its own
+        # wells' 2^-(ΔCt_i - mean ΔCt): >= 1 (Jensen) and NOT exactly 1, by an
+        # amount that grows with replicate spread. "Within 0.01 of 1" was an
+        # identity under the old 2^-(mean ΔΔCt) and became a coin-flip on this
+        # fixture's random 0.2-Ct noise (failed 6/30 runs) — assert the exact
+        # value instead, which holds for every draw.
+        raw = sample_qpcr_raw_data
+        cond = raw["Sample"].map(lambda s: sample_mapping.get(s, {}).get("condition", s))
+        ref = raw[cond == "Non-treated"]
+        target = ref_row["Target"].iloc[0]
+        dct = (ref[ref["Target"] == target]["CT"].to_numpy()
+               - ref[ref["Target"] == "GAPDH"]["CT"].mean())
+        expected = np.mean(2.0 ** -(dct - dct.mean()))
+        fc = ref_row['Relative_Expression'].iloc[0]
+        assert fc == pytest.approx(expected, rel=1e-12)
+        assert fc >= 1.0 - 1e-12
 
     def test_calculate_ddct_excludes_housekeeping_gene(self, mock_streamlit, sample_qpcr_raw_data, sample_mapping):
         from importlib import import_module
