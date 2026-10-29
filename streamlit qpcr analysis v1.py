@@ -379,6 +379,378 @@ def _current_provenance():
     )
 
 
+# ==================== TAB LOGIC (shared with the golden harness) ====================
+# Decisions that used to sit inline in the tab bodies, moved here verbatim so
+# they can run without rendering a tab. The tabs call them, and so does
+# tests/golden/driver.py: the golden outputs run the app's own code, not a copy.
+# `state` is st.session_state in the app; the helpers these call
+# (_reset_session_for_new_data, apply_auto_qc, qc_thresholds, ...) read and
+# write st.session_state directly.
+
+
+def parse_uploads(files) -> list:
+    """Parse each uploaded CSV; the frames that hold rows, tagged with ``Source_File``.
+
+    Reports every file's outcome (parsed, empty, failed) as it goes.
+    """
+    all_data = []
+    for file in files:
+        parsed = QPCRParser.parse(file)
+        # FIX-03: Reject empty DataFrames (parsed but no valid rows)
+        if parsed is not None and not parsed.empty:
+            parsed["Source_File"] = file.name
+            all_data.append(parsed)
+            st.success(f"{file.name}: {len(parsed)} wells parsed")
+        elif parsed is not None and parsed.empty:
+            st.warning(f"{file.name}: parsed successfully but contained no valid data rows.")
+        else:
+            # parse() returned None. It reports the reason itself, but
+            # this branch did not exist, so the file's failure was
+            # invisible in the upload list.
+            st.error(f"{file.name}: could NOT be loaded — see the error above.")
+    return all_data
+
+
+def ingest_frames(frames: list, state, *, file_hashes: list) -> None:
+    """Make ``frames`` (from ``parse_uploads``) the session's experiment.
+
+    With nothing usable the previous data is cleared. Otherwise the frames are
+    combined, their Well IDs made unique, the session reset, auto-QC run at SD
+    0.3 and the samples put in natural order. ``file_hashes`` is recorded as the
+    loaded upload after the reset and before auto-QC, so a file whose auto-QC
+    fails is not re-parsed on every rerun.
+
+    ``state`` must be ``st.session_state``: the reset, style clearing and
+    auto-QC this runs write there, not to ``state``.
+    """
+    if not frames:
+        # Nothing usable arrived. This used to fall through leaving the
+        # PREVIOUS file's data in session_state while the uploader showed
+        # the new filename, so every metric, the preview, QC and the
+        # analysis kept describing the old experiment. Clearing also lets
+        # the hash record advance so the failed file is not re-parsed on
+        # every rerun.
+        if state.get("data") is not None:
+            st.error(
+                "None of the selected files could be loaded. The previously "
+                "loaded data has been cleared so nothing below describes the "
+                "wrong experiment."
+            )
+        state["data"] = None
+        state["processed_data"] = {}
+        state["graphs"] = {}
+        _clear_all_gene_style_state()
+        state["_uploaded_file_hashes"] = file_hashes
+
+    if frames:
+        _combined_raw = pd.concat(frames, ignore_index=True)
+        # Measure overlap BEFORE the Well IDs are made unique (below).
+        _dup_check = ["Target", "Well", "Sample"]
+        _dup_mask = _combined_raw.duplicated(subset=_dup_check, keep=False)
+        _cross_file_dups = _within_file_dups = 0
+        if _dup_mask.any():
+            _dup_sources = _combined_raw[_dup_mask].groupby(_dup_check)[
+                "Source_File"
+            ].apply(lambda x: list(x.unique()))
+            _cross_file_dups = int((_dup_sources.apply(len) > 1).sum())
+            _within_file_dups = int((_dup_sources.apply(len) == 1).sum())
+        # A repeated Target+Well+Sample made exclusions and auto-QC
+        # ambiguous (excluding one copy removed all of them).
+        state["data"], _n_wells_renamed = make_well_ids_unique(
+            _combined_raw
+        )
+
+        # FIX-02: Complete state reset on new upload to prevent stale data
+        had_previous_analysis = bool(state.get("processed_data"))
+        _reset_session_for_new_data()
+
+        state["_uploaded_file_hashes"] = file_hashes
+
+        # Automatic replicate QC (best-2-of-3 at SD 0.3) so the user can
+        # go straight to mapping; fully reviewable/reversible in the QC tab.
+        apply_auto_qc(0.3)
+
+        if had_previous_analysis:
+            st.info("Previous analysis results cleared due to new data upload.")
+
+        # FIX-05: Detect overlapping data across files AND within one
+        # (counted above, before Well IDs were made unique).
+        if _cross_file_dups:
+            st.warning(
+                f"⚠️ Found {_cross_file_dups} overlapping data point(s) "
+                f"across files (same Target+Well+Sample in different "
+                f"files). Each is kept as its own well (repeats get a "
+                f"' (2)' suffix) and counted as an extra replicate. "
+                f"Consider deduplicating your input files."
+            )
+        if _within_file_dups:
+            st.warning(
+                f"⚠️ Found {_within_file_dups} repeated Target+Well+Sample "
+                f"row(s) within a single file. They are counted as extra "
+                f"replicates (repeats get a ' (2)' suffix), which inflates "
+                f"n and narrows the error bars."
+            )
+
+        unique_samples = sorted(
+            state["data"]["Sample"].unique(), key=natural_sort_key
+        )
+        state["sample_order"] = unique_samples
+
+
+# Housekeeping genes the Upload tab recognises (matched case-insensitively).
+KNOWN_HK_GENES = [
+    "ACTIN",
+    "B-ACTIN",
+    "BACTIN",
+    "GAPDH",
+    "ACTB",
+    "BETA-ACTIN",
+    "BETAACTIN",
+    "18S",
+    "18S RRNA",
+    "HPRT",
+    "HPRT1",
+    "B2M",
+    "RPLP0",
+    "TBP",
+    "PPIA",
+    "RPL13A",
+    "YWHAZ",
+    "SDHA",
+    "HMBS",
+    "UBC",
+    "GUSB",
+    "PGK1",
+]
+
+
+def detect_hk_genes(targets: list) -> list:
+    """The known housekeeping genes among ``targets``, in ``targets`` order."""
+    return [g for g in targets if g.upper() in KNOWN_HK_GENES]
+
+
+def suggest_efficacy(targets: list) -> str | None:
+    """The first efficacy category naming any of ``targets``; None if none does."""
+    detected_genes = set(targets)
+    # FIX-07: Case-insensitive efficacy gene matching
+    detected_genes_upper = {g.upper() for g in detected_genes}
+    suggested = None
+    for eff, cfg in EFFICACY_CONFIG.items():
+        if any(g.upper() in detected_genes_upper for g in cfg["genes"]):
+            suggested = eff
+            break
+    return suggested
+
+
+def group_types_for(config: dict) -> list:
+    """The group types the Mapping tab offers for one efficacy category."""
+    # Group type options
+    group_types = ["Negative Control", "Positive Control", "Treatment"]
+    if "baseline" in config["controls"]:
+        group_types.insert(0, "Baseline")
+    return group_types
+
+
+def suggest_group(name: str, config: dict, group_types: list) -> str:
+    """Default group for a sample named ``name`` under efficacy ``config``.
+
+    Smart default group: match a new sample's name against the efficacy
+    category's known control labels so e.g. "Non-treated" pre-selects
+    "Negative Control" instead of "Treatment". Always overridable below.
+    """
+    _role_to_group = {
+        "baseline": "Baseline",
+        "negative": "Negative Control",
+        "positive": "Positive Control",
+    }
+
+    sl = str(name).strip().lower()
+    if not sl:
+        return "Treatment"
+    controls = config.get("controls", {})
+    # Exact label match first (highest confidence), then substring.
+    for role in ("baseline", "negative", "positive"):
+        label = controls.get(role)
+        if label and sl == str(label).strip().lower():
+            grp = _role_to_group[role]
+            return grp if grp in group_types else "Treatment"
+    # Substring pass. This used to match in BOTH directions on any
+    # length, so a short sample name inside a dosed control label won:
+    # every real export here names samples "1".."21", and under 탄력 the
+    # sample named "1" became a Positive Control because "1" is inside
+    # "tgfβ 10 ng/ml" (under 진정, "4" inside "poly(i:c)+il-4"). The
+    # derived group reaches processed_data["Group"], the results table and
+    # the Excel Summary grouping, and analysis.py takes a pooled
+    # condition's group from its first sample — so one mis-grouped sample
+    # relabels a whole condition. Require at least 3 characters and a
+    # prefix/containment relation, which keeps "Non-treated 24h" and
+    # "Dexamethasone" matching while a bare number no longer does.
+    for role in ("baseline", "negative", "positive"):
+        label = controls.get(role)
+        ll = str(label).strip().lower() if label else ""
+        if not ll or len(sl) < 3:
+            continue
+        if ll.startswith(sl) or sl.startswith(ll) or ll in sl:
+            grp = _role_to_group[role]
+            return grp if grp in group_types else "Treatment"
+    return "Treatment"
+
+
+def excluded_samples_from_mapping(mapping: dict) -> set:
+    """Samples whose include flag is off in the sample mapping."""
+    return set(
+        [
+            s
+            for s, v in mapping.items()
+            if not v.get("include", True)
+        ]
+    )
+
+
+def build_analysis_params(state, *, now: datetime) -> dict:
+    """The run's parameters as the Excel and PPT writers receive them.
+
+    ``concentration`` is the "Sample concentration" box (key
+    ``exp_concentration``), stripped. A keyed widget's value is in session state
+    from the start of the run, so reading it here, before the box renders,
+    gives what the box returns.
+    """
+    analysis_params = {
+        "Date": now.strftime("%Y-%m-%d %H:%M"),
+        "Efficacy_Type": state["selected_efficacy"],
+        "Housekeeping_Gene": state["hk_gene"],
+        "Reference_Sample": state.get("analysis_ref_condition", "N/A"),
+        "Compare_To": state.get("analysis_cmp_condition", "N/A"),
+        "Compare_To_2": state.get("analysis_cmp_condition_2"),
+        "Compare_To_3": state.get("analysis_cmp_condition_3"),
+        "Excluded_Wells": sum(len(ws) for ws in state["excluded_wells"].values()) if isinstance(state["excluded_wells"], dict) else len(state["excluded_wells"]),
+        "Excluded_Samples": len(state["excluded_samples"]),
+        "Genes_Analyzed": len(state["processed_data"]),
+        "ttest_type": state.get("ttest_type", DEFAULT_TTEST_TYPE),
+        # Treatment time comes from the efficacy catalog (per-assay) so the
+        # PPT "Treatment time:" field is accurate (4 h / 6 h / 24 h / 48 h).
+        "treatment_time": EFFICACY_CONFIG.get(
+            state["selected_efficacy"], {}
+        ).get("treatment_time", "24 h"),
+    }
+    _conc = (state.get("exp_concentration") or "").strip()
+    analysis_params["concentration"] = _conc
+    return analysis_params
+
+
+def build_export_extras(state):
+    """Build qc_stats, replicate_stats, and excluded_wells for export.
+
+    Returns ``(qc_stats | None, replicate_stats_df | None, excluded_wells)``.
+    The QC thresholds are read through ``qc_thresholds()`` (inside
+    ``get_replicate_stats`` / ``get_qc_summary_stats``), i.e. from the QC
+    Settings widget keys in ``st.session_state``, not from ``state``.
+    """
+    qc_stats = None
+    replicate_stats_df = None
+    excl = state.get("excluded_wells", {})
+
+    if state.get("data") is not None:
+        # Dict-aware, matching the QC tab: flattening the per-(gene,
+        # sample) exclusions to bare well IDs dropped that coordinate for
+        # every gene sharing it, so the workbook's QC sheet disagreed
+        # with both the screen and the DDCt the report is built on.
+        qc_data = state["data"].copy()
+        _exp_mask = QualityControl.excluded_mask(qc_data, excl)
+        if _exp_mask.any():
+            qc_data = qc_data[~_exp_mask]
+
+        replicate_stats_df = get_replicate_stats(qc_data)
+        qc_summary = get_qc_summary_stats(state["data"], excl or None)
+        qc_stats = qc_summary if qc_summary else None
+
+    return qc_stats, replicate_stats_df, excl
+
+
+def publication_image_format(img_format: str, img_width: int, img_height: int) -> tuple:
+    """``(fmt, mime, scale)`` for the Gene Images export's Format selection and size."""
+    fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
+    mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
+    scale = 3 if fmt == "png" else 1
+    # A 3000x2000 canvas at 3x is 54 MP PER GENE — enough to exhaust a
+    # Streamlit Cloud worker. Step the scale down to stay under ~16 MP.
+    while scale > 1 and img_width * img_height * scale * scale > 16_000_000:
+        scale -= 1
+    return fmt, mime, scale
+
+
+def publication_figure(fig: go.Figure, img_width: int, img_height: int) -> tuple:
+    """``(figure, height)`` to render one gene's publication image from.
+
+    A copy of ``fig`` at ``img_width``, with black 14 pt text and a bottom margin
+    of at least 180 px; the height grows by whatever the margin needs beyond that.
+    """
+    fig_copy = go.Figure(fig)
+    _orig_m = fig.layout.margin
+    _pub_b = max(180, _orig_m.b if _orig_m and _orig_m.b else 180)
+    _adj_h = img_height + max(0, _pub_b - 180)
+    fig_copy.update_layout(width=img_width, height=_adj_h, margin=dict(b=_pub_b),
+        font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
+    return fig_copy, _adj_h
+
+
+def image_zip_entries(images: dict, fmt: str) -> dict:
+    """``{member name: bytes}`` for the images zip, one member per gene.
+
+    Display name, not the raw target: Excel and PPT honour the rename and only
+    the images did not. Sanitised because a target containing "/" became a
+    directory inside the zip.
+
+    Built with a uniqueness counter rather than a dict comprehension keyed on
+    the stem: two genes renamed to the same display name collapsed to ONE entry
+    and a gene vanished from the download silently, while its own per-gene
+    button still worked. _sanitize_sheet_name already takes a used-names set
+    for exactly this reason on the Excel side.
+    """
+    _zip_entries = {}
+    _used_stems: dict = {}
+    for _g, _b in images.items():
+        _stem = _safe_image_stem(_g)
+        _n = _used_stems.get(_stem, 0) + 1
+        _used_stems[_stem] = _n
+        _name = _stem if _n == 1 else f"{_stem}_{_n}"
+        _zip_entries[f"{_name}.{fmt}"] = _b
+    return _zip_entries
+
+
+def gene_results_frame(gene: str, gene_df: pd.DataFrame) -> pd.DataFrame:
+    """The columns of ``gene``'s results the Analysis tab shows and serves as CSV."""
+    # Display columns
+    display_cols = [
+        "Condition",
+        "Group",
+        "Fold_Change",
+        "p_value",
+        "significance",
+        "n_replicates",
+        "Target_Ct_Mean",
+        "Target_Ct_SD",
+        "Target_Ct_CV%",
+        "HK_Ct_Mean",
+        "HK_Ct_SD",
+        "HK_Ct_CV%",
+        "Delta_Ct",
+        "SEM",
+        "SD",
+    ]
+
+    # Filter to existing columns
+    return gene_df[[c for c in display_cols if c in gene_df.columns]]
+
+
+def gene_results_csv(gene: str, display_df: pd.DataFrame, *, now: datetime) -> tuple:
+    """``(file name, payload)`` of ``gene``'s results download: UTF-8 with a BOM."""
+    return (
+        f"{gene}_results_{now.strftime('%Y%m%d')}.csv",
+        display_df.to_csv(index=False).encode("utf-8-sig"),
+    )
+
+
 def format_interpretation_text(interp_list, lang="en"):
     """Join per-gene interpretation narratives into one text block (pure)."""
     key = "narrative_ko" if lang == "ko" else "narrative_en"
@@ -4167,94 +4539,10 @@ with tab1:
         is_new_upload = current_file_hashes != previous_file_hashes
 
         if is_new_upload:
-            all_data = []
-            for file in uploaded_files:
-                parsed = QPCRParser.parse(file)
-                # FIX-03: Reject empty DataFrames (parsed but no valid rows)
-                if parsed is not None and not parsed.empty:
-                    parsed["Source_File"] = file.name
-                    all_data.append(parsed)
-                    st.success(f"{file.name}: {len(parsed)} wells parsed")
-                elif parsed is not None and parsed.empty:
-                    st.warning(f"{file.name}: parsed successfully but contained no valid data rows.")
-                else:
-                    # parse() returned None. It reports the reason itself, but
-                    # this branch did not exist, so the file's failure was
-                    # invisible in the upload list.
-                    st.error(f"{file.name}: could NOT be loaded — see the error above.")
-
-            if not all_data:
-                # Nothing usable arrived. This used to fall through leaving the
-                # PREVIOUS file's data in session_state while the uploader showed
-                # the new filename, so every metric, the preview, QC and the
-                # analysis kept describing the old experiment. Clearing also lets
-                # the hash record advance so the failed file is not re-parsed on
-                # every rerun.
-                if st.session_state.get("data") is not None:
-                    st.error(
-                        "None of the selected files could be loaded. The previously "
-                        "loaded data has been cleared so nothing below describes the "
-                        "wrong experiment."
-                    )
-                st.session_state.data = None
-                st.session_state.processed_data = {}
-                st.session_state.graphs = {}
-                _clear_all_gene_style_state()
-                st.session_state._uploaded_file_hashes = current_file_hashes
-
-            if all_data:
-                _combined_raw = pd.concat(all_data, ignore_index=True)
-                # Measure overlap BEFORE the Well IDs are made unique (below).
-                _dup_check = ["Target", "Well", "Sample"]
-                _dup_mask = _combined_raw.duplicated(subset=_dup_check, keep=False)
-                _cross_file_dups = _within_file_dups = 0
-                if _dup_mask.any():
-                    _dup_sources = _combined_raw[_dup_mask].groupby(_dup_check)[
-                        "Source_File"
-                    ].apply(lambda x: list(x.unique()))
-                    _cross_file_dups = int((_dup_sources.apply(len) > 1).sum())
-                    _within_file_dups = int((_dup_sources.apply(len) == 1).sum())
-                # A repeated Target+Well+Sample made exclusions and auto-QC
-                # ambiguous (excluding one copy removed all of them).
-                st.session_state.data, _n_wells_renamed = make_well_ids_unique(
-                    _combined_raw
-                )
-
-                # FIX-02: Complete state reset on new upload to prevent stale data
-                had_previous_analysis = bool(st.session_state.get("processed_data"))
-                _reset_session_for_new_data()
-
-                st.session_state._uploaded_file_hashes = current_file_hashes
-
-                # Automatic replicate QC (best-2-of-3 at SD 0.3) so the user can
-                # go straight to mapping; fully reviewable/reversible in the QC tab.
-                apply_auto_qc(0.3)
-
-                if had_previous_analysis:
-                    st.info("Previous analysis results cleared due to new data upload.")
-
-                # FIX-05: Detect overlapping data across files AND within one
-                # (counted above, before Well IDs were made unique).
-                if _cross_file_dups:
-                    st.warning(
-                        f"⚠️ Found {_cross_file_dups} overlapping data point(s) "
-                        f"across files (same Target+Well+Sample in different "
-                        f"files). Each is kept as its own well (repeats get a "
-                        f"' (2)' suffix) and counted as an extra replicate. "
-                        f"Consider deduplicating your input files."
-                    )
-                if _within_file_dups:
-                    st.warning(
-                        f"⚠️ Found {_within_file_dups} repeated Target+Well+Sample "
-                        f"row(s) within a single file. They are counted as extra "
-                        f"replicates (repeats get a ' (2)' suffix), which inflates "
-                        f"n and narrows the error bars."
-                    )
-
-                unique_samples = sorted(
-                    st.session_state.data["Sample"].unique(), key=natural_sort_key
-                )
-                st.session_state.sample_order = unique_samples
+            ingest_frames(
+                parse_uploads(uploaded_files), st.session_state,
+                file_hashes=current_file_hashes,
+            )
 
     elif st.session_state.get("_uploaded_file_hashes"):
         # The uploader was emptied (the X on the last file). With no else branch
@@ -4271,32 +4559,8 @@ with tab1:
         col2.metric("Samples", st.session_state.data["Sample"].nunique())
         col3.metric("Genes", st.session_state.data["Target"].nunique())
 
-        KNOWN_HK_GENES = [
-            "ACTIN",
-            "B-ACTIN",
-            "BACTIN",
-            "GAPDH",
-            "ACTB",
-            "BETA-ACTIN",
-            "BETAACTIN",
-            "18S",
-            "18S RRNA",
-            "HPRT",
-            "HPRT1",
-            "B2M",
-            "RPLP0",
-            "TBP",
-            "PPIA",
-            "RPL13A",
-            "YWHAZ",
-            "SDHA",
-            "HMBS",
-            "UBC",
-            "GUSB",
-            "PGK1",
-        ]
         all_genes = list(st.session_state.data["Target"].unique())
-        hk_genes = [g for g in all_genes if g.upper() in KNOWN_HK_GENES]
+        hk_genes = detect_hk_genes(all_genes)
 
         if hk_genes:
             default_idx = 0
@@ -5140,14 +5404,7 @@ with tab2:
 
     if st.session_state.data is not None:
         # Efficacy type selection
-        detected_genes = set(st.session_state.data["Target"].unique())
-        # FIX-07: Case-insensitive efficacy gene matching
-        detected_genes_upper = {g.upper() for g in detected_genes}
-        suggested = None
-        for eff, cfg in EFFICACY_CONFIG.items():
-            if any(g.upper() in detected_genes_upper for g in cfg["genes"]):
-                suggested = eff
-                break
+        suggested = suggest_efficacy(list(st.session_state.data["Target"].unique()))
 
         efficacy = st.selectbox(
             "🎯 Efficacy Test Type",
@@ -5209,51 +5466,7 @@ with tab2:
                       if s not in current_data_samples]:
             del st.session_state.sample_mapping[_gone]
 
-        # Group type options
-        group_types = ["Negative Control", "Positive Control", "Treatment"]
-        if "baseline" in config["controls"]:
-            group_types.insert(0, "Baseline")
-
-        # Smart default group: match a new sample's name against the efficacy
-        # category's known control labels so e.g. "Non-treated" pre-selects
-        # "Negative Control" instead of "Treatment". Always overridable below.
-        _role_to_group = {
-            "baseline": "Baseline",
-            "negative": "Negative Control",
-            "positive": "Positive Control",
-        }
-
-        def _suggest_group(sample_name):
-            sl = str(sample_name).strip().lower()
-            if not sl:
-                return "Treatment"
-            controls = config.get("controls", {})
-            # Exact label match first (highest confidence), then substring.
-            for role in ("baseline", "negative", "positive"):
-                label = controls.get(role)
-                if label and sl == str(label).strip().lower():
-                    grp = _role_to_group[role]
-                    return grp if grp in group_types else "Treatment"
-            # Substring pass. This used to match in BOTH directions on any
-            # length, so a short sample name inside a dosed control label won:
-            # every real export here names samples "1".."21", and under 탄력 the
-            # sample named "1" became a Positive Control because "1" is inside
-            # "tgfβ 10 ng/ml" (under 진정, "4" inside "poly(i:c)+il-4"). The
-            # derived group reaches processed_data["Group"], the results table and
-            # the Excel Summary grouping, and analysis.py takes a pooled
-            # condition's group from its first sample — so one mis-grouped sample
-            # relabels a whole condition. Require at least 3 characters and a
-            # prefix/containment relation, which keeps "Non-treated 24h" and
-            # "Dexamethasone" matching while a bare number no longer does.
-            for role in ("baseline", "negative", "positive"):
-                label = controls.get(role)
-                ll = str(label).strip().lower() if label else ""
-                if not ll or len(sl) < 3:
-                    continue
-                if ll.startswith(sl) or sl.startswith(ll) or ll in sl:
-                    grp = _role_to_group[role]
-                    return grp if grp in group_types else "Treatment"
-            return "Treatment"
+        group_types = group_types_for(config)
 
         # Ensure all samples in sample_order have mapping. The Group is now
         # auto-derived (the manual Group column was removed) and refreshed every
@@ -5275,7 +5488,9 @@ with tab2:
             # back to the raw sample name. This was fed the raw sample name only,
             # so renaming "1" to "Non-treated" never updated the group — the
             # rename is precisely the point at which the role becomes knowable.
-            entry["group"] = _suggest_group(entry.get("condition") or sample)
+            entry["group"] = suggest_group(
+                entry.get("condition") or sample, config, group_types
+            )
 
         st.caption(
             "Choose which samples to include and name their conditions. "
@@ -5333,7 +5548,7 @@ with tab2:
                 # space) became two conditions with visually identical bar labels
                 # — two n=3 bars each with its own p-value instead of one n=6 —
                 # and the duplicate-name notice compares raw strings, so it did
-                # not fire. The matching layer already strips (_suggest_group,
+                # not fire. The matching layer already strips (suggest_group,
                 # the Overview _match), so only the grouping layer disagreed.
                 cond = (cond or "").strip()
                 if not cond:
@@ -5409,12 +5624,8 @@ with tab2:
                 st.rerun()
 
         # Update excluded_samples from include flags
-        st.session_state.excluded_samples = set(
-            [
-                s
-                for s, v in st.session_state.sample_mapping.items()
-                if not v.get("include", True)
-            ]
+        st.session_state.excluded_samples = excluded_samples_from_mapping(
+            st.session_state.sample_mapping
         )
 
         # FIX-11: Warn on duplicate condition names across included samples
@@ -6158,27 +6369,7 @@ with tab3:
                             f"Expected: {'↑ Increase' if direction == 'up' else '↓ Decrease'}"
                         )
 
-                # Display columns
-                display_cols = [
-                    "Condition",
-                    "Group",
-                    "Fold_Change",
-                    "p_value",
-                    "significance",
-                    "n_replicates",
-                    "Target_Ct_Mean",
-                    "Target_Ct_SD",
-                    "Target_Ct_CV%",
-                    "HK_Ct_Mean",
-                    "HK_Ct_SD",
-                    "HK_Ct_CV%",
-                    "Delta_Ct",
-                    "SEM",
-                    "SD",
-                ]
-
-                # Filter to existing columns
-                display_df = gene_df[[c for c in display_cols if c in gene_df.columns]]
+                display_df = gene_results_frame(gene, gene_df)
 
                 # Style the dataframe. Not Styler.background_gradient: it
                 # imports matplotlib at call time, which this project does not
@@ -6203,10 +6394,11 @@ with tab3:
                 )
 
                 st.dataframe(styled, width='stretch')
+                _csv_name, _csv_data = gene_results_csv(gene, display_df, now=datetime.now())
                 st.download_button(
                     "⬇️ Download CSV",
-                    data=display_df.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"{gene}_results_{datetime.now().strftime('%Y%m%d')}.csv",
+                    data=_csv_data,
+                    file_name=_csv_name,
                     mime="text/csv", key=f"csv_{gene}", width='stretch',
                 )
 
@@ -6378,46 +6570,7 @@ with tab5:
             )
 
     if st.session_state.processed_data:
-        analysis_params = {
-            "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "Efficacy_Type": st.session_state.selected_efficacy,
-            "Housekeeping_Gene": st.session_state.hk_gene,
-            "Reference_Sample": st.session_state.get("analysis_ref_condition", "N/A"),
-            "Compare_To": st.session_state.get("analysis_cmp_condition", "N/A"),
-            "Compare_To_2": st.session_state.get("analysis_cmp_condition_2"),
-            "Compare_To_3": st.session_state.get("analysis_cmp_condition_3"),
-            "Excluded_Wells": sum(len(ws) for ws in st.session_state.excluded_wells.values()) if isinstance(st.session_state.excluded_wells, dict) else len(st.session_state.excluded_wells),
-            "Excluded_Samples": len(st.session_state.excluded_samples),
-            "Genes_Analyzed": len(st.session_state.processed_data),
-            "ttest_type": st.session_state.get("ttest_type", DEFAULT_TTEST_TYPE),
-            # Treatment time comes from the efficacy catalog (per-assay) so the
-            # PPT "Treatment time:" field is accurate (4 h / 6 h / 24 h / 48 h).
-            "treatment_time": EFFICACY_CONFIG.get(
-                st.session_state.selected_efficacy, {}
-            ).get("treatment_time", "24 h"),
-        }
-
-        def _build_export_extras():
-            """Build qc_stats, replicate_stats, and excluded_wells for export."""
-            qc_stats = None
-            replicate_stats_df = None
-            excl = st.session_state.get("excluded_wells", {})
-
-            if st.session_state.get("data") is not None:
-                # Dict-aware, matching the QC tab: flattening the per-(gene,
-                # sample) exclusions to bare well IDs dropped that coordinate for
-                # every gene sharing it, so the workbook's QC sheet disagreed
-                # with both the screen and the DDCt the report is built on.
-                qc_data = st.session_state.data.copy()
-                _exp_mask = QualityControl.excluded_mask(qc_data, excl)
-                if _exp_mask.any():
-                    qc_data = qc_data[~_exp_mask]
-
-                replicate_stats_df = get_replicate_stats(qc_data)
-                qc_summary = get_qc_summary_stats(st.session_state.data, excl or None)
-                qc_stats = qc_summary if qc_summary else None
-
-            return qc_stats, replicate_stats_df, excl
+        analysis_params = build_analysis_params(st.session_state, now=datetime.now())
 
         efficacy = st.session_state.selected_efficacy
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -6443,8 +6596,9 @@ with tab5:
             help="Printed on the PowerPoint slides. Left blank, the slide field is "
                  "left blank too — it is never guessed.",
         )
+        # build_analysis_params (above) already put the stripped value into
+        # analysis_params["concentration"]; this copy drives the warning.
         _conc = (_conc or "").strip()
-        analysis_params["concentration"] = _conc
         if not _conc:
             st.warning(
                 "Sample concentration is empty — the PowerPoint 'Sample concentration' "
@@ -6538,7 +6692,7 @@ with tab5:
                          disabled=_stale) and not _stale:
                 with st.spinner("Building Excel report..."):
                     try:
-                        _qc, _rep, _excl = _build_export_extras()
+                        _qc, _rep, _excl = build_export_extras(st.session_state)
                         _put_export("_excel_export", export_to_excel(
                             st.session_state.data, st.session_state.processed_data,
                             analysis_params, st.session_state.sample_mapping,
@@ -6613,13 +6767,7 @@ with tab5:
                 step=100, key="pub_img_height")
 
         if st.session_state.graphs:
-            fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
-            mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
-            scale = 3 if fmt == "png" else 1
-            # A 3000x2000 canvas at 3x is 54 MP PER GENE — enough to exhaust a
-            # Streamlit Cloud worker. Step the scale down to stay under ~16 MP.
-            while scale > 1 and img_width * img_height * scale * scale > 16_000_000:
-                scale -= 1
+            fmt, mime, scale = publication_image_format(img_format, img_width, img_height)
             if fmt == "png" and scale < 3:
                 st.caption(
                     f"PNG scale reduced to {scale}× to keep each image under ~16 "
@@ -6634,12 +6782,7 @@ with tab5:
                 genes = list(st.session_state.graphs.items())
                 for idx, (gene, fig) in enumerate(genes):
                     try:
-                        fig_copy = go.Figure(fig)
-                        _orig_m = fig.layout.margin
-                        _pub_b = max(180, _orig_m.b if _orig_m and _orig_m.b else 180)
-                        _adj_h = img_height + max(0, _pub_b - 180)
-                        fig_copy.update_layout(width=img_width, height=_adj_h, margin=dict(b=_pub_b),
-                            font=dict(size=14, family=PLOTLY_FONT_FAMILY, color="black"))
+                        fig_copy, _adj_h = publication_figure(fig, img_width, img_height)
                         rendered[gene] = ReportGenerator._fig_to_image(
                             fig_copy, format=fmt, scale=scale, width=img_width, height=_adj_h)
                     except Exception as e:
@@ -6660,24 +6803,7 @@ with tab5:
                 _cfmt = cached["fmt"]
                 _cmime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[_cfmt]
                 today = datetime.now().strftime("%Y%m%d")
-                # Display name, not the raw target: Excel and PPT honour the
-                # rename and only the images did not. Sanitised because a target
-                # containing "/" became a directory inside the zip.
-                #
-                # Built with a uniqueness counter rather than a dict
-                # comprehension keyed on the stem: two genes renamed to the same
-                # display name collapsed to ONE entry and a gene vanished from
-                # the download silently, while its own per-gene button still
-                # worked. _sanitize_sheet_name already takes a used-names set for
-                # exactly this reason on the Excel side.
-                _zip_entries = {}
-                _used_stems: dict = {}
-                for _g, _b in cached["images"].items():
-                    _stem = _safe_image_stem(_g)
-                    _n = _used_stems.get(_stem, 0) + 1
-                    _used_stems[_stem] = _n
-                    _name = _stem if _n == 1 else f"{_stem}_{_n}"
-                    _zip_entries[f"{_name}.{_cfmt}"] = _b
+                _zip_entries = image_zip_entries(cached["images"], _cfmt)
                 st.download_button(
                     f"⬇️ Download All Images (.zip, {len(_zip_entries)})",
                     data=build_zip(_zip_entries),
