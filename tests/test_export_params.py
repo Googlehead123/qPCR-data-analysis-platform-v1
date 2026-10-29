@@ -6,9 +6,11 @@ Summary grouping. Both used to be inline in tab bodies, so nothing could call
 them without rendering the tab.
 """
 
+import io
 from importlib import import_module
 
 import pandas as pd
+import pytest
 
 from tests.golden.driver import FIXED_NOW
 
@@ -125,6 +127,60 @@ def test_publication_image_format_steps_scale_down(mock_streamlit):
     assert app.publication_image_format("PNG (3× pixels)", 2000, 1500)[2] == 2
     assert app.publication_image_format("SVG (Vector)", 3000, 2000) == ("svg", "image/svg+xml", 1)
     assert app.publication_image_format("PDF (Vector)", 400, 300) == ("pdf", "application/pdf", 1)
+
+
+def _quiet(mock_st) -> None:
+    """Forget the messages the app's import-time render emitted."""
+    for kind in ("success", "warning", "error"):
+        getattr(mock_st, kind).reset_mock()
+
+
+class _Upload(io.BytesIO):
+    def __init__(self, name: str):
+        super().__init__(b"")
+        self.name = name
+
+
+def test_parse_uploads_reports_each_outcome(mock_streamlit, monkeypatch):
+    app = _app()
+    rows = pd.DataFrame({"Well": ["A1"], "Sample": ["S1"], "Target": ["ACTIN"], "CT": [18.0]})
+    outcome = {"good.csv": rows, "empty.csv": rows.iloc[0:0], "broken.csv": None}
+    monkeypatch.setattr(app.QPCRParser, "parse", staticmethod(lambda f: outcome[f.name]))
+    _quiet(mock_streamlit)
+    frames = app.parse_uploads([_Upload("good.csv"), _Upload("empty.csv"), _Upload("broken.csv")])
+    assert len(frames) == 1 and frames[0]["Source_File"].tolist() == ["good.csv"]
+    mock_streamlit.success.assert_called_once_with("good.csv: 1 wells parsed")
+    mock_streamlit.warning.assert_called_once_with(
+        "empty.csv: parsed successfully but contained no valid data rows."
+    )
+    mock_streamlit.error.assert_called_once_with(
+        "broken.csv: could NOT be loaded — see the error above."
+    )
+
+
+def test_ingest_frames_with_nothing_usable_clears_and_advances(mock_streamlit):
+    app = _app()
+    state = app.st.session_state
+    state["data"] = pd.DataFrame({"Sample": ["S1"]})
+    state["processed_data"] = {"COL1A1": pd.DataFrame()}
+    state["graphs"] = {"COL1A1": object()}
+    state["_uploaded_file_hashes"] = ["old"]
+    _quiet(mock_streamlit)
+    app.ingest_frames([], state, file_hashes=["h"])
+    assert state["data"] is None
+    assert state["processed_data"] == {} and state["graphs"] == {}
+    assert state["_uploaded_file_hashes"] == ["h"]
+    mock_streamlit.error.assert_called_once()
+    assert "previously loaded data has been cleared" in mock_streamlit.error.call_args.args[0]
+
+
+def test_ingest_frames_refuses_any_state_but_the_session(mock_streamlit):
+    """The reset and auto-QC it runs act on st.session_state; a stand-in would
+    be left half-updated (data written to it, auto-QC run on the session)."""
+    app = _app()
+    with pytest.raises(TypeError, match="st.session_state"):
+        app.ingest_frames([], {}, file_hashes=["h"])
+    assert "_uploaded_file_hashes" not in app.st.session_state
 
 
 def test_image_zip_entries_keep_colliding_names(mock_streamlit):
