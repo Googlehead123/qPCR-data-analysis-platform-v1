@@ -1,0 +1,10 @@
+[
+  {"part": "xlsx/sheet:QC_Report", "line": "^A8\\tHigh CT Wells \\(>(35|38)\\)$", "note": "High CT Wells label"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B8\\t\\d+$", "note": "High CT Wells value"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B11\\t\\d+$", "note": "Healthy Triplicates"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B12\\t\\d+$", "note": "Warning Triplicates"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B13\\t\\d+$", "note": "Error Triplicates"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B16\\t[\\d.]+$", "note": "Health Score (%)"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^G\\d+\\t(OK|Low Expression)$", "note": "replicate Status column"},
+  {"part": "messages/log", "line": "^warning: .* \\d+ CT values > (35|38) detected \\(possible low expression or failed reactions\\)$", "note": "run_full_analysis high-Ct warning (count or removal at the new cut-off; text names the cut-off)"}
+]

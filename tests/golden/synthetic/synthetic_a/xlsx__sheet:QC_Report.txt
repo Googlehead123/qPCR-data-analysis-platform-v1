@@ -12,16 +12,16 @@ A6	CT SD
 B6	4.89
 A7	CT Range
 B7	17.9-36.7
-A8	High CT Wells (>35)
-B8	3
+A8	High CT Wells (>38)
+B8	0
 A9	Low CT Wells (<10)
 B9	0
 A10	Total Triplicates
 B10	18
 A11	Healthy Triplicates
-B11	17
+B11	18
 A12	Warning Triplicates
-B12	1
+B12	0
 A13	Error Triplicates
 B13	0
 A14	Avg CV%
@@ -29,7 +29,7 @@ B14	0.3
 A15	Max CV%
 B15	0.6
 A16	Health Score (%)
-B16	94.4
+B16	100
 A19	Sample
 B19	Target
 C19	n
@@ -92,7 +92,7 @@ C27	3
 D27	36.5
 E27	0.2
 F27	0.5
-G27	Low Expression
+G27	OK
 A28	S3
 B28	MMP1
 C28	2

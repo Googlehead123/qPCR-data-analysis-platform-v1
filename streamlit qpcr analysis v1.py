@@ -2570,7 +2570,6 @@ class AnalysisConstants:
     MIN_REPLICATES_FOR_STATS = 2
     RECOMMENDED_REPLICATES = 3
     CT_UNDETERMINED_THRESHOLD = 40.0
-    CT_HIGH_WARNING = 35.0
     CT_LOW_WARNING = 10.0
     CV_WARNING_THRESHOLD = 0.05
     CV_ERROR_THRESHOLD = 0.10
@@ -2695,7 +2694,8 @@ class AnalysisEngine(_CoreAnalysisEngine):
                 return False
 
             ct_values = data["CT"]
-            high_ct_count = (ct_values > 35).sum()
+            _ct_high = qc_thresholds()["ct_high"]
+            high_ct_count = (ct_values > _ct_high).sum()
             low_ct_count = (ct_values < 10).sum()
             single_rep_samples = []
 
@@ -2709,7 +2709,7 @@ class AnalysisEngine(_CoreAnalysisEngine):
 
             if high_ct_count > 0:
                 st.warning(
-                    f"⚠️ {high_ct_count} CT values > 35 detected (possible low expression or failed reactions)"
+                    f"⚠️ {high_ct_count} CT values > {_ct_high:g} detected (possible low expression or failed reactions)"
                 )
             if low_ct_count > 0:
                 st.warning(
@@ -4645,12 +4645,12 @@ with tab1:
                     f"❌ **Missing Housekeeping Gene**: {len(missing_hk)} samples have no {hk} data: {', '.join(str(s) for s in list(missing_hk)[:5])}{'...' if len(missing_hk) > 5 else ''}"
                 )
 
-        high_ct_count = len(data[data["CT"] > AnalysisConstants.CT_HIGH_WARNING])
+        high_ct_count = len(data[data["CT"] > qc_thresholds()["ct_high"]])
         if high_ct_count > 0:
             warnings_found = True
             pct = high_ct_count / len(data) * 100
             st.warning(
-                f"**High CT Values**: {high_ct_count} wells ({pct:.1f}%) have CT > {AnalysisConstants.CT_HIGH_WARNING} (low expression)"
+                f"**High CT Values**: {high_ct_count} wells ({pct:.1f}%) have CT > {qc_thresholds()['ct_high']:g} (low expression)"
             )
 
         if not warnings_found:

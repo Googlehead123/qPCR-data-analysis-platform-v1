@@ -29,7 +29,7 @@ class QualityControl:
     #
     # Callers now pass a per-session `thresholds` dict; these remain the
     # fallback. See resolve_thresholds.
-    CT_HIGH_THRESHOLD = 35.0
+    CT_HIGH_THRESHOLD = 38.0
     CT_LOW_THRESHOLD = 10.0
     CV_THRESHOLD = 0.05
     HK_VARIATION_THRESHOLD = 1.0

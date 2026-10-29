@@ -1,4 +1,3 @@
 success: synthetic_a_plate1.csv: 36 wells parsed
 success: synthetic_a_plate2.csv: 18 wells parsed
-warning: ⚠️ 3 CT values > 35 detected (possible low expression or failed reactions)
 success: ✅ Full analysis complete. Go to the Graphs tab to visualize results.

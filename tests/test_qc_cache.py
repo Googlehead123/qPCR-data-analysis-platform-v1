@@ -176,7 +176,7 @@ def test_thresholds_are_not_process_global(app):
 
     after = (qc.CT_HIGH_THRESHOLD, qc.CT_LOW_THRESHOLD,
              qc.CV_THRESHOLD, qc.HK_VARIATION_THRESHOLD)
-    assert before == after == (35.0, 10.0, 0.05, 1.0), (
+    assert before == after == (38.0, 10.0, 0.05, 1.0), (
         "the class attributes are immutable defaults; a session threshold must "
         "not write through to them"
     )
@@ -188,5 +188,5 @@ def test_unset_thresholds_fall_back_to_the_defaults(app):
                 "qc_settings_cv", "qc_settings_hk_var"):
         app.st.session_state.pop(key, None)
     assert app.qc_thresholds() == {
-        "ct_high": 35.0, "ct_low": 10.0, "cv": 0.05, "hk_variation": 1.0,
+        "ct_high": 38.0, "ct_low": 10.0, "cv": 0.05, "hk_variation": 1.0,
     }
