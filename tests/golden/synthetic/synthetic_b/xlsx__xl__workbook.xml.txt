@@ -1,0 +1,22 @@
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <workbookPr/>
+  <bookViews>
+    <workbookView visibility="visible" minimized="0" showHorizontalScroll="1" showVerticalScroll="1" showSheetTabs="1" xWindow="240" yWindow="15" windowWidth="16095" windowHeight="9660" tabRatio="600" firstSheet="0" activeTab="0" autoFilterDateGrouping="1"/>
+  </bookViews>
+  <sheets>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Analysis_Parameters" sheetId="1" state="visible" r:id="rId1"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Sample_Mapping" sheetId="2" state="visible" r:id="rId2"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Raw_Data" sheetId="3" state="visible" r:id="rId3"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="COL1A1_Analysis" sheetId="4" state="visible" r:id="rId4"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="MMP1_Analysis" sheetId="5" state="visible" r:id="rId5"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Summary" sheetId="6" state="visible" r:id="rId6"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="FC_Matrix" sheetId="7" state="visible" r:id="rId7"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Replicate_FC" sheetId="8" state="visible" r:id="rId8"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="QC_Report" sheetId="9" state="visible" r:id="rId9"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Provenance" sheetId="10" state="visible" r:id="rId10"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="COL1A1_Chart" sheetId="11" state="visible" r:id="rId11"/>
+    <sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="MMP1_Chart" sheetId="12" state="visible" r:id="rId12"/>
+  </sheets>
+  <definedNames/>
+  <calcPr calcId="124519" fullCalcOnLoad="1"/>
+</workbook>

@@ -1,0 +1,62 @@
+<pc:chgInfo xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:ac="http://schemas.microsoft.com/office/drawing/2013/main/command" xmlns:pc="http://schemas.microsoft.com/office/powerpoint/2013/main/command">
+  <pc:docChgLst>
+    <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}"/>
+    <pc:docChg chg="undo custSel addSld modSld">
+      <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}" dt="2025-12-15T06:21:48.940" v="1492" actId="478"/>
+      <pc:docMkLst>
+        <pc:docMk/>
+      </pc:docMkLst>
+      <pc:sldChg chg="modSp mod">
+        <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}" dt="2025-12-15T02:13:36.366" v="1484" actId="2711"/>
+        <pc:sldMkLst>
+          <pc:docMk/>
+          <pc:sldMk cId="4208146391" sldId="270"/>
+        </pc:sldMkLst>
+      </pc:sldChg>
+      <pc:sldChg chg="addSp delSp modSp mod">
+        <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}" dt="2025-12-15T02:13:24.249" v="1480" actId="2711"/>
+        <pc:sldMkLst>
+          <pc:docMk/>
+          <pc:sldMk cId="398699709" sldId="440"/>
+        </pc:sldMkLst>
+      </pc:sldChg>
+      <pc:sldChg chg="modSp mod">
+        <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}" dt="2025-12-15T02:13:28.492" v="1481" actId="2711"/>
+        <pc:sldMkLst>
+          <pc:docMk/>
+          <pc:sldMk cId="3556406536" sldId="444"/>
+        </pc:sldMkLst>
+      </pc:sldChg>
+      <pc:sldChg chg="addSp delSp modSp add mod">
+        <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}" dt="2025-12-15T02:13:31.215" v="1482" actId="2711"/>
+        <pc:sldMkLst>
+          <pc:docMk/>
+          <pc:sldMk cId="2840761676" sldId="445"/>
+        </pc:sldMkLst>
+      </pc:sldChg>
+      <pc:sldChg chg="addSp delSp modSp add mod">
+        <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{E1371717-D3B3-4C52-A71C-323C352FE0D0}" dt="2025-12-15T06:21:48.940" v="1492" actId="478"/>
+        <pc:sldMkLst>
+          <pc:docMk/>
+          <pc:sldMk cId="3775856965" sldId="446"/>
+        </pc:sldMkLst>
+      </pc:sldChg>
+    </pc:docChg>
+  </pc:docChgLst>
+  <pc:docChgLst>
+    <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{8144C2A9-E0C6-4206-9A6F-1B398969A384}"/>
+    <pc:docChg chg="delSld">
+      <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{8144C2A9-E0C6-4206-9A6F-1B398969A384}" dt="2026-02-10T13:49:39.881" v="0" actId="47"/>
+      <pc:docMkLst>
+        <pc:docMk/>
+      </pc:docMkLst>
+      <pc:sldChg chg="del">
+        <pc:chgData name="김민상 (Minsang Kim) COSMAX BTI" userId="cd3abece-edaf-4c89-931c-0a39ed461b47" providerId="ADAL" clId="{8144C2A9-E0C6-4206-9A6F-1B398969A384}" dt="2026-02-10T13:49:39.881" v="0" actId="47"/>
+        <pc:sldMkLst>
+          <pc:docMk/>
+          <pc:sldMk cId="2840761676" sldId="445"/>
+        </pc:sldMkLst>
+      </pc:sldChg>
+    </pc:docChg>
+  </pc:docChgLst>
+</pc:chgInfo>

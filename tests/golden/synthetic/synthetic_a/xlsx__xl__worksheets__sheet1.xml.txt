@@ -1,0 +1,46 @@
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetPr>
+    <outlinePr summaryBelow="1" summaryRight="1"/>
+    <pageSetUpPr/>
+  </sheetPr>
+  <dimension ref="A1:M2"/>
+  <sheetViews>
+    <sheetView tabSelected="1" workbookViewId="0">
+      <selection activeCell="A1" sqref="A1"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr baseColWidth="8" defaultRowHeight="15"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" s="1" t="inlineStr"/>
+      <c r="B1" s="1" t="inlineStr"/>
+      <c r="C1" s="1" t="inlineStr"/>
+      <c r="D1" s="1" t="inlineStr"/>
+      <c r="E1" s="1" t="inlineStr"/>
+      <c r="F1" s="1" t="inlineStr"/>
+      <c r="G1" s="1" t="inlineStr"/>
+      <c r="H1" s="1" t="inlineStr"/>
+      <c r="I1" s="1" t="inlineStr"/>
+      <c r="J1" s="1" t="inlineStr"/>
+      <c r="K1" s="1" t="inlineStr"/>
+      <c r="L1" s="1" t="inlineStr"/>
+      <c r="M1" s="1" t="inlineStr"/>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"/>
+      <c r="B2" t="inlineStr"/>
+      <c r="C2" t="inlineStr"/>
+      <c r="D2" t="inlineStr"/>
+      <c r="E2" t="inlineStr"/>
+      <c r="F2" t="inlineStr"/>
+      <c r="G2" t="inlineStr"/>
+      <c r="H2" t="n"/>
+      <c r="I2" t="n"/>
+      <c r="J2" t="n"/>
+      <c r="K2" t="inlineStr"/>
+      <c r="L2" t="inlineStr"/>
+      <c r="M2" t="inlineStr"/>
+    </row>
+  </sheetData>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>

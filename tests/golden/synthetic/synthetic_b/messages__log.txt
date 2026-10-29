@@ -1,0 +1,2 @@
+success: synthetic_b.csv: 27 wells parsed
+success: ✅ Full analysis complete. Go to the Graphs tab to visualize results.

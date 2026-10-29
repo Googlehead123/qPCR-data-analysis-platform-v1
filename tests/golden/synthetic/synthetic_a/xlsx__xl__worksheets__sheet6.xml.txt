@@ -1,0 +1,130 @@
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetPr>
+    <outlinePr summaryBelow="1" summaryRight="1"/>
+    <pageSetUpPr/>
+  </sheetPr>
+  <dimension ref="A1:L9"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <selection activeCell="A1" sqref="A1"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr baseColWidth="8" defaultRowHeight="15"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" s="1" t="inlineStr"/>
+      <c r="B1" s="1" t="inlineStr"/>
+      <c r="C1" s="1" t="inlineStr"/>
+      <c r="D1" s="1" t="inlineStr"/>
+      <c r="E1" s="1" t="inlineStr"/>
+      <c r="F1" s="1" t="inlineStr"/>
+      <c r="G1" s="1" t="inlineStr"/>
+      <c r="H1" s="1" t="inlineStr"/>
+      <c r="I1" s="1" t="inlineStr"/>
+      <c r="J1" s="1" t="inlineStr"/>
+      <c r="K1" s="1" t="inlineStr"/>
+      <c r="L1" s="1" t="inlineStr"/>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"/>
+      <c r="B2" t="inlineStr"/>
+      <c r="C2" t="n"/>
+      <c r="D2" t="n"/>
+      <c r="E2" t="n"/>
+      <c r="F2" t="n"/>
+      <c r="I2" t="n"/>
+      <c r="J2" t="inlineStr"/>
+      <c r="K2" t="n"/>
+      <c r="L2" t="inlineStr"/>
+    </row>
+    <row r="3">
+      <c r="A3" t="inlineStr"/>
+      <c r="B3" t="inlineStr"/>
+      <c r="C3" t="n"/>
+      <c r="D3" t="n"/>
+      <c r="E3" t="n"/>
+      <c r="F3" t="n"/>
+      <c r="G3" t="n"/>
+      <c r="H3" t="inlineStr"/>
+      <c r="K3" t="n"/>
+      <c r="L3" t="inlineStr"/>
+    </row>
+    <row r="4">
+      <c r="A4" t="inlineStr"/>
+      <c r="B4" t="inlineStr"/>
+      <c r="C4" t="n"/>
+      <c r="D4" t="n"/>
+      <c r="E4" t="n"/>
+      <c r="F4" t="n"/>
+      <c r="G4" t="n"/>
+      <c r="H4" t="inlineStr"/>
+      <c r="I4" t="n"/>
+      <c r="J4" t="inlineStr"/>
+    </row>
+    <row r="5">
+      <c r="A5" t="inlineStr"/>
+      <c r="B5" t="inlineStr"/>
+      <c r="C5" t="n"/>
+      <c r="D5" t="n"/>
+      <c r="E5" t="n"/>
+      <c r="F5" t="n"/>
+      <c r="G5" t="n"/>
+      <c r="H5" t="inlineStr"/>
+      <c r="I5" t="n"/>
+      <c r="J5" t="inlineStr"/>
+      <c r="K5" t="n"/>
+      <c r="L5" t="inlineStr"/>
+    </row>
+    <row r="6">
+      <c r="A6" t="inlineStr"/>
+      <c r="B6" t="inlineStr"/>
+      <c r="C6" t="n"/>
+      <c r="D6" t="n"/>
+      <c r="E6" t="n"/>
+      <c r="F6" t="n"/>
+      <c r="I6" t="n"/>
+      <c r="J6" t="inlineStr"/>
+      <c r="K6" t="n"/>
+      <c r="L6" t="inlineStr"/>
+    </row>
+    <row r="7">
+      <c r="A7" t="inlineStr"/>
+      <c r="B7" t="inlineStr"/>
+      <c r="C7" t="n"/>
+      <c r="D7" t="n"/>
+      <c r="E7" t="n"/>
+      <c r="F7" t="n"/>
+      <c r="G7" t="n"/>
+      <c r="H7" t="inlineStr"/>
+      <c r="K7" t="n"/>
+      <c r="L7" t="inlineStr"/>
+    </row>
+    <row r="8">
+      <c r="A8" t="inlineStr"/>
+      <c r="B8" t="inlineStr"/>
+      <c r="C8" t="n"/>
+      <c r="D8" t="n"/>
+      <c r="E8" t="n"/>
+      <c r="F8" t="n"/>
+      <c r="G8" t="n"/>
+      <c r="H8" t="inlineStr"/>
+      <c r="I8" t="n"/>
+      <c r="J8" t="inlineStr"/>
+    </row>
+    <row r="9">
+      <c r="A9" t="inlineStr"/>
+      <c r="B9" t="inlineStr"/>
+      <c r="C9" t="n"/>
+      <c r="D9" t="n"/>
+      <c r="E9" t="n"/>
+      <c r="F9" t="n"/>
+      <c r="G9" t="n"/>
+      <c r="H9" t="inlineStr"/>
+      <c r="I9" t="n"/>
+      <c r="J9" t="inlineStr"/>
+      <c r="K9" t="n"/>
+      <c r="L9" t="inlineStr"/>
+    </row>
+  </sheetData>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>

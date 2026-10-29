@@ -1,0 +1,26 @@
+A1	Date
+B1	Efficacy_Type
+C1	Housekeeping_Gene
+D1	Reference_Sample
+E1	Compare_To
+F1	Compare_To_2
+G1	Compare_To_3
+H1	Excluded_Wells
+I1	Excluded_Samples
+J1	Genes_Analyzed
+K1	ttest_type
+L1	treatment_time
+M1	concentration
+A2	2026-01-01 09:00
+B2	광노화
+C2	ACTIN
+D2	Non-treated
+E2	Non-treated
+F2	Active A
+G2	Active B
+H2	2
+I2	1
+J2	2
+K2	student
+L2	24 h
+M2	0.1%

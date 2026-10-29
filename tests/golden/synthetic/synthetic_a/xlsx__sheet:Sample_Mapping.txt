@@ -1,0 +1,28 @@
+A1	Original
+B1	condition
+C1	group
+D1	include
+A2	S1
+B2	Non-treated
+C2	Treatment
+D2	True
+A3	S2
+B3	Active A
+C3	Treatment
+D3	True
+A4	S3
+B4	Active B
+C4	Treatment
+D4	True
+A5	S4
+B5	Active C
+C5	Treatment
+D5	True
+A6	S5
+B6	Active C
+C6	Treatment
+D6	True
+A7	S6
+B7	S6
+C7	Treatment
+D7	False

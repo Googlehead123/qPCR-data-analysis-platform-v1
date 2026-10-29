@@ -1,0 +1,40 @@
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetPr>
+    <outlinePr summaryBelow="1" summaryRight="1"/>
+    <pageSetUpPr/>
+  </sheetPr>
+  <dimension ref="A1:D4"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <selection activeCell="A1" sqref="A1"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr baseColWidth="8" defaultRowHeight="15"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" s="1" t="inlineStr"/>
+      <c r="B1" s="1" t="inlineStr"/>
+      <c r="C1" s="1" t="inlineStr"/>
+      <c r="D1" s="1" t="inlineStr"/>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"/>
+      <c r="B2" t="inlineStr"/>
+      <c r="C2" t="inlineStr"/>
+      <c r="D2" t="b"/>
+    </row>
+    <row r="3">
+      <c r="A3" t="inlineStr"/>
+      <c r="B3" t="inlineStr"/>
+      <c r="C3" t="inlineStr"/>
+      <c r="D3" t="b"/>
+    </row>
+    <row r="4">
+      <c r="A4" t="inlineStr"/>
+      <c r="B4" t="inlineStr"/>
+      <c r="C4" t="inlineStr"/>
+      <c r="D4" t="b"/>
+    </row>
+  </sheetData>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>

@@ -1,0 +1,16 @@
+A1	Original
+B1	condition
+C1	group
+D1	include
+A2	S1
+B2	Non-treated
+C2	Negative Control
+D2	True
+A3	S2
+B3	Low dose
+C3	Treatment
+D3	True
+A4	S10
+B4	High dose
+C4	Treatment
+D4	True

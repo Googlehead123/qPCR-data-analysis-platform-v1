@@ -1,0 +1,12 @@
+A1	Target
+B1	High dose
+C1	Low dose
+D1	Non-treated
+A2	COL1A1
+B2	2.5216
+C2	1.6449
+D2	1.0009
+A3	MMP1
+B3	0.415
+C3	0.5788
+D3	1.0006

@@ -1,0 +1,15 @@
+A1	Target
+B1	Active A
+C1	Active B
+D1	Active C
+E1	Non-treated
+A2	COL1A1
+B2	2.3259
+C2	0.0004
+D2	1.5963
+E2	1.001
+A3	MMP-1
+B3	0.5462
+C3	1.8543
+D3	0.7238
+E3	1.0007

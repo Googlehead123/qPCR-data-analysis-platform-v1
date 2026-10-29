@@ -1,0 +1,55 @@
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetPr>
+    <outlinePr summaryBelow="1" summaryRight="1"/>
+    <pageSetUpPr/>
+  </sheetPr>
+  <dimension ref="C5:H8"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <selection activeCell="A1" sqref="A1"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr baseColWidth="8" defaultRowHeight="15"/>
+  <cols>
+    <col width="18" customWidth="1" min="3" max="3"/>
+    <col width="14" customWidth="1" min="4" max="4"/>
+    <col width="14" customWidth="1" min="5" max="5"/>
+    <col width="14" customWidth="1" min="6" max="6"/>
+    <col width="14" customWidth="1" min="7" max="7"/>
+  </cols>
+  <sheetData>
+    <row r="5">
+      <c r="C5" t="inlineStr"/>
+      <c r="D5" t="inlineStr"/>
+      <c r="E5" t="inlineStr"/>
+      <c r="F5" t="inlineStr"/>
+      <c r="G5" t="inlineStr"/>
+      <c r="H5" t="inlineStr"/>
+    </row>
+    <row r="6">
+      <c r="C6" t="inlineStr"/>
+      <c r="D6" t="n"/>
+      <c r="E6" t="n"/>
+      <c r="G6" t="inlineStr"/>
+      <c r="H6" t="n"/>
+    </row>
+    <row r="7">
+      <c r="C7" t="inlineStr"/>
+      <c r="D7" t="n"/>
+      <c r="E7" t="n"/>
+      <c r="F7" t="n"/>
+      <c r="G7" t="inlineStr"/>
+      <c r="H7" t="n"/>
+    </row>
+    <row r="8">
+      <c r="C8" t="inlineStr"/>
+      <c r="D8" t="n"/>
+      <c r="E8" t="n"/>
+      <c r="F8" t="n"/>
+      <c r="G8" t="inlineStr"/>
+      <c r="H8" t="n"/>
+    </row>
+  </sheetData>
+  <pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/>
+  <drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/>
+</worksheet>
