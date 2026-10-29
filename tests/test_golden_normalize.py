@@ -74,6 +74,56 @@ def test_xlsx_cells_one_line_each_and_dates_preserved():
     assert "<TS></dcterms:modified>" in core
 
 
+def _styled_xlsx(*, as_text=False, fmt=None, merge=False, width=None) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws["A1"] = "1.5" if as_text else 1.5
+    if fmt:
+        ws["A1"].number_format = fmt
+    if merge:
+        ws.merge_cells("B1:C1")
+    if width:
+        ws.column_dimensions["A"].width = width
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_xlsx_layout_changes_show_without_cell_values():
+    base = normalize.normalize_xlsx(_styled_xlsx())
+    sheet_xml = base["xl/worksheets/sheet1.xml"]
+    assert "<v>" not in sheet_xml  # values live in the sheet:<name> part only
+    for variant in (
+        _styled_xlsx(as_text=True),  # same text, now a string cell
+        _styled_xlsx(fmt="0.000"),
+        _styled_xlsx(merge=True),
+        _styled_xlsx(width=30),
+    ):
+        changed = normalize.normalize_xlsx(variant)
+        assert changed["sheet:Data"] == base["sheet:Data"]
+        assert (changed["xl/worksheets/sheet1.xml"], changed["xl/styles.xml"]) != (
+            sheet_xml, base["xl/styles.xml"]
+        )
+
+
+def test_pptx_keeps_presentation_and_relationship_parts():
+    def deck(order: str, target: str) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("ppt/presentation.xml", f"<p:presentation xmlns:p='urn:x'>{order}</p:presentation>")
+            z.writestr("ppt/slides/_rels/slide1.xml.rels", f"<Relationships><R Target='{target}'/></Relationships>")
+            z.writestr("ppt/slides/slide1.xml", "<p:sld xmlns:p='urn:x'/>")
+            z.writestr("docProps/thumbnail.jpeg", b"\xff\xd8 not decodable")
+        return buf.getvalue()
+
+    a = normalize.normalize_pptx(deck("<p:s id='1'/><p:s id='2'/>", "../media/image1.png"))
+    b = normalize.normalize_pptx(deck("<p:s id='2'/><p:s id='1'/>", "../media/image2.png"))
+    assert a["ppt/presentation.xml"] != b["ppt/presentation.xml"]
+    assert a["ppt/slides/_rels/slide1.xml.rels"] != b["ppt/slides/_rels/slide1.xml.rels"]
+    assert a["docProps/thumbnail.jpeg"].startswith("<binary ")
+
+
 def test_version_token_masked():
     assert normalize.mask_text("Software: qPCR Analysis Suite v3.1") == "Software: <APP_VERSION>"
     assert (

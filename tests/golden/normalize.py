@@ -37,6 +37,7 @@ _TS_TAGS = (
 )
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp")
 _XML_SUFFIXES = (".xml", ".rels", ".vml")
+_SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
 def mask_text(text: str) -> str:
@@ -80,6 +81,21 @@ def _pretty_xml(data: bytes, *, mask_timestamps: bool = False) -> str:
     return out.replace("@@TS@@", TS_TOKEN).replace("&lt;APP_VERSION&gt;", APP_VERSION_TOKEN)
 
 
+def _sheet_layout_xml(data: bytes) -> str:
+    """Worksheet XML without cell values: types, styles, merges, widths, panes stay.
+
+    Values are already one line per cell in ``sheet:<name>``; dropping them here
+    keeps a value change out of this part while a format change still shows.
+    """
+    parser = etree.XMLParser(remove_blank_text=True, resolve_entities=False)
+    root = etree.fromstring(data, parser)
+    for cell in root.iter(f"{{{_SHEET_NS}}}c"):
+        for child in list(cell):
+            if child.tag in (f"{{{_SHEET_NS}}}v", f"{{{_SHEET_NS}}}is"):
+                cell.remove(child)
+    return _pretty_xml(etree.tostring(root))
+
+
 def _binary_summary(data: bytes) -> str:
     return f"<binary {len(data)} bytes sha256:{hashlib.sha256(data).hexdigest()}>"
 
@@ -108,8 +124,10 @@ def _sheet_text(ws) -> str:
 def normalize_xlsx(data: bytes) -> dict[str, str]:
     """One part per sheet (``sheet:<name>``) and chart (``chart:<part name>``), plus other parts.
 
-    Worksheet XML and sharedStrings are replaced by the per-cell lines; every
-    other XML part is kept, pretty-printed; media is pixel-hashed.
+    Cell values become the per-cell ``sheet:<name>`` lines, so sharedStrings is
+    dropped and each worksheet's XML is kept without its values (cell types,
+    style indices, merges, column widths, panes). Every other XML part is kept,
+    pretty-printed; media is pixel-hashed.
     """
     parts: dict[str, str] = {}
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=False)
@@ -117,31 +135,36 @@ def normalize_xlsx(data: bytes) -> dict[str, str]:
         parts[f"sheet:{ws.title}"] = _sheet_text(ws)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for name in sorted(z.namelist()):
-            if name.startswith("xl/worksheets/") and name.endswith(".xml"):
-                continue
             if name == "xl/sharedStrings.xml":
                 continue
             raw = z.read(name)
-            if name.startswith("xl/charts/") and name.endswith(".xml"):
+            if name.startswith("xl/worksheets/") and name.endswith(".xml"):
+                parts[name] = _sheet_layout_xml(raw)
+            elif name.startswith("xl/charts/") and name.endswith(".xml"):
                 parts[f"chart:{name}"] = _pretty_xml(raw)
-            elif name.lower().endswith(_IMAGE_SUFFIXES):
-                parts[name] = _image_summary(raw)
-            elif name.endswith(_XML_SUFFIXES):
-                parts[name] = _pretty_xml(raw, mask_timestamps=(name == _CORE_XML))
             else:
-                parts[name] = _binary_summary(raw)
+                parts[name] = _package_part(name, raw)
     return parts
 
 
+def _package_part(name: str, raw: bytes) -> str:
+    if name.lower().endswith(_IMAGE_SUFFIXES):
+        return _image_summary(raw)
+    if name.endswith(_XML_SUFFIXES):
+        return _pretty_xml(raw, mask_timestamps=(name == _CORE_XML))
+    return _binary_summary(raw)
+
+
 def normalize_pptx(data: bytes) -> dict[str, str]:
-    """One part per slide XML (pretty-printed) and one per media file (pixel hash)."""
+    """Every package part: XML (slides, presentation, rels, layouts) pretty-printed, media pixel-hashed.
+
+    Slide order and size live in ``ppt/presentation.xml`` and which picture a
+    slide shows lives in its ``.rels``, so neither is safe to drop.
+    """
     parts: dict[str, str] = {}
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for name in sorted(z.namelist()):
-            if name.startswith("ppt/slides/") and name.endswith(".xml"):
-                parts[name] = _pretty_xml(z.read(name))
-            elif name.startswith("ppt/media/"):
-                parts[name] = _image_summary(z.read(name))
+            parts[name] = _package_part(name, z.read(name))
     return parts
 
 
