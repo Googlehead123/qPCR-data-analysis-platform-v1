@@ -59,3 +59,6 @@ upload-state.png
 
 # Local client data export (kept on disk, not tracked)
 +qPCR_*.xlsx
+
+# Locked test environment (uv venv .venv --python 3.12)
+.venv/
