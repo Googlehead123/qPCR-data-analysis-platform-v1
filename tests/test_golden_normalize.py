@@ -4,6 +4,7 @@ import importlib.metadata
 import io
 import zipfile
 
+import numpy as np
 import openpyxl
 import pandas as pd
 import plotly.graph_objects as go
@@ -128,3 +129,16 @@ def test_figure_floats_rounded_to_12_digits():
 def test_frames_csv_rounded():
     df = pd.DataFrame({"a": [0.1234567890123456], "b": ["x"]})
     assert normalize.normalize_frames({"t": df})["t"] == ",a,b\n0,0.123456789012,x\n"
+
+
+def _np_fig(y: list[float]) -> go.Figure:
+    return go.Figure(go.Bar(x=["a", "b"], y=np.array(y), error_y={"array": np.array(y)}))
+
+
+def test_numpy_backed_figure_floats_rounded_and_decoded():
+    base = normalize.normalize_figures({"f": _np_fig([0.1234567890123456, 2.0])})["f"]
+    ulp = normalize.normalize_figures({"f": _np_fig([0.1234567890123459, 2.0])})["f"]
+    real = normalize.normalize_figures({"f": _np_fig([0.1234567891, 2.0])})["f"]
+    assert "bdata" not in base
+    assert base == ulp
+    assert base != real

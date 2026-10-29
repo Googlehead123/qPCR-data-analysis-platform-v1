@@ -10,6 +10,7 @@ version regex stops only at whitespace or parentheses and would otherwise eat
 a closing quote, comma or tag.
 """
 
+import base64
 import datetime as dt
 import hashlib
 import io
@@ -158,8 +159,22 @@ def normalize_frames(frames: dict[str, pd.DataFrame]) -> dict[str, str]:
     return out
 
 
+def _decode_typed_array(obj: dict) -> np.ndarray:
+    """Plotly 6 typed array ``{"dtype", "bdata"[, "shape"]}`` back to an ndarray."""
+    raw = obj["bdata"]
+    buf = base64.b64decode(raw) if isinstance(raw, str) else bytes(raw)
+    arr = np.frombuffer(buf, dtype=np.dtype(obj["dtype"]))
+    shape = obj.get("shape")
+    if shape:
+        dims = [int(s) for s in shape.split(",")] if isinstance(shape, str) else list(shape)
+        arr = arr.reshape(dims)
+    return arr
+
+
 def _canonical(obj: Any) -> Any:
     """Plain-JSON form of a plotly structure: floats to 12 digits, arrays to lists."""
+    if isinstance(obj, dict) and "bdata" in obj and "dtype" in obj:
+        return _canonical(_decode_typed_array(obj))
     if isinstance(obj, dict):
         return {str(k): _canonical(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
