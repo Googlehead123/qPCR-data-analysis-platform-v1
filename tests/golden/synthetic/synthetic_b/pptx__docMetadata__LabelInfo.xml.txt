@@ -1,0 +1,3 @@
+<clbl:labelList xmlns:clbl="http://schemas.microsoft.com/office/2020/mipLabelMetadata">
+  <clbl:label id="{ef1579f1-0b38-4219-8499-bb3216f8bc62}" enabled="1" method="Standard" siteId="{88c3e3b5-abdd-4476-b47a-f563a26aae99}" contentBits="0" removed="0"/>
+</clbl:labelList>

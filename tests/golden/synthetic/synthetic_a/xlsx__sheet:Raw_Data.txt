@@ -1,0 +1,330 @@
+A1	Well
+B1	Sample
+C1	Condition
+D1	Target
+E1	CT
+F1	Source_File
+A2	A1
+B2	S1
+C2	Non-treated
+D2	COL1A1
+E2	25.1
+F2	synthetic_a_plate1.csv
+A3	A2
+B3	S1
+C3	Non-treated
+D3	COL1A1
+E3	25.02
+F3	synthetic_a_plate1.csv
+A4	A3
+B4	S1
+C4	Non-treated
+D4	COL1A1
+E4	25.18
+F4	synthetic_a_plate1.csv
+A5	A4
+B5	S2
+C5	Active A
+D5	COL1A1
+E5	24.05
+F5	synthetic_a_plate1.csv
+A6	A5
+B6	S2
+C6	Active A
+D6	COL1A1
+E6	23.98
+F6	synthetic_a_plate1.csv
+A7	A6
+B7	S2
+C7	Active A
+D7	COL1A1
+E7	24.12
+F7	synthetic_a_plate1.csv
+A8	B1
+B8	S3
+C8	Active B
+D8	COL1A1
+E8	36.3
+F8	synthetic_a_plate1.csv
+A9	B2
+B9	S3
+C9	Active B
+D9	COL1A1
+E9	36.5
+F9	synthetic_a_plate1.csv
+A10	B3
+B10	S3
+C10	Active B
+D10	COL1A1
+E10	36.7
+F10	synthetic_a_plate1.csv
+A11	B4
+B11	S4
+C11	Active C
+D11	COL1A1
+E11	24.52
+F11	synthetic_a_plate1.csv
+A12	B5
+B12	S4
+C12	Active C
+D12	COL1A1
+E12	24.6
+F12	synthetic_a_plate1.csv
+A13	B6
+B13	S4
+C13	Active C
+D13	COL1A1
+E13	24.48
+F13	synthetic_a_plate1.csv
+A14	C1
+B14	S5
+C14	Active C
+D14	COL1A1
+E14	24.4
+F14	synthetic_a_plate1.csv
+A15	C2
+B15	S5
+C15	Active C
+D15	COL1A1
+E15	24.55
+F15	synthetic_a_plate1.csv
+A16	C3
+B16	S5
+C16	Active C
+D16	COL1A1
+E16	24.47
+F16	synthetic_a_plate1.csv
+A17	C4
+B17	S6
+C17	S6
+D17	COL1A1
+E17	30.1
+F17	synthetic_a_plate1.csv
+A18	C5
+B18	S6
+C18	S6
+D18	COL1A1
+E18	30.25
+F18	synthetic_a_plate1.csv
+A19	C6
+B19	S6
+C19	S6
+D19	COL1A1
+E19	30.05
+F19	synthetic_a_plate1.csv
+A20	A7
+B20	S1
+C20	Non-treated
+D20	ACTIN
+E20	18.02
+F20	synthetic_a_plate1.csv
+A21	A8
+B21	S1
+C21	Non-treated
+D21	ACTIN
+E21	18.1
+F21	synthetic_a_plate1.csv
+A22	A9
+B22	S1
+C22	Non-treated
+D22	ACTIN
+E22	17.95
+F22	synthetic_a_plate1.csv
+A23	A10
+B23	S2
+C23	Active A
+D23	ACTIN
+E23	18.2
+F23	synthetic_a_plate1.csv
+A24	A11
+B24	S2
+C24	Active A
+D24	ACTIN
+E24	18.12
+F24	synthetic_a_plate1.csv
+A25	A12
+B25	S2
+C25	Active A
+D25	ACTIN
+E25	18.25
+F25	synthetic_a_plate1.csv
+A26	B7
+B26	S3
+C26	Active B
+D26	ACTIN
+E26	17.9
+F26	synthetic_a_plate1.csv
+A27	B8
+B27	S3
+C27	Active B
+D27	ACTIN
+E27	18
+F27	synthetic_a_plate1.csv
+A28	B9
+B28	S3
+C28	Active B
+D28	ACTIN
+E28	17.96
+F28	synthetic_a_plate1.csv
+A29	B10
+B29	S4
+C29	Active C
+D29	ACTIN
+E29	18.05
+F29	synthetic_a_plate1.csv
+A30	B11
+B30	S4
+C30	Active C
+D30	ACTIN
+E30	18.15
+F30	synthetic_a_plate1.csv
+A31	B12
+B31	S4
+C31	Active C
+D31	ACTIN
+E31	18.08
+F31	synthetic_a_plate1.csv
+A32	C7
+B32	S5
+C32	Active C
+D32	ACTIN
+E32	18.11
+F32	synthetic_a_plate1.csv
+A33	C8
+B33	S5
+C33	Active C
+D33	ACTIN
+E33	18.03
+F33	synthetic_a_plate1.csv
+A34	C9
+B34	S5
+C34	Active C
+D34	ACTIN
+E34	18.18
+F34	synthetic_a_plate1.csv
+A35	C10
+B35	S6
+C35	S6
+D35	ACTIN
+E35	18.3
+F35	synthetic_a_plate1.csv
+A36	C11
+B36	S6
+C36	S6
+D36	ACTIN
+E36	18.22
+F36	synthetic_a_plate1.csv
+A37	C12
+B37	S6
+C37	S6
+D37	ACTIN
+E37	18.27
+F37	synthetic_a_plate1.csv
+A38	A1
+B38	S1
+C38	Non-treated
+D38	MMP1
+E38	22
+F38	synthetic_a_plate2.csv
+A39	A2
+B39	S1
+C39	Non-treated
+D39	MMP1
+E39	22.08
+F39	synthetic_a_plate2.csv
+A40	A3
+B40	S1
+C40	Non-treated
+D40	MMP1
+E40	21.95
+F40	synthetic_a_plate2.csv
+A41	A4
+B41	S2
+C41	Active A
+D41	MMP1
+E41	23
+F41	synthetic_a_plate2.csv
+A42	A5
+B42	S2
+C42	Active A
+D42	MMP1
+E42	23.1
+F42	synthetic_a_plate2.csv
+A43	A6
+B43	S2
+C43	Active A
+D43	MMP1
+E43	23.85
+F43	synthetic_a_plate2.csv
+A44	B1
+B44	S3
+C44	Active B
+D44	MMP1
+E44	21.4
+F44	synthetic_a_plate2.csv
+A45	B2
+B45	S3
+C45	Active B
+D45	MMP1
+E45	21
+F45	synthetic_a_plate2.csv
+A46	B3
+B46	S3
+C46	Active B
+D46	MMP1
+E46	21.1
+F46	synthetic_a_plate2.csv
+A47	B4
+B47	S4
+C47	Active C
+D47	MMP1
+E47	22.6
+F47	synthetic_a_plate2.csv
+A48	B5
+B48	S4
+C48	Active C
+D48	MMP1
+E48	22.52
+F48	synthetic_a_plate2.csv
+A49	B6
+B49	S4
+C49	Active C
+D49	MMP1
+E49	22.68
+F49	synthetic_a_plate2.csv
+A50	C1
+B50	S5
+C50	Active C
+D50	MMP1
+E50	22.45
+F50	synthetic_a_plate2.csv
+A51	C2
+B51	S5
+C51	Active C
+D51	MMP1
+E51	22.58
+F51	synthetic_a_plate2.csv
+A52	C3
+B52	S5
+C52	Active C
+D52	MMP1
+E52	22.5
+F52	synthetic_a_plate2.csv
+A53	C4
+B53	S6
+C53	S6
+D53	MMP1
+E53	27
+F53	synthetic_a_plate2.csv
+A54	C5
+B54	S6
+C54	S6
+D54	MMP1
+E54	27.2
+F54	synthetic_a_plate2.csv
+A55	C6
+B55	S6
+C55	S6
+D55	MMP1
+E55	26.9
+F55	synthetic_a_plate2.csv

@@ -1,0 +1,168 @@
+A1	Well
+B1	Sample
+C1	Condition
+D1	Target
+E1	CT
+F1	Source_File
+A2	A1
+B2	S1
+C2	Non-treated
+D2	ACTIN
+E2	17.52
+F2	synthetic_b.csv
+A3	A2
+B3	S1
+C3	Non-treated
+D3	ACTIN
+E3	17.6
+F3	synthetic_b.csv
+A4	A3
+B4	S1
+C4	Non-treated
+D4	ACTIN
+E4	17.48
+F4	synthetic_b.csv
+A5	A4
+B5	S2
+C5	Low dose
+D5	ACTIN
+E5	17.55
+F5	synthetic_b.csv
+A6	A5
+B6	S2
+C6	Low dose
+D6	ACTIN
+E6	17.47
+F6	synthetic_b.csv
+A7	A6
+B7	S2
+C7	Low dose
+D7	ACTIN
+E7	17.62
+F7	synthetic_b.csv
+A8	B1
+B8	S10
+C8	High dose
+D8	ACTIN
+E8	17.4
+F8	synthetic_b.csv
+A9	B2
+B9	S10
+C9	High dose
+D9	ACTIN
+E9	17.51
+F9	synthetic_b.csv
+A10	B3
+B10	S10
+C10	High dose
+D10	ACTIN
+E10	17.45
+F10	synthetic_b.csv
+A11	A7
+B11	S1
+C11	Non-treated
+D11	COL1A1
+E11	26.02
+F11	synthetic_b.csv
+A12	A8
+B12	S1
+C12	Non-treated
+D12	COL1A1
+E12	25.95
+F12	synthetic_b.csv
+A13	A9
+B13	S1
+C13	Non-treated
+D13	COL1A1
+E13	26.1
+F13	synthetic_b.csv
+A14	A10
+B14	S2
+C14	Low dose
+D14	COL1A1
+E14	25.31
+F14	synthetic_b.csv
+A15	A11
+B15	S2
+C15	Low dose
+D15	COL1A1
+E15	25.25
+F15	synthetic_b.csv
+A16	A12
+B16	S2
+C16	Low dose
+D16	COL1A1
+E16	25.4
+F16	synthetic_b.csv
+A17	B7
+B17	S10
+C17	High dose
+D17	COL1A1
+E17	24.6
+F17	synthetic_b.csv
+A18	B8
+B18	S10
+C18	High dose
+D18	COL1A1
+E18	24.68
+F18	synthetic_b.csv
+A19	B9
+B19	S10
+C19	High dose
+D19	COL1A1
+E19	24.55
+F19	synthetic_b.csv
+A20	C1
+B20	S1
+C20	Non-treated
+D20	MMP1
+E20	23
+F20	synthetic_b.csv
+A21	C2
+B21	S1
+C21	Non-treated
+D21	MMP1
+E21	23.07
+F21	synthetic_b.csv
+A22	C3
+B22	S1
+C22	Non-treated
+D22	MMP1
+E22	22.95
+F22	synthetic_b.csv
+A23	C4
+B23	S2
+C23	Low dose
+D23	MMP1
+E23	23.55
+F23	synthetic_b.csv
+A24	C5
+B24	S2
+C24	Low dose
+D24	MMP1
+E24	23.62
+F24	synthetic_b.csv
+A25	C6
+B25	S2
+C25	Low dose
+D25	MMP1
+E25	24.4
+F25	synthetic_b.csv
+A26	D1
+B26	S10
+C26	High dose
+D26	MMP1
+E26	24.2
+F26	synthetic_b.csv
+A27	D2
+B27	S10
+C27	High dose
+D27	MMP1
+E27	24.12
+F27	synthetic_b.csv
+A28	D3
+B28	S10
+C28	High dose
+D28	MMP1
+E28	24.27
+F28	synthetic_b.csv

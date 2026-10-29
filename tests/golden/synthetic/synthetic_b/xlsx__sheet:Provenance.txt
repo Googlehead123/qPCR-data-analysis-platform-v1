@@ -1,0 +1,44 @@
+A1	qPCR Analysis Provenance
+A2	qPCR ANALYSIS PROVENANCE
+A3	Generated:            2026-01-01 09:00:00
+A4	Software:             <APP_VERSION>
+A5	Method:               relative quantification, single reference gene: per-well fold change 2^-ΔΔCt_i (ΔCt_i = target Ct − the condition's mean reference-gene Ct); bar = arithmetic mean of the per-well fold changes, SD/SEM over the same values
+A6	FDR correction:       none applied to the reported markers — significance shown on charts, slides and summary sheets is the uncorrected p-value. Benjamini-Hochberg q-values are computed and included per gene in the Excel export (p_value_fdr / significance_fdr).
+A7	Efficacy type:        탄력
+A8	Reference gene:       ACTIN
+A9	Reference condition:  Non-treated
+A10	Comparison(s):        Non-treated
+A11	Statistical test:     Welch t-test (two-tailed) on per-well fold change, n = technical replicate wells pooled per condition
+A12	Genes analysed:       3
+A13	Samples:              3
+A14	Excluded samples:     none
+A15	Excluded wells:       0
+A16	Auto-QC replicate trim: automatic best-2-of-3 replicate QC at SD <= 0.30: 1 group(s) trimmed, 0 still above threshold, 1 well(s) dropped. Trimming reduces replicate variance, so p-values for those groups are anti-conservative (false-positive rate above the nominal 5%).
+A18	MIQE CHECKLIST
+A20	# MIQE-style reporting checklist (RT-qPCR)
+A21	_Generated: 2026-01-01 09:00:00 · <APP_VERSION>
+A23	## Auto-documented by this analysis
+A24	Quantification method: relative quantification, single reference gene: per-well fold change 2^-ΔΔCt_i (ΔCt_i = target Ct − the condition's mean reference-gene Ct); bar = arithmetic mean of the per-well fold changes, SD/SEM over the same values
+A25	Reference (housekeeping) gene: ACTIN
+A26	Calibrator / reference condition: Non-treated
+A27	Comparison condition(s): Non-treated
+A28	Statistical test: Welch t-test (two-tailed) on per-well fold change, n = technical replicate wells pooled per condition
+A29	Replicate unit for the test: technical wells (pooled across samples per condition)
+A30	Multiple-testing correction: none applied to the reported markers — significance shown on charts, slides and summary sheets is the uncorrected p-value. Benjamini-Hochberg q-values are computed and included per gene in the Excel export (p_value_fdr / significance_fdr).
+A31	Genes analysed: 3; distinct samples on the plate: 3
+A32	Excluded wells (QC): 0 (itemised in the provenance record)
+A33	Automatic replicate trim: automatic best-2-of-3 replicate QC at SD <= 0.30: 1 group(s) trimmed, 0 still above threshold, 1 well(s) dropped. Trimming reduces replicate variance, so p-values for those groups are anti-conservative (false-positive rate above the nominal 5%).
+A35	## To complete (assay / wet-lab details not captured by this tool)
+A36	[ ] Sample source, handling, and storage conditions
+A37	[ ] RNA extraction method; yield and purity (A260:A280, A260:A230)
+A38	[ ] RNA integrity (RIN / rRNA ratio) and how assessed
+A39	[ ] DNase treatment; genomic-DNA contamination assessment (−RT control)
+A40	[ ] Reverse transcription: enzyme, priming strategy, input amount, conditions
+A41	[ ] Target information: gene symbol, amplicon location/length, primer sequences
+A42	[ ] Primer concentrations, annealing Tm, and in-silico specificity
+A43	[ ] qPCR chemistry (SYBR Green / hydrolysis probe), instrument, and thermal protocol
+A44	[ ] Amplification efficiency per assay (standard-curve slope, R², efficiency %)
+A45	[ ] Specificity confirmation (melt-curve / gel / sequencing)
+A46	[ ] No-template control (NTC) and no-RT control results
+A47	[ ] Number of biological vs. technical replicates (state explicitly)
+A49	_This checklist supports MIQE-compliant reporting; it does not replace assay validation. Complete the unchecked items before submission._

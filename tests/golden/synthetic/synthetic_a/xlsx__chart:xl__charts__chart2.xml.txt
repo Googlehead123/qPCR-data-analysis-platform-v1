@@ -1,0 +1,218 @@
+<chartSpace xmlns="http://schemas.openxmlformats.org/drawingml/2006/chart">
+  <chart>
+    <plotArea>
+      <barChart>
+        <barDir val="col"/>
+        <grouping val="clustered"/>
+        <varyColors val="0"/>
+        <ser>
+          <idx val="0"/>
+          <order val="0"/>
+          <spPr>
+            <a:solidFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:schemeClr val="bg1"/>
+            </a:solidFill>
+            <a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="6350">
+              <a:solidFill>
+                <a:schemeClr val="tx1"/>
+              </a:solidFill>
+              <a:prstDash val="solid"/>
+            </a:ln>
+          </spPr>
+          <errBars>
+            <errBarType val="plus"/>
+            <errValType val="cust"/>
+            <noEndCap val="0"/>
+            <plus>
+              <numRef>
+                <f>'MMP-1_Chart'!$L$6:$L$9</f>
+              </numRef>
+            </plus>
+            <spPr>
+              <a:noFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+              <a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="9525" cap="flat" cmpd="sng" algn="ctr">
+                <a:solidFill>
+                  <a:schemeClr val="tx1">
+                    <a:lumMod val="65000"/>
+                    <a:lumOff val="35000"/>
+                  </a:schemeClr>
+                </a:solidFill>
+                <a:prstDash val="solid"/>
+                <a:round/>
+              </a:ln>
+            </spPr>
+          </errBars>
+          <cat>
+            <numRef>
+              <f>'MMP-1_Chart'!$C$6:$C$9</f>
+            </numRef>
+          </cat>
+          <val>
+            <numRef>
+              <f>'MMP-1_Chart'!$D$6:$D$9</f>
+            </numRef>
+          </val>
+        </ser>
+        <gapWidth val="219"/>
+        <overlap val="-27"/>
+        <axId val="10"/>
+        <axId val="100"/>
+      </barChart>
+      <catAx>
+        <axId val="10"/>
+        <scaling>
+          <orientation val="minMax"/>
+        </scaling>
+        <delete val="0"/>
+        <axPos val="l"/>
+        <majorTickMark val="none"/>
+        <minorTickMark val="none"/>
+        <spPr>
+          <a:noFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+          <a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="6350" cap="flat" cmpd="sng" algn="ctr">
+            <a:solidFill>
+              <a:schemeClr val="tx1"/>
+            </a:solidFill>
+            <a:prstDash val="solid"/>
+            <a:round/>
+          </a:ln>
+        </spPr>
+        <txPr>
+          <a:bodyPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" vert="horz" wrap="square"/>
+          <a:lstStyle xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+          <a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <a:pPr>
+              <a:defRPr sz="900" b="0">
+                <a:solidFill>
+                  <a:schemeClr val="tx1">
+                    <a:lumMod val="65000"/>
+                    <a:lumOff val="35000"/>
+                  </a:schemeClr>
+                </a:solidFill>
+                <a:latin typeface="Arial"/>
+                <a:ea typeface="Malgun Gothic"/>
+                <a:cs typeface="Arial"/>
+              </a:defRPr>
+            </a:pPr>
+          </a:p>
+        </txPr>
+        <crossAx val="100"/>
+        <lblOffset val="100"/>
+      </catAx>
+      <valAx>
+        <axId val="100"/>
+        <scaling>
+          <orientation val="minMax"/>
+          <min val="0"/>
+        </scaling>
+        <delete val="0"/>
+        <axPos val="l"/>
+        <majorGridlines>
+          <spPr>
+            <a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:noFill/>
+            </a:ln>
+          </spPr>
+        </majorGridlines>
+        <title>
+          <tx>
+            <rich>
+              <a:bodyPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" rot="-5400000" vert="horz" wrap="square" anchor="ctr" anchorCtr="1"/>
+              <a:lstStyle xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+              <a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                <a:pPr>
+                  <a:defRPr/>
+                </a:pPr>
+                <a:r>
+                  <a:rPr lang="en-US" sz="800" b="1">
+                    <a:solidFill>
+                      <a:sysClr val="windowText" lastClr="000000"/>
+                    </a:solidFill>
+                    <a:latin typeface="Arial"/>
+                    <a:ea typeface="Malgun Gothic"/>
+                    <a:cs typeface="Arial"/>
+                  </a:rPr>
+                  <a:t>Relative mRNA expression level of</a:t>
+                </a:r>
+              </a:p>
+              <a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                <a:pPr>
+                  <a:defRPr/>
+                </a:pPr>
+                <a:r>
+                  <a:rPr lang="en-US" sz="800" b="1">
+                    <a:solidFill>
+                      <a:srgbClr val="FF0000"/>
+                    </a:solidFill>
+                    <a:latin typeface="Arial"/>
+                    <a:ea typeface="Malgun Gothic"/>
+                    <a:cs typeface="Arial"/>
+                  </a:rPr>
+                  <a:t>MMP-1</a:t>
+                </a:r>
+                <a:r>
+                  <a:rPr lang="en-US" sz="800" b="1">
+                    <a:solidFill>
+                      <a:sysClr val="windowText" lastClr="000000"/>
+                    </a:solidFill>
+                    <a:latin typeface="Arial"/>
+                    <a:ea typeface="Malgun Gothic"/>
+                    <a:cs typeface="Arial"/>
+                  </a:rPr>
+                  <a:t>/ACTIN</a:t>
+                </a:r>
+              </a:p>
+            </rich>
+          </tx>
+          <overlay val="0"/>
+        </title>
+        <majorTickMark val="out"/>
+        <minorTickMark val="none"/>
+        <spPr>
+          <a:noFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+          <a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="6350">
+            <a:solidFill>
+              <a:schemeClr val="tx1"/>
+            </a:solidFill>
+            <a:prstDash val="solid"/>
+          </a:ln>
+        </spPr>
+        <txPr>
+          <a:bodyPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" vert="horz" wrap="square"/>
+          <a:lstStyle xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>
+          <a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <a:pPr>
+              <a:defRPr sz="900" b="0">
+                <a:solidFill>
+                  <a:schemeClr val="tx1">
+                    <a:lumMod val="65000"/>
+                    <a:lumOff val="35000"/>
+                  </a:schemeClr>
+                </a:solidFill>
+                <a:latin typeface="Arial"/>
+                <a:ea typeface="Malgun Gothic"/>
+                <a:cs typeface="Arial"/>
+              </a:defRPr>
+            </a:pPr>
+          </a:p>
+        </txPr>
+        <crossAx val="10"/>
+      </valAx>
+    </plotArea>
+    <plotVisOnly val="1"/>
+    <dispBlanksAs val="gap"/>
+  </chart>
+  <spPr>
+    <a:solidFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <a:schemeClr val="bg1"/>
+    </a:solidFill>
+    <a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="9525">
+      <a:solidFill>
+        <a:schemeClr val="tx1">
+          <a:lumMod val="15000"/>
+          <a:lumOff val="85000"/>
+        </a:schemeClr>
+      </a:solidFill>
+    </a:ln>
+  </spPr>
+</chartSpace>
