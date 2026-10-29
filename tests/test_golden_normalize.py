@@ -261,6 +261,12 @@ def test_datetime64_figure_values_render_as_iso():
     assert canon["data"][0]["x"] == ["2026-01-01T09:00:00.000000000"]
 
 
+def test_scalar_datetime64_renders_as_iso():
+    """The scalar branch, not the array one: a lone np.datetime64 leaf."""
+    assert normalize._canonical(np.datetime64("2026-01-01T09:00")) == "2026-01-01T09:00"
+    assert normalize._canonical({"t": np.datetime64("2026-01-01", "D")}) == {"t": "2026-01-01"}
+
+
 def test_version_mask_reaches_cells_frames_and_figures():
     stamp = "qPCR Analysis Suite v3.1 (commit abc1234)"
     assert _sheet_lines({"A1": f"Software: {stamp}"}) == ["A1\tSoftware: <APP_VERSION>"]
