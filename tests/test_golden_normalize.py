@@ -298,7 +298,7 @@ def _identity_deck() -> bytes:
             "<Manager>Jane Roe</Manager><Company>Acme</Company></Properties>"))
         z.writestr("ppt/changesInfos/changesInfo1.xml", (
             "<pc:chgInfo xmlns:pc='urn:pc'><pc:chgData name='John Doe' userId='1234-abcd-userid'"
-            " providerId='ADAL'/></pc:chgInfo>"))
+            " providerId='ADAL'/><pc:sldChg name='Results slide'/></pc:chgInfo>"))
         z.writestr("ppt/commentAuthors.xml", (
             "<p:cmAuthorLst xmlns:p='urn:p'><p:cmAuthor id='1' name='Jane Roe' initials='JR'/>"
             "</p:cmAuthorLst>"))
@@ -315,8 +315,10 @@ def test_personal_identity_fields_masked():
     people = ("Jane Roe", "John Doe", "JR", "1234-abcd-userid", "jane@example.invalid")
     assert not [p for p in people if p in everything]
     assert everything.count("<PERSON>") == 10
-    # Shape names, titles and the company are not personal and stay.
+    # Shape names, titles and the company are not personal and stay, and so
+    # does a "name" on any changesInfo element other than chgData.
     assert 'name="Title 1"' in parts["ppt/slides/slide1.xml"]
+    assert 'name="Results slide"' in parts["ppt/changesInfos/changesInfo1.xml"]
     assert "<dc:title>Deck</dc:title>" in parts["docProps/core.xml"]
     assert "<Company>Acme</Company>" in parts["docProps/app.xml"]
 

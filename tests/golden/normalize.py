@@ -52,7 +52,14 @@ _PERSON_TAGS = (
 _PERSON_PARTS = re.compile(
     r"^(ppt/changesInfos/.*|ppt/authors\.xml|ppt/commentAuthors\.xml|xl/persons/.*)$"
 )
-_PERSON_ATTRS = ("name", "initials", "userId", "displayName")
+# The identity attributes of the elements that carry a person in those parts.
+# Any other attribute, a "name" on another element included, is kept.
+_PERSON_ATTRS = {
+    "chgData": ("name", "userId"),               # ppt/changesInfos/*
+    "author": ("name", "initials", "userId"),     # ppt/authors.xml
+    "cmAuthor": ("name", "initials"),             # ppt/commentAuthors.xml
+    "person": ("displayName", "userId"),          # xl/persons/*
+}
 
 
 def mask_text(text: str) -> str:
@@ -96,8 +103,9 @@ def _pretty_xml(data: bytes, *, mask_timestamps: bool = False, mask_person_attrs
             el.text = mask_text(el.text)
         if el.tail:
             el.tail = mask_text(el.tail)
+        identity = _PERSON_ATTRS.get(etree.QName(el).localname, ()) if mask_person_attrs else ()
         for key, val in list(el.attrib.items()):
-            person = mask_person_attrs and etree.QName(key).localname in _PERSON_ATTRS
+            person = etree.QName(key).localname in identity
             el.set(key, "@@PERSON@@" if person else mask_text(val))
     out = etree.tostring(root, pretty_print=True, encoding="unicode")
     # Tokens contain "<", which XML serialization escapes; restore them literally.
