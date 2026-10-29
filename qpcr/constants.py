@@ -340,6 +340,13 @@ EFFICACY_CONFIG = {
 }
 
 
+# ==================== APPLICATION IDENTITY ====================
+# The one place the product name and release are declared. The provenance
+# record, the MIQE block and the page footer all read these.
+APP_NAME = "qPCR Analysis Suite"
+APP_VERSION = "2026.10"
+
+
 # ==================== ANALYSIS CONSTANTS ====================
 class AnalysisConstants:
     MIN_REPLICATES_FOR_STATS = 2

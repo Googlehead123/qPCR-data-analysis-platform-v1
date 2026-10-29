@@ -1,0 +1,5 @@
+[
+  {"part": "xlsx/sheet:Provenance", "line": "^A\\d+\\tGenes analysed: +\\d+$", "note": "Provenance block gene count"},
+  {"part": "xlsx/sheet:Provenance", "line": "^A\\d+\\tGenes analysed: \\d+; distinct samples on the plate: \\d+$", "note": "MIQE block gene count"},
+  {"part": "xlsx/sheet:Provenance", "line": "^A\\d+\\t_Generated: \\S+ \\S+ · <APP_VERSION>_?$", "note": "MIQE footer: the masked version token now stops at its ' (commit ...)' group, so the closing italic underscore stops being swallowed by the mask; the version itself is masked"}
+]

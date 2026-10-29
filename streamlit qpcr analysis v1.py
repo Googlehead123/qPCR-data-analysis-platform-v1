@@ -12,8 +12,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy import stats
+import functools
 import gc
 import hashlib
+import subprocess
 import html as _html
 import io
 import logging
@@ -28,7 +30,7 @@ from typing import Dict, Tuple
 from qpcr.constants import (
     GRAPH_PRESETS, GRAPH_PRESET_CHOICES, DEFAULT_GRAPH_PRESET,
     FIGURE_SIZE_PRESETS, EFFICACY_CONFIG, KOREAN_FONT_NAME,
-    PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU,
+    PLOTLY_FONT_FAMILY, CM_TO_PX, CM_TO_EMU, APP_NAME, APP_VERSION,
 )
 from qpcr.export_utils import export_figure_to_bytes, build_zip
 from qpcr.utils import natural_sort_key, gradient_styles, make_well_ids_unique
@@ -259,7 +261,7 @@ def auto_qc_trim_summary(audit, threshold=None) -> str:
 
 def build_provenance(*, efficacy, hk_gene, ref_condition, cmp_conditions, ttest_type,
                      excluded_wells, excluded_samples, n_genes, n_samples, timestamp,
-                     app_version="qPCR Analysis Suite v3.1",
+                     app_version=f"{APP_NAME} {APP_VERSION}",
                      auto_qc_audit=None, auto_qc_threshold=None):
     """Build a reproducibility/provenance record for an analysis run.
 
@@ -351,14 +353,56 @@ def format_provenance_text(prov: dict) -> str:
     return "\n".join(lines)
 
 
+@functools.lru_cache(maxsize=1)
+def app_version_string() -> str:
+    """``"<name> <release>"``, plus the commit when one can be read.
+
+    Cached: the commit cannot change within a process. Any failure (no VCS, no
+    repo, timeout) drops the commit part rather than raising. Kept out of
+    ``build_provenance`` so that function stays pure.
+    """
+    base = f"{APP_NAME} {APP_VERSION}"
+    try:
+        out = subprocess.run(
+            ["git", "describe", "--always", "--dirty"],
+            cwd=_os.path.dirname(_os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=2, check=True,
+        ).stdout.strip()
+    except Exception:
+        return base
+    return f"{base} (commit {out})" if out else base
+
+
+def provenance_gene_count(processed_data, data, hk_gene) -> int:
+    """Number of analysed genes: the targets, not the reference gene.
+
+    With results, it is the number of result genes. Before any analysis it is
+    the distinct targets other than ``hk_gene`` (case-insensitive), or all of
+    them when no reference gene is set. Never raises.
+    """
+    try:
+        if processed_data:
+            return len(processed_data)
+        if data is None or "Target" not in data.columns:
+            return 0
+        targets = {str(t) for t in data["Target"].dropna().unique()}
+        if not hk_gene:
+            return len(targets)
+        hk = str(hk_gene).upper()
+        return len({t for t in targets if t.upper() != hk})
+    except Exception:
+        return 0
+
+
 def _current_provenance():
     """Assemble a provenance record from current session state (UI helper)."""
     data = st.session_state.get("data")
+    n_genes = provenance_gene_count(
+        st.session_state.get("processed_data"), data, st.session_state.get("hk_gene"))
     try:
-        n_genes = int(data["Target"].nunique()) if data is not None else 0
         n_samples = int(data["Sample"].nunique()) if data is not None else 0
     except Exception:
-        n_genes = n_samples = 0
+        n_samples = 0
     return build_provenance(
         efficacy=st.session_state.get("selected_efficacy"),
         hk_gene=st.session_state.get("hk_gene"),
@@ -376,6 +420,7 @@ def _current_provenance():
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         auto_qc_audit=st.session_state.get("auto_qc_audit"),
         auto_qc_threshold=st.session_state.get("qc_sd_threshold"),
+        app_version=app_version_string(),
     )
 
 
@@ -6835,9 +6880,9 @@ with tab5:
 # ==================== FOOTER ====================
 st.markdown("---")
 
-footer_html = """
+footer_html = f"""
 <div style='text-align: center; color: #86868b; padding: 24px 0; font-size: 0.85rem;'>
-    <p style='margin: 0;'>qPCR Analysis Suite v3.1</p>
+    <p style='margin: 0;'>{_html.escape(app_version_string())}</p>
 </div>
 """
 

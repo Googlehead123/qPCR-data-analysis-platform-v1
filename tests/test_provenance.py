@@ -69,3 +69,65 @@ def test_format_provenance_text_lists_excluded_wells(mock_streamlit):
     assert "GAPDH" in text
     assert "Welch t-test" in text
     assert "COL1A1 / S1 / well A1" in text
+
+
+def _clear_version_cache(spec):
+    spec.app_version_string.cache_clear()
+
+
+def test_app_version_string_format(mock_streamlit):
+    import re
+    spec = _spec()
+    _clear_version_cache(spec)
+    assert re.match(
+        r"^qPCR Analysis Suite 2026\.10( \(commit [0-9a-g-]+(-dirty)?\))?$",
+        spec.app_version_string(),
+    )
+
+
+def test_app_version_string_without_git(mock_streamlit, monkeypatch):
+    import subprocess
+    spec = _spec()
+
+    def boom(*a, **k):
+        raise OSError("no git")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    _clear_version_cache(spec)
+    try:
+        assert spec.app_version_string() == "qPCR Analysis Suite 2026.10"
+    finally:
+        _clear_version_cache(spec)
+
+
+def test_build_provenance_stays_pure(mock_streamlit, monkeypatch):
+    import subprocess
+    spec = _spec()
+
+    def boom(*a, **k):
+        raise AssertionError("build_provenance must not spawn a process")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    prov = spec.build_provenance(
+        efficacy=None, hk_gene=None, ref_condition=None, cmp_conditions=None,
+        ttest_type="student", excluded_wells={}, excluded_samples=set(),
+        n_genes=0, n_samples=0, timestamp="t",
+    )
+    assert prov["software"] == "qPCR Analysis Suite 2026.10"
+
+
+def test_provenance_gene_count_rules(mock_streamlit):
+    import pandas as pd
+    spec = _spec()
+    count = spec.provenance_gene_count
+    raw = pd.DataFrame({"Target": ["actin", "PPARy", "SREBP1a", "actin"]})
+
+    assert count({"PPARy": 1, "SREBP1a": 2}, raw, "ACTIN") == 2  # results win
+    assert count({}, raw, "ACTIN") == 2          # reference gene, any case, excluded
+    assert count(None, raw, "ACTIN") == 2
+    assert count({}, raw, None) == 3
+    assert count({}, raw, "") == 3
+    assert count({}, raw, "ABSENT") == 3
+    assert count({}, None, "ACTIN") == 0
+    assert count({}, pd.DataFrame(), "ACTIN") == 0
+    assert count({}, pd.DataFrame({"Sample": ["s"]}), "ACTIN") == 0  # no Target column
