@@ -8,6 +8,7 @@ inline in a tab body is reached through TEMPORARY verbatim copies (only
 it extracts, and the goldens must not move when it does.
 """
 
+import codecs
 import csv
 import hashlib
 import importlib
@@ -39,6 +40,19 @@ REPO = Path(__file__).resolve().parents[2]
 FIXED_NOW = datetime(2026, 1, 1, 9, 0)
 MESSAGE_KINDS = ("error", "warning", "info", "success")
 _FLOAT_CELL = re.compile(r"-?\d+\.\d+(?:[eE][-+]?\d+)?|-?\d+[eE][-+]?\d+")
+
+
+class PipelineError(RuntimeError):
+    """A pipeline step failed. ``detail`` holds the evidence (the message log).
+
+    The text names the recipe by ``label`` and carries the detail only for a
+    synthetic recipe: a local recipe's log quotes client file names.
+    """
+
+    def __init__(self, recipe: Recipe, what: str, detail: str = ""):
+        self.detail = detail
+        shown = f": {detail}" if detail and not recipe.is_local else ""
+        super().__init__(f"{recipe.label}: {what}{shown}")
 
 
 class _FrozenDatetime(datetime):
@@ -91,8 +105,12 @@ def _uploads(recipe: Recipe) -> list[_Upload]:
             continue
         root = paths.test_data_root()
         if root is None or not root.is_dir():
-            raise FileNotFoundError(f"test_data root not found for local CSV {entry!r}")
-        files.append(_Upload(Path(entry).name, (root / entry).read_bytes()))
+            raise PipelineError(recipe, "test_data root not found for its CSVs")
+        try:
+            data = (root / entry).read_bytes()
+        except OSError as exc:
+            raise PipelineError(recipe, "a CSV could not be read", str(exc)) from None
+        files.append(_Upload(Path(entry).name, data))
     return files
 
 
@@ -112,7 +130,8 @@ def _ingest(app, uploaded_files) -> None:
     for f in uploaded_files:
         f.seek(0)
 
-    # TEMPORARY verbatim copy of app L4170–4260; Task 3 extracts
+    # TEMPORARY verbatim copy of app L4170–4258; Task 3 extracts
+    # (the brief said L4260; L4259–4260 open the separate uploader-emptied branch)
     all_data = []
     for file in uploaded_files:
         parsed = QPCRParser.parse(file)
@@ -368,7 +387,7 @@ def _map_samples(app, recipe: Recipe) -> None:
 
     if recipe.sample_order is not None:
         if sorted(recipe.sample_order) != sorted(state.sample_order):
-            raise ValueError(f"{recipe.name}: sample_order must list every sample exactly once")
+            raise PipelineError(recipe, "sample_order must list every sample exactly once")
         # The drag list holds included samples; excluded ones follow (app L5396–5408).
         inc = {s: state.sample_mapping[s]["include"] for s in recipe.sample_order}
         state.sample_order = [s for s in recipe.sample_order if inc[s]] + [
@@ -390,7 +409,7 @@ def _map_samples(app, recipe: Recipe) -> None:
 def _run_analysis(app, recipe: Recipe, log) -> None:
     state = app.st.session_state
     if recipe.ttest_type not in app.TTEST_TYPES:
-        raise ValueError(f"{recipe.name}: ttest_type must be one of {app.TTEST_TYPES}")
+        raise PipelineError(recipe, f"ttest_type must be one of {app.TTEST_TYPES}")
     state.ttest_type = recipe.ttest_type
     ref, cmp1, cmp2, cmp3 = recipe.ref_sample, *recipe.cmp_samples
     # As the Mapping tab records them for auto-rerun (app L5743–5746).
@@ -398,8 +417,8 @@ def _run_analysis(app, recipe: Recipe, log) -> None:
     state["_last_cmp_sample_key"] = cmp1
     state["_last_cmp_sample_key_2"] = cmp2
     state["_last_cmp_sample_key_3"] = cmp3
-    ok = app.AnalysisEngine.run_full_analysis(ref, cmp1, cmp2, cmp3)
-    assert ok, f"{recipe.name}: run_full_analysis failed: {log}"
+    if not app.AnalysisEngine.run_full_analysis(ref, cmp1, cmp2, cmp3):
+        raise PipelineError(recipe, "run_full_analysis failed", _message_lines(log))
 
 
 # ---- Export tab ---------------------------------------------------------------
@@ -512,13 +531,14 @@ def _images_zip(app, fmt: str, rendered: dict) -> bytes:
 # ---- Analysis tab: per-gene results CSV ----------------------------------------
 
 
-def _gene_csvs(app) -> dict[str, str]:
+def _gene_csvs(app) -> dict[str, tuple[str, bytes]]:
+    """``gene -> (file name, payload)`` exactly as the tab hands them to its download button."""
     st, state, datetime = app.st, app.st.session_state, app.datetime
     EFFICACY_CONFIG, expected_direction_for = app.EFFICACY_CONFIG, app.expected_direction_for
     gradient_styles = app.gradient_styles
-    csvs = {}
+    st.download_button = MagicMock(return_value=False)
     # TEMPORARY verbatim copy of app L6146–6207; Task 3 extracts
-    # (through L6211, which closes the download call; the csvs[...] line is the driver's)
+    # (through L6211, which closes the download call)
     st.subheader("Gene-by-Gene Results")
 
     for gene, gene_df in state.processed_data.items():
@@ -585,20 +605,31 @@ def _gene_csvs(app) -> dict[str, str]:
                 file_name=f"{gene}_results_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv", key=f"csv_{gene}", width='stretch',
             )
-            csvs[gene] = display_df.to_csv(index=False)
-    return csvs
+    served = {}
+    for call in st.download_button.call_args_list:
+        key = str(call.kwargs.get("key", ""))
+        if key.startswith("csv_"):
+            served[key[len("csv_"):]] = (call.kwargs["file_name"], call.kwargs["data"])
+    return served
 
 
 # ---- normalization -------------------------------------------------------------
 
 
 def _round_csv(text: str) -> str:
-    """Floats to 12 significant digits, as every other part; all else verbatim."""
+    """Floats to 12 significant digits (-0 as 0), as every other part; all else verbatim."""
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     for row in csv.reader(io.StringIO(text)):
-        writer.writerow(["%.12g" % float(c) if _FLOAT_CELL.fullmatch(c) else c for c in row])
+        writer.writerow(["%.12g" % (float(c) + 0.0) if _FLOAT_CELL.fullmatch(c) else c for c in row])
     return mask_text(out.getvalue())
+
+
+def _served_csv(file_name: str, payload: bytes) -> str:
+    """The served file: its name, whether it opens with a UTF-8 BOM, then its rows."""
+    bom = payload.startswith(codecs.BOM_UTF8)
+    body = payload[len(codecs.BOM_UTF8):] if bom else payload
+    return f"file: {file_name}\nbom: {'utf-8' if bom else 'none'}\n" + _round_csv(body.decode("utf-8"))
 
 
 def _pretty_json(text: str) -> str:
@@ -639,7 +670,8 @@ def produce_outputs(
         state = app.st.session_state
 
         _ingest(app, files)
-        assert state.get("data") is not None, f"{recipe.name}: no data parsed: {log}"
+        if state.get("data") is None:
+            raise PipelineError(recipe, "no data parsed", _message_lines(log))
         _detect_hk(app)
         if recipe.hk_gene is not None:
             state.hk_gene = recipe.hk_gene
@@ -654,7 +686,8 @@ def produce_outputs(
         state.graph_settings.update(recipe.graph_settings)
         genes = list(state.processed_data.keys())
         _figs, errors = app.figures_for_genes(genes, app.EFFICACY_CONFIG[state.selected_efficacy])
-        assert not errors, f"{recipe.name}: figures failed: {errors}"
+        if errors:
+            raise PipelineError(recipe, f"{len(errors)} figure(s) failed", repr(errors))
 
         # Export tab, called exactly as at app L6542 and L6574.
         analysis_params = _export_params(app, recipe.concentration)
@@ -672,7 +705,8 @@ def produce_outputs(
             analysis_params, graph_settings=state.get("graph_settings"),
             gene_display_names=state.get("gene_display_names", {}),
         )
-        assert ppt, f"{recipe.name}: PPT generation returned nothing: {log}"
+        if not ppt:
+            raise PipelineError(recipe, "PPT generation returned nothing", _message_lines(log))
         ppt = ppt.getvalue() if hasattr(ppt, "getvalue") else ppt
         fmt, rendered = _publication_images(app, recipe.image_export)
         zipped = _images_zip(app, fmt, rendered)
@@ -685,7 +719,7 @@ def produce_outputs(
             "pptx": normalize_pptx(ppt),
             "images": {g: _image_summary(b) + "\n" for g, b in rendered.items()},
             "images_zip": {n: s + "\n" for n, s in _zip_members(zipped).items()},
-            "gene_csv": {g: _round_csv(t) for g, t in gene_csvs.items()},
+            "gene_csv": {g: _served_csv(*served) for g, served in gene_csvs.items()},
             "messages": {"log": _message_lines(log)},
         }
 
@@ -699,7 +733,7 @@ def detect_defaults(csv_files: list[str]) -> dict:
         state = app.st.session_state
         _ingest(app, files)
         if state.get("data") is None:
-            raise ValueError(f"no data parsed from {len(csv_files)} file(s)")
+            raise PipelineError(probe, "no data parsed", _message_lines(log))
         _detect_hk(app)
         return {
             "hk_gene": state.get("hk_gene"),

@@ -10,14 +10,20 @@ written to ``<root>/golden/diffs/`` and never printed.
 """
 
 import argparse
+import contextlib
 import difflib
 import fnmatch
+import io
 import json
+import logging
 import re
 import subprocess
 import sys
+import traceback
+import warnings
 from collections import defaultdict
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from tests.golden import env, paths, recipes
 from tests.golden.recipes import Recipe
@@ -25,7 +31,8 @@ from tests.golden.recipes import Recipe
 REPO = Path(__file__).resolve().parents[2]
 SYNTH_DIR = REPO / paths.SYNTH_GOLDENS
 MAX_LINES_PER_PART = 40
-_PLATE_SUFFIX = re.compile(r"(?:-\d+|_data| ?\d+)$")
+_PLATE_SET = re.compile(r"^(?P<base>.+?)(?: ?(?<!\d)\d)?(?:_data)?(?:-\d)?$")
+T = TypeVar("T")
 
 
 # ---- golden files ---------------------------------------------------------------
@@ -165,20 +172,85 @@ def local_skip_reason() -> str | None:
     return None
 
 
-def write_local_diff(recipe: Recipe, violations: list[str]) -> Path:
-    out = _golden_root() / "diffs" / f"{recipe.name}.txt"
+class LocalRecipeError(RuntimeError):
+    """A local recipe failed. The message carries only its opaque id."""
+
+
+def _write_detail(name: str, kind: str, body: str) -> Path:
+    """``<root>/golden/diffs/<opaque id>.<kind>.txt``: the one place a local name is written."""
+    out = _golden_root() / "diffs" / f"{recipes.opaque_id(name)}.{kind}.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(v + "\n" for v in violations), encoding="utf-8")
+    out.write_text(f"recipe: {name}\n{body}", encoding="utf-8")
     return out
 
 
+def run_local(name: str, fn: Callable[[], T]) -> T:
+    """Run ``fn`` for the local recipe ``name`` with nothing it says reaching the console.
+
+    Stdout, stderr, log records and warnings are held back; on failure they go,
+    with the traceback and the pipeline's message log, to the recipe's detail
+    file, and a ``LocalRecipeError`` naming only the opaque id is raised. A
+    client study code or file name in a traceback would otherwise land in a
+    terminal or an agent transcript.
+    """
+    sink = io.StringIO()
+    root_logger = logging.getLogger()
+    saved_handlers, root_logger.handlers = root_logger.handlers[:], [logging.StreamHandler(sink)]
+    failure = None
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink), \
+                warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001 - every failure is redacted the same way
+                failure = type(exc).__name__
+                detail = getattr(exc, "detail", "")
+                _write_detail(name, "error", "".join([
+                    traceback.format_exc(),
+                    f"\nmessage log:\n{detail}" if detail else "",
+                    f"\noutput:\n{sink.getvalue()}" if sink.getvalue() else "",
+                    "".join(f"warning: {w.message}\n" for w in caught),
+                ]))
+    finally:
+        root_logger.handlers = saved_handlers
+    raise LocalRecipeError(
+        f"local recipe {recipes.opaque_id(name)}: {failure} (details in <test-data root>/golden/diffs/)"
+    )
+
+
+def write_local_diff(recipe: Recipe, violations: list[str]) -> Path:
+    return _write_detail(recipe.name, "diff", "".join(v + "\n" for v in violations))
+
+
+def check_local(recipe: Recipe, allow: list[dict] | None = None) -> str | None:
+    """Compare one local recipe with the baseline; None if it matches, else a redacted summary."""
+    from tests.golden import driver
+
+    try:
+        actual = run_local(recipe.name, lambda: driver.produce_outputs(recipe, real_render=True))
+    except LocalRecipeError as exc:
+        return str(exc)
+    golden = load_golden(local_baseline_dir() / recipe.name)
+    violations = compare(actual, golden, allow or [])
+    if not golden:
+        violations = ["<recipe>: no goldens captured"] + violations
+    if not violations:
+        return None
+    write_local_diff(recipe, violations)
+    return (f"local recipe {recipes.opaque_id(recipe.name)}: {len(violations)} changed line(s) "
+            f"in {len(_by_part(violations))} part(s) (diff in <test-data root>/golden/diffs/)")
+
+
 def plate_set_stem(stem: str) -> str:
-    """Strip trailing plate numbers / ``_data`` until none is left: 'X 1', 'X2_data-1' -> 'X'."""
-    while True:
-        shorter = _PLATE_SUFFIX.sub("", stem)
-        if shorter == stem or not shorter.strip():
-            return stem.strip()
-        stem = shorter
+    """The plate set a CSV belongs to: its stem minus one trailing plate index.
+
+    A plate index is a single digit not glued to another digit ('X 1', 'X1'),
+    optionally followed by ``_data`` and a single-digit copy suffix ('X2_data-1').
+    A multi-digit tail ('STUDY12') is part of the study code, so two studies
+    sharing a prefix are never merged; a rename is the escape hatch either way.
+    """
+    return _PLATE_SET.match(stem).group("base").rstrip()
 
 
 def _merge_override(base: dict, override: dict) -> dict:
@@ -207,10 +279,7 @@ def init_local() -> int:
     overrides_path = groot / "recipe_overrides.json"
     overrides = json.loads(overrides_path.read_text(encoding="utf-8")) if overrides_path.is_file() else {}
 
-    rdir = paths.recipes_dir()
-    rdir.mkdir(parents=True, exist_ok=True)
-    written = applied = no_hk = 0
-    for stem, files in sorted(groups.items()):
+    def build(stem: str, files: list[str]) -> Recipe:
         found = driver.detect_defaults(files)
         ref = found["samples"][0]
         base = Recipe(
@@ -222,17 +291,29 @@ def init_local() -> int:
         fields = json.loads(base.to_json())
         if stem in overrides:
             fields = _merge_override(fields, overrides[stem])
-            applied += 1
-        recipe = Recipe(**fields)
+        return Recipe(**fields)
+
+    rdir = paths.recipes_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+    # Opaque ids and counts only: recipe names are client study codes.
+    print(f"init-local: {len(groups)} plate set(s) from {sum(map(len, groups.values()))} CSV(s)")
+    written = failed = no_hk = 0
+    for stem, files in sorted(groups.items()):
+        try:
+            recipe = run_local(stem, lambda: build(stem, files))
+        except LocalRecipeError as exc:
+            print(f"  {recipes.opaque_id(stem)}: {len(files)} CSV(s) - FAILED: {exc}")
+            failed += 1
+            continue
+        override = " (+ overrides)" if stem in overrides else ""
+        print(f"  {recipes.opaque_id(stem)}: {len(files)} CSV(s){override}")
         no_hk += recipe.hk_gene is None
         (rdir / f"{recipe.name}.json").write_text(recipe.to_json(), encoding="utf-8")
         written += 1
     unused = len(set(overrides) - set(groups))
-    # Counts only: recipe names are client study codes.
-    print(f"init-local: {written} recipe(s) from {sum(map(len, groups.values()))} CSV(s) "
-          f"written to {rdir}; {applied} override set(s) applied, {unused} unused; "
-          f"{no_hk} need an hk_gene override")
-    return 0
+    print(f"init-local: {written} recipe(s) written to {rdir}; {failed} failed; "
+          f"{unused} unused override set(s); {no_hk} need an hk_gene override")
+    return 1 if failed else 0
 
 
 # ---- CLI ------------------------------------------------------------------------
@@ -256,6 +337,13 @@ def _load_allow(files: list[str]) -> list[dict]:
     return allow
 
 
+def is_dirty(repo: Path = REPO) -> bool:
+    """True if ``repo`` has uncommitted or untracked changes."""
+    return bool(subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=True, cwd=str(repo)
+    ).stdout.strip())
+
+
 def _update(recs: list[Recipe], local: bool) -> int:
     from tests.golden import driver
 
@@ -263,7 +351,12 @@ def _update(recs: list[Recipe], local: bool) -> int:
         sha = _head_sha()
         out_root = paths.local_out(sha)
         for r in recs:
-            write_golden(r, driver.produce_outputs(r, real_render=True), out_root / r.name)
+            try:
+                outputs = run_local(r.name, lambda r=r: driver.produce_outputs(r, real_render=True))
+            except LocalRecipeError as exc:
+                print(f"{exc}; BASELINE not updated")
+                return 1
+            write_golden(r, outputs, out_root / r.name)
         (_golden_root() / "BASELINE").write_text(sha + "\n")
         print(f"update --local: {len(recs)} recipe(s) captured to {out_root}")
         return 0
@@ -276,25 +369,23 @@ def _update(recs: list[Recipe], local: bool) -> int:
 def _compare(recs: list[Recipe], local: bool, allow: list[dict]) -> int:
     from tests.golden import driver
 
-    base = local_baseline_dir() if local else SYNTH_DIR
-    if base is None:
-        print(local_skip_reason())
-        return 2
+    if local:
+        if local_baseline_dir() is None:
+            print(local_skip_reason())
+            return 2
+        failed = 0
+        for r in recs:
+            summary = check_local(r, allow)
+            failed += summary is not None
+            print(summary or f"local recipe {recipes.opaque_id(r.name)}: OK")
+        return 1 if failed else 0
     failed = 0
-    for i, r in enumerate(recs, 1):
-        golden = load_golden(base / r.name)
-        violations = compare(driver.produce_outputs(r, real_render=local), golden, allow)
+    for r in recs:
+        golden = load_golden(SYNTH_DIR / r.name)
+        violations = compare(driver.produce_outputs(r, real_render=False), golden, allow)
         if not golden:
             violations = ["<recipe>: no goldens captured"] + violations
         failed += bool(violations)
-        if local:
-            if violations:
-                path = write_local_diff(r, violations)
-                print(f"[local #{i}] {len(violations)} changed line(s) in "
-                      f"{len(_by_part(violations))} part(s); diff in {path.parent}")
-            else:
-                print(f"[local #{i}] OK")
-            continue
         if not violations:
             print(f"{r.name}: OK")
             continue
@@ -332,11 +423,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.update and args.recipe:
             print("--update --local captures every local recipe; drop --recipe")
             return 2
+        if args.update and is_dirty():
+            print("--update --local needs a clean tree: BASELINE names HEAD, and "
+                  "uncommitted changes would make it name code that did not produce it")
+            return 2
         recs = recipes.load_local_recipes()
     else:
         recs = recipes.synthetic_recipes()
     if args.recipe:
-        recs = [r for r in recs if r.name == args.recipe]
+        # A local recipe may be picked by its opaque id as well as its name.
+        recs = [r for r in recs if args.recipe in (r.name, recipes.opaque_id(r.name))]
     if not recs:
         print("no recipes selected")
         return 2

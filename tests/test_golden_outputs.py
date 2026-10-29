@@ -181,6 +181,129 @@ def test_local_goldens_skip_reason_and_require_flag(monkeypatch, tmp_path):
     assert required.returncode == 1 and "test_data" in required.stdout, required.stdout
 
 
+SECRET = "ZZSECRETSTUDY"  # stands in for a client study code
+
+
+def _fake_local_root(tmp_path, csv_names, csv_bytes):
+    root = tmp_path / "td"
+    (root / "golden" / "recipes").mkdir(parents=True)
+    for name in csv_names:
+        (root / name).write_bytes(csv_bytes)
+    return root
+
+
+def _pytest_local(env_extra):
+    node = "tests/test_golden_outputs.py::test_local_goldens_match"
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", node, "-m", "local_golden", "-q", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO), env={**os.environ, **env_extra},
+    )
+
+
+def test_local_failures_never_name_the_recipe_or_csv(tmp_path):
+    csv = f"{SECRET} 1.csv"
+    root = _fake_local_root(tmp_path, [csv], b"not,a,qpcr,export\n1,2,3,4\n")
+    rec = replace(_recipe("synthetic_b"), name=SECRET, csv_files=[csv])
+    (root / "golden" / "recipes" / f"{SECRET}.json").write_text(rec.to_json(), encoding="utf-8")
+    (root / "golden" / "BASELINE").write_text("feedface\n")
+    (root / "golden" / "out" / "feedface").mkdir(parents=True)
+    env = {"QPCR_TEST_DATA": str(root), "QPCR_REQUIRE_LOCAL_GOLDENS": "1"}
+
+    runs = {
+        "compare": _capture_cli("--local", env_extra=env),
+        "init": _capture_cli("--init-local", env_extra=env),
+        "pytest": _pytest_local(env),
+    }
+    for label, proc in runs.items():
+        shown = proc.stdout + proc.stderr
+        assert proc.returncode != 0, (label, shown)
+        assert SECRET not in shown, label
+        # A runner without Chrome fails the pytest run on the skip reason instead.
+        chrome_missing = label == "pytest" and "Chrome not found" in shown
+        assert recipes.opaque_id(SECRET) in shown or chrome_missing, (label, shown)
+    # The full story is kept, but only under the test-data root.
+    details = "".join(p.read_text(encoding="utf-8") for p in (root / "golden" / "diffs").iterdir())
+    assert SECRET in details and "could NOT be loaded" in details
+
+
+def test_plate_sets_group_only_plate_indices():
+    stem = capture.plate_set_stem
+    assert stem("990101 KER10 1") == stem("990101 KER10 2") == "990101 KER10"
+    assert stem("990101 KER11 1") == "990101 KER11"
+    assert stem("X-ALPHA1") == stem("X-ALPHA2_data") == "X-ALPHA"
+    assert stem("Y BETA1-1") == stem("Y BETA2_data-1") == "Y BETA"
+    assert stem("Z GAMMA1") == stem("Z GAMMA 2") == "Z GAMMA"
+    # A multi-digit tail is a study code, not a plate index.
+    assert stem("STUDY12") != stem("STUDY13")
+
+
+def test_init_local_prints_plate_sets_as_ids_and_counts(tmp_path):
+    names = ["990101 KER10 1.csv", "990101 KER10 2.csv", "990101 KER11 1.csv"]
+    root = _fake_local_root(tmp_path, names, recipes.synthetic_csv("synthetic_b.csv"))
+    proc = _capture_cli("--init-local", env_extra={"QPCR_TEST_DATA": str(root)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "KER" not in proc.stdout
+    assert f"{recipes.opaque_id('990101 KER10')}: 2 CSV(s)" in proc.stdout
+    assert f"{recipes.opaque_id('990101 KER11')}: 1 CSV(s)" in proc.stdout
+    written = recipes.Recipe.from_json(
+        (root / "golden" / "recipes" / "990101 KER10.json").read_text(encoding="utf-8")
+    )
+    assert written.csv_files == names[:2]
+
+
+def test_chrome_missing_is_a_named_skip_reason(monkeypatch, tmp_path):
+    import qpcr.export_utils
+
+    root = _fake_local_root(tmp_path, [], b"")
+    rec = replace(_recipe("synthetic_b"), name="local_x", csv_files=["x 1.csv"])
+    (root / "golden" / "recipes" / "local_x.json").write_text(rec.to_json(), encoding="utf-8")
+    (root / "golden" / "BASELINE").write_text("feedface\n")
+    (root / "golden" / "out" / "feedface").mkdir(parents=True)
+    monkeypatch.setenv("QPCR_TEST_DATA", str(root))
+    assert capture.local_skip_reason() is None or "Chrome" in capture.local_skip_reason()
+    monkeypatch.setattr(qpcr.export_utils, "_find_system_browser", lambda: None)
+    assert "Chrome" in capture.local_skip_reason()
+
+
+def test_update_local_refuses_a_dirty_tree(monkeypatch, tmp_path):
+    root = _fake_local_root(tmp_path, [], b"")
+    monkeypatch.setenv("QPCR_TEST_DATA", str(root))
+    monkeypatch.setattr(capture, "is_dirty", lambda repo=None: True)
+    assert capture.main(["--update", "--local"]) == 2
+    assert not (root / "golden" / "BASELINE").exists()
+
+
+def test_is_dirty_tracks_uncommitted_changes(tmp_path):
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    (tmp_path / "f.txt").write_text("a")
+    assert capture.is_dirty(tmp_path)
+    git("add", "f.txt")
+    git("commit", "-qm", "init")
+    assert not capture.is_dirty(tmp_path)
+    (tmp_path / "f.txt").write_text("b")
+    assert capture.is_dirty(tmp_path)
+
+
+def test_gene_csv_is_the_served_payload(synthetic_outputs):
+    text = synthetic_outputs["synthetic_a"]["gene_csv"]["COL1A1"]
+    head = text.splitlines()[:3]
+    assert head[0] == "file: COL1A1_results_20260101.csv"
+    assert head[1] == "bom: utf-8"
+    assert head[2].startswith("Condition,Group,Fold_Change,")
+
+
+def test_recipe_ttest_default_is_the_apps():
+    from qpcr.analysis import DEFAULT_TTEST_TYPE
+
+    r = recipes.Recipe(name="x", csv_files=[], ref_sample="a", cmp_samples=["a", None, None])
+    assert r.ttest_type == DEFAULT_TTEST_TYPE
+
+
 @pytest.mark.local_golden
 def test_local_goldens_match():
     reason = capture.local_skip_reason()
@@ -188,14 +311,6 @@ def test_local_goldens_match():
         if os.environ.get("QPCR_REQUIRE_LOCAL_GOLDENS") == "1":
             pytest.fail(reason)
         pytest.skip(reason)
-    out_dir = capture.local_baseline_dir()
-    failed = []
-    for i, r in enumerate(recipes.load_local_recipes(), 1):
-        violations = capture.compare(
-            driver.produce_outputs(r, real_render=True), capture.load_golden(out_dir / r.name), allow=[]
-        )
-        if violations:
-            capture.write_local_diff(r, violations)
-            failed.append(f"local recipe #{i}: {len(violations)} changed line(s)")
-    # Counts only: client values stay in <root>/golden/diffs/, never in test output.
-    assert not failed, "; ".join(failed) + " (diffs under <test-data root>/golden/diffs/)"
+    # Opaque ids and counts only: client values stay in <root>/golden/diffs/.
+    failed = [msg for r in recipes.load_local_recipes() if (msg := capture.check_local(r))]
+    assert not failed, "; ".join(failed) + " (details under <test-data root>/golden/diffs/)"

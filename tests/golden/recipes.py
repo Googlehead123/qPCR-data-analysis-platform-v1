@@ -5,10 +5,23 @@ CI. Local recipes are JSON files under ``<test-data root>/golden/recipes`` and
 are never committed.
 """
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 
 from tests.golden import paths
+
+
+def opaque_id(name: str) -> str:
+    """What output shows instead of a local recipe's name (a client study code)."""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+
+
+def _app_default_ttest_type() -> str:
+    import conftest  # noqa: F401 - installs the Streamlit mock before qpcr imports it
+    from qpcr.analysis import DEFAULT_TTEST_TYPE
+
+    return DEFAULT_TTEST_TYPE
 
 
 @dataclass(kw_only=True)
@@ -25,7 +38,7 @@ class Recipe:
     sample_order: list[str] | None = None
     ref_sample: str
     cmp_samples: list[str | None]
-    ttest_type: str = "student"
+    ttest_type: str = field(default_factory=_app_default_ttest_type)
     # None = every auto-QC decision overridden (all replicates restored).
     auto_qc_threshold: float | None = 0.3
     # Each entry is [gene, sample, well].
@@ -40,14 +53,19 @@ class Recipe:
 
     def __post_init__(self):
         if len(self.cmp_samples) != 3:
-            raise ValueError(f"{self.name}: cmp_samples must have length 3")
+            raise ValueError(f"{self.label}: cmp_samples must have length 3")
         if any(len(e) != 3 for e in self.manual_exclusions):
-            raise ValueError(f"{self.name}: manual_exclusions entries are [gene, sample, well]")
+            raise ValueError(f"{self.label}: manual_exclusions entries are [gene, sample, well]")
 
     @property
     def is_local(self) -> bool:
         """True when any CSV comes from the test-data root rather than this module."""
         return any(f not in SYNTHETIC_CSVS for f in self.csv_files)
+
+    @property
+    def label(self) -> str:
+        """The name for a synthetic recipe; an opaque id for a local one."""
+        return f"local {opaque_id(self.name)}" if self.is_local else self.name
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n"
