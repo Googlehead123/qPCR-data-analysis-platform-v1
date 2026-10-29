@@ -295,7 +295,9 @@ def test_chrome_missing_is_a_named_skip_reason(monkeypatch, tmp_path):
     (root / "golden" / "BASELINE").write_text("feedface\n")
     (root / "golden" / "out" / "feedface").mkdir(parents=True)
     monkeypatch.setenv("QPCR_TEST_DATA", str(root))
-    assert capture.local_skip_reason() is None or "Chrome" in capture.local_skip_reason()
+    # Everything else is in place, so the browser alone decides.
+    monkeypatch.setattr(qpcr.export_utils, "_find_system_browser", lambda: "/usr/bin/chrome")
+    assert capture.local_skip_reason() is None
     monkeypatch.setattr(qpcr.export_utils, "_find_system_browser", lambda: None)
     assert "Chrome" in capture.local_skip_reason()
 
