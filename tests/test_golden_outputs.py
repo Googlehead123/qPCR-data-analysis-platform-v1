@@ -226,6 +226,41 @@ def test_local_failures_never_name_the_recipe_or_csv(tmp_path):
     assert SECRET in details and "could NOT be loaded" in details
 
 
+def test_malformed_local_recipe_is_redacted(tmp_path):
+    """A recipe file that does not parse is reported by opaque id, never by name."""
+    root = _fake_local_root(tmp_path, [], b"")
+    (root / "golden" / "recipes" / f"{SECRET}.json").write_text("{not json", encoding="utf-8")
+    (root / "golden" / "BASELINE").write_text("feedface\n")
+    (root / "golden" / "out" / "feedface").mkdir(parents=True)
+    env = {"QPCR_TEST_DATA": str(root), "QPCR_REQUIRE_LOCAL_GOLDENS": "1"}
+
+    for label, proc in {"compare": _capture_cli("--local", env_extra=env),
+                        "pytest": _pytest_local(env)}.items():
+        shown = proc.stdout + proc.stderr
+        assert proc.returncode != 0, (label, shown)
+        assert SECRET not in shown, label
+        assert recipes.opaque_id(SECRET) in shown, (label, shown)
+    detail = (root / "golden" / "diffs" / f"{recipes.opaque_id(SECRET)}.error.txt").read_text(encoding="utf-8")
+    assert SECRET in detail and "JSONDecodeError" in detail
+
+
+def test_unreadable_local_baseline_is_redacted(tmp_path, monkeypatch):
+    """The baseline path ends in the recipe name, so its read errors are redacted too."""
+    root = _fake_local_root(tmp_path, [], b"")
+    baseline = root / "golden" / "out" / "feedface" / SECRET
+    baseline.mkdir(parents=True)
+    (baseline / "messages__log.txt").write_bytes(b"\xff\xfe not utf-8")
+    (root / "golden" / "BASELINE").write_text("feedface\n")
+    monkeypatch.setenv("QPCR_TEST_DATA", str(root))
+    monkeypatch.setattr(driver, "produce_outputs", lambda r, real_render: {"messages": {"log": ""}})
+    rec = replace(_recipe("synthetic_b"), name=SECRET, csv_files=[f"{SECRET} 1.csv"])
+
+    summary = capture.check_local(rec)
+    assert summary and SECRET not in summary and recipes.opaque_id(SECRET) in summary
+    detail = (root / "golden" / "diffs" / f"{recipes.opaque_id(SECRET)}.error.txt").read_text(encoding="utf-8")
+    assert "UnicodeDecodeError" in detail
+
+
 def test_plate_sets_group_only_plate_indices():
     stem = capture.plate_set_stem
     assert stem("990101 KER10 1") == stem("990101 KER10 2") == "990101 KER10"
@@ -312,5 +347,5 @@ def test_local_goldens_match():
             pytest.fail(reason)
         pytest.skip(reason)
     # Opaque ids and counts only: client values stay in <root>/golden/diffs/.
-    failed = [msg for r in recipes.load_local_recipes() if (msg := capture.check_local(r))]
+    failed = [msg for r in capture.local_recipes() if (msg := capture.check_local(r))]
     assert not failed, "; ".join(failed) + " (details under <test-data root>/golden/diffs/)"

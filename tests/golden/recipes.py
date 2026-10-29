@@ -196,9 +196,20 @@ def synthetic_recipes() -> list[Recipe]:
     ]
 
 
-def load_local_recipes() -> list[Recipe]:
-    """Every ``*.json`` under ``<test-data root>/golden/recipes``, by name; [] if none."""
+def load_local_recipes(guard=None) -> list[Recipe]:
+    """Every ``*.json`` under ``<test-data root>/golden/recipes``, by name; [] if none.
+
+    ``guard(stem, load)`` wraps each file's load; ``capture.local_recipes``
+    passes ``run_local`` so a file that cannot be read or parsed is reported
+    by opaque id rather than by a traceback naming it.
+    """
     rdir = paths.recipes_dir()
     if rdir is None or not rdir.is_dir():
         return []
-    return [Recipe.from_json(p.read_text(encoding="utf-8")) for p in sorted(rdir.glob("*.json"))]
+
+    def load(path):
+        return Recipe.from_json(path.read_text(encoding="utf-8"))
+
+    if guard is None:
+        return [load(p) for p in sorted(rdir.glob("*.json"))]
+    return [guard(p.stem, lambda p=p: load(p)) for p in sorted(rdir.glob("*.json"))]

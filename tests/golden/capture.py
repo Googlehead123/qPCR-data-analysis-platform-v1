@@ -160,7 +160,7 @@ def local_skip_reason() -> str | None:
     if root is None or not root.is_dir():
         where = root if root is not None else "<git common dir>/test_data"
         return f"test_data root not found ({where}); set QPCR_TEST_DATA"
-    if not recipes.load_local_recipes():
+    if not local_recipes():
         return "no local recipes under test_data/golden/recipes; run capture --init-local"
     baseline = local_baseline_dir()
     if baseline is None or not baseline.is_dir():
@@ -219,6 +219,15 @@ def run_local(name: str, fn: Callable[[], T]) -> T:
     )
 
 
+def local_recipes() -> list[Recipe]:
+    """``recipes.load_local_recipes`` with each file's load redacted by ``run_local``.
+
+    A malformed or unreadable recipe raises ``LocalRecipeError`` naming only
+    the opaque id of its file stem; the traceback goes to its detail file.
+    """
+    return recipes.load_local_recipes(guard=run_local)
+
+
 def write_local_diff(recipe: Recipe, violations: list[str]) -> Path:
     return _write_detail(recipe.name, "diff", "".join(v + "\n" for v in violations))
 
@@ -229,9 +238,10 @@ def check_local(recipe: Recipe, allow: list[dict] | None = None) -> str | None:
 
     try:
         actual = run_local(recipe.name, lambda: driver.produce_outputs(recipe, real_render=True))
+        # The baseline path ends in the recipe's name, so a read error is redacted too.
+        golden = run_local(recipe.name, lambda: load_golden(local_baseline_dir() / recipe.name))
     except LocalRecipeError as exc:
         return str(exc)
-    golden = load_golden(local_baseline_dir() / recipe.name)
     violations = compare(actual, golden, allow or [])
     if not golden:
         violations = ["<recipe>: no goldens captured"] + violations
@@ -427,7 +437,11 @@ def main(argv: list[str] | None = None) -> int:
             print("--update --local needs a clean tree: BASELINE names HEAD, and "
                   "uncommitted changes would make it name code that did not produce it")
             return 2
-        recs = recipes.load_local_recipes()
+        try:
+            recs = local_recipes()
+        except LocalRecipeError as exc:
+            print(exc)
+            return 1
     else:
         recs = recipes.synthetic_recipes()
     if args.recipe:
