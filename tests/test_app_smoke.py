@@ -6,11 +6,16 @@ state, tab rendering, the fragment editor, the Overview verdict) that unit tests
 miss. Self-contained — no external data files needed.
 """
 import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
-SCRIPT = "streamlit qpcr analysis v1.py"
+# Absolute, because AppTest.from_file resolves a relative path against the
+# calling file (tests/) since Streamlit 1.61 (streamlit#16122); before that it
+# tried the working directory first, which is what the bare name relied on.
+SCRIPT = str(Path(__file__).resolve().parents[1] / "streamlit qpcr analysis v1.py")
 
 
 @pytest.fixture(autouse=True)
