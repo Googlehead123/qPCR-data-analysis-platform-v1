@@ -10,14 +10,20 @@ its widgets from the state right after upload ingestion:
 - ``synthetic_a`` through the UI gives the driver's workbook, and the driver's
   canonical figures (the real Graphs editor seeds per-gene settings the driver
   never renders, so the charts are compared too);
+- what the tabs hand out gives the driver's outputs: the per-gene CSV, image
+  and zip download buttons (recorded as the script calls them) and the deck;
 - a run that is then edited (a well excluded, the SD threshold moved, a
-  condition renamed) and re-run gives the workbook a fresh run of that final
-  state gives, so no cache or leftover state from the first run leaks into it.
+  condition renamed) and re-run gives the workbook and charts that a fresh run
+  of the final state gives. The fresh run is its own process (``st.cache_data``
+  is process-global) and starts from the final QC state, renaming before its
+  first analysis, so no cache entry it reads was filled from an earlier state.
 
-AppTest runs in a SUBPROCESS (this file, run as a module): the repo-root
-``conftest.py`` replaces ``streamlit`` with a MagicMock at import time.
-AppTest cannot freeze the clock, so the analysis date and the provenance
-"Generated" stamps are masked, and ``docProps`` dropped; nothing else is.
+AppTest runs in SUBPROCESSES (this file, run as a module): the repo-root
+``conftest.py`` replaces ``streamlit`` with a MagicMock at import time. Figures
+render through the driver's stub (``real_render=False``), patched where the
+script imports it. AppTest cannot freeze the clock, so the analysis date, the
+provenance "Generated" stamps, the slide "Date:" lines and the dates in
+download file names are masked, and ``docProps`` dropped; nothing else is.
 """
 
 import dataclasses
@@ -32,7 +38,7 @@ import pandas as pd
 import pytest
 
 from tests.golden import capture, driver, recipes
-from tests.golden.normalize import normalize_xlsx
+from tests.golden.normalize import _image_summary, normalize_pptx, normalize_xlsx
 
 REPO = Path(__file__).resolve().parents[1]
 APP = REPO / "streamlit qpcr analysis v1.py"
@@ -57,14 +63,26 @@ UPLOAD_KEYS = (
 # housekeeping candidates (synthetic_a has one, so it cannot tell a default
 # index from any other). None is what ingestion leaves.
 HK_STORED = {"none_stored": None, "second_stored": "GAPDH"}
-# Edits applied after the first run in "mutated", before the only run in "fresh_final".
+# Edits made through the UI after the first run in "mutated"; "fresh_final" starts from their result.
 MUTATION = {"exclude": ("COL1A1", "S1", "A2"), "sd_threshold": 0.25, "rename": ("S2", "Active A2")}
 _EB_LABELS = {"livak_sd": "±SD", "sem": "±SEM", "ci95": "95% CI"}
 _STAMP = re.compile(r"(Generated:\s*)\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+_SLIDE_DATE = re.compile(r"(<a:t>Date: )\d{4}-\d{2}-\d{2}(</a:t>)")
+_FILE_DATE = re.compile(r"_\d{8}(\.\w+)$")
 
 
 def _synthetic_a() -> recipes.Recipe:
     return next(r for r in recipes.synthetic_recipes() if r.name == "synthetic_a")
+
+
+def _final_qc(app) -> None:
+    """The QC decisions "mutated" makes through the UI, in its order, via the
+    functions its handlers call: the recipe's exclusions (QC form), the
+    mutation's exclusion (QC form), then the SD threshold box."""
+    gene, sample, well = MUTATION["exclude"]
+    for g, s, w in [*_synthetic_a().manual_exclusions, [gene, sample, well]]:
+        app.exclude_well(w, g, s)
+    app.apply_auto_qc(MUTATION["sd_threshold"])
 
 
 def _two_hk(data: pd.DataFrame) -> pd.DataFrame:
@@ -76,14 +94,36 @@ def _two_hk(data: pd.DataFrame) -> pd.DataFrame:
 # ---- the subprocess: real Streamlit ------------------------------------------------
 
 
-def _drive(state_path: str, out_dir: str) -> None:
+def _drive(state_path: str, out_dir: str, scenario: str) -> None:
+    import qpcr.export_utils
+    import streamlit
     from streamlit.testing.v1 import AppTest
 
+    from tests.golden import stub_render
     from tests.golden.normalize import normalize_figures
 
     seed = pickle.loads(Path(state_path).read_bytes())
-    recipe, state = seed["recipe"], seed["state"]
+    recipe = seed["recipe"]
+    # "fresh" starts from the final QC state; its rename is typed before its first analysis.
+    state = seed["final_state"] if scenario == "fresh" else seed["state"]
+    conditions = dict(recipe["conditions"])
+    if scenario == "fresh":
+        conditions[MUTATION["rename"][0]] = MUTATION["rename"][1]
     out = Path(out_dir)
+
+    # The script re-imports export_figure_to_bytes from qpcr.export_utils on
+    # every run, so this routes its renders through the driver's stub.
+    qpcr.export_utils.export_figure_to_bytes = stub_render._export_figure_to_bytes
+    # Every st.download_button call, as the script makes it.
+    served = []
+    real_download = streamlit.download_button
+
+    def recording_download(*args, **kwargs):
+        named = dict(zip(("label", "data", "file_name"), args), **kwargs)
+        served.append({k: named.get(k) for k in ("key", "label", "data", "file_name", "mime")})
+        return real_download(*args, **kwargs)
+
+    streamlit.download_button = recording_download
 
     def run(target):
         """Run the script (``target`` is the AppTest or a widget just set on it); fail on any exception."""
@@ -150,7 +190,7 @@ def _drive(state_path: str, out_dir: str) -> None:
     def map_samples(at):
         efficacy = [s for s in at.selectbox if s.label == "🎯 Efficacy Test Type"]
         run(efficacy[0].select(recipe["efficacy"]))
-        for sample, cond in recipe["conditions"].items():
+        for sample, cond in conditions.items():
             at.text_input(key=f"cond_{sample}").input(cond)
         for sample, inc in recipe["include"].items():
             box = at.checkbox(key=f"include_{sample}")
@@ -164,6 +204,12 @@ def _drive(state_path: str, out_dir: str) -> None:
             s for s in order if not inc.get(s, True)
         ]
         run(at)
+        choose_analysis(at)
+
+    def choose_analysis(at):
+        """The efficacy, reference, comparisons and t-test the recipe picks."""
+        efficacy = [s for s in at.selectbox if s.label == "🎯 Efficacy Test Type"]
+        run(efficacy[0].select(recipe["efficacy"]))
         ref, cmp1, cmp2, cmp3 = recipe["ref_sample"], *recipe["cmp_samples"]
         at.selectbox(key="ref_choice_ddct").select(ref)
         at.selectbox(key="cmp_choice_pval").select(cmp1)
@@ -175,6 +221,23 @@ def _drive(state_path: str, out_dir: str) -> None:
             run(at.checkbox(key="use_third_pval").check())
             at.selectbox(key="cmp_choice_pval_3").select(cmp3)
         run(at)
+
+    def chosen(at) -> dict:
+        ss = at.session_state
+
+        def get(key):
+            return ss[key] if key in ss else None
+
+        return {
+            "efficacy": get("selected_efficacy"),
+            "ref_choice_ddct": get("ref_choice_ddct"),
+            "cmp_choice_pval": get("cmp_choice_pval"),
+            "use_second_pval": get("use_second_pval"),
+            "cmp_choice_pval_2": get("cmp_choice_pval_2"),
+            "use_third_pval": get("use_third_pval"),
+            "cmp_choice_pval_3": get("cmp_choice_pval_3"),
+            "ttest_type": get("ttest_type"),
+        }
 
     def style_graphs(at):
         # The editor shows one gene at a time; its pill button selects it.
@@ -204,28 +267,51 @@ def _drive(state_path: str, out_dir: str) -> None:
         figures = normalize_figures(dict(at.session_state["graphs"]))
         (out / f"{name}.figures.json").write_text(json.dumps(figures), encoding="utf-8")
 
+    def deck_and_downloads(at, name):
+        """Generate the deck and the images; keep what the tabs hand out on that run."""
+        run(at.button(key="gen_ppt").click())
+        deck = at.session_state["_ppt_export"]["data"]
+        (out / f"{name}.pptx").write_bytes(deck.getvalue() if hasattr(deck, "getvalue") else deck)
+        served.clear()
+        run(at.button(key="gen_images").click())
+        (out / f"{name}.served.pkl").write_bytes(pickle.dumps(list(served)))
+
     def prepared():
         at = seeded()
-        apply_recipe_qc(at)
+        if scenario == "main":
+            apply_recipe_qc(at)
         map_samples(at)
         return at
 
-    uploaded()
-    hk_first_render()
-
-    at = prepared()
-    click(at, "Run Full Analysis")
-    style_graphs(at)
-    export(at, "parity")
-    mutate(at)
-    click(at, "Run Full Analysis")
-    export(at, "mutated")
-
-    at = prepared()
-    mutate(at)
-    click(at, "Run Full Analysis")
-    style_graphs(at)
-    export(at, "fresh_final")
+    if scenario == "main":
+        uploaded()
+        hk_first_render()
+        at = prepared()
+        click(at, "Run Full Analysis")
+        style_graphs(at)
+        export(at, "parity")
+        deck_and_downloads(at, "parity")
+        picked = chosen(at)
+        mutate(at)
+        # A QC-tab st.rerun() drops the state of widgets the run had not yet
+        # rendered, so the Mapping selections can revert to their defaults
+        # (a pre-existing app hazard, Ruling 16). Record what survived, then
+        # re-pick them as the operator would.
+        after = chosen(at)
+        (out / "survival.json").write_text(
+            json.dumps({k: after[k] == v for k, v in picked.items()}), encoding="utf-8"
+        )
+        choose_analysis(at)
+        assert chosen(at) == picked, (picked, chosen(at))
+        click(at, "Run Full Analysis")
+        export(at, "mutated")
+    elif scenario == "fresh":
+        at = prepared()
+        click(at, "Run Full Analysis")
+        style_graphs(at)
+        export(at, "fresh_final")
+    else:
+        raise ValueError(f"unknown scenario {scenario!r}")
 
 
 # ---- the tests ----------------------------------------------------------------------
@@ -241,16 +327,20 @@ def ui_out(tmp_path_factory):
         "uploads": {name: recipes.synthetic_csv(name) for name in recipe.csv_files},
     }
     seed["hk_data"] = _two_hk(seed["state"]["data"])
+    seed["final_state"] = driver.ingested_state(recipe, INGESTED_KEYS, edit=_final_qc)
     (tmp / "seed.pkl").write_bytes(pickle.dumps(seed))
-    proc = subprocess.run(
-        [sys.executable, "-m", "tests.test_ui_golden_parity", str(tmp / "seed.pkl"), str(tmp)],
-        capture_output=True, text=True, timeout=1800, cwd=str(REPO),
-    )
-    if proc.returncode != 0:
-        pytest.fail(
-            "AppTest driver failed.\n"
-            f"stdout tail:\n{proc.stdout[-4000:]}\n\nstderr tail:\n{proc.stderr[-4000:]}"
+    # One process per scenario: "fresh" must not inherit "main"'s st.cache_data.
+    for scenario in ("main", "fresh"):
+        proc = subprocess.run(
+            [sys.executable, "-m", "tests.test_ui_golden_parity", str(tmp / "seed.pkl"), str(tmp),
+             scenario],
+            capture_output=True, text=True, timeout=1800, cwd=str(REPO),
         )
+        if proc.returncode != 0:
+            pytest.fail(
+                f"AppTest driver failed ({scenario}).\n"
+                f"stdout tail:\n{proc.stdout[-4000:]}\n\nstderr tail:\n{proc.stderr[-4000:]}"
+            )
     return tmp
 
 
@@ -274,6 +364,25 @@ def _masked(parts: dict[str, str]) -> dict[str, str]:
             text = _STAMP.sub(r"\1<TS>", text)
         out[name] = text
     return out
+
+
+def _masked_deck(parts: dict[str, str]) -> dict[str, str]:
+    """Drop docProps; mask each gene slide's "Date:" line."""
+    return {n: _SLIDE_DATE.sub(r"\1<DATE>\2", t) for n, t in parts.items() if not n.startswith("docProps/")}
+
+
+def _masked_file(text: str) -> str:
+    """A served CSV part with the date in its file name masked."""
+    head, _, rest = text.partition("\n")
+    return _FILE_DATE.sub(r"_<DATE>\1", head) + "\n" + rest
+
+
+def _cell(text: str, label: str) -> str:
+    """The value beside ``label`` in a two-column sheet part."""
+    row = re.search(rf"^A(\d+)\t{re.escape(label)}$", text, flags=re.M)
+    assert row, f"no {label!r} row"
+    value = re.search(rf"^B{row.group(1)}\t(.*)$", text, flags=re.M)
+    return value.group(1) if value else ""
 
 
 def _ui_xlsx(ui_out, name):
@@ -329,13 +438,75 @@ def test_ui_figures_equal_driver_figures(ui_out, driver_out):
     assert capture.compare(actual, {"figures": driver_out["figures"]}, allow=[]) == []
 
 
+def _served(ui_out, name) -> dict[str, dict]:
+    """Recorded download calls by key; the keyless report buttons by label."""
+    calls = pickle.loads((ui_out / f"{name}.served.pkl").read_bytes())
+    served = {c["key"] or c["label"]: c for c in calls}
+    assert len(served) == len(calls), "two download buttons share a key or label"
+    return served
+
+
+def test_ui_served_csvs_equal_driver_csvs(ui_out, driver_out):
+    """What the Analysis tab hands each per-gene CSV button: name and bytes."""
+    calls = _served(ui_out, "parity")
+    served = {
+        k[len("csv_"):]: _masked_file(driver._served_csv(c["file_name"], c["data"]))
+        for k, c in calls.items() if k.startswith("csv_")
+    }
+    expected = {g: _masked_file(t) for g, t in driver_out["gene_csv"].items()}
+    assert served, "no CSV download buttons recorded"
+    assert capture.compare({"gene_csv": served}, {"gene_csv": expected}, allow=[]) == []
+
+
+def test_ui_served_images_equal_driver_images(ui_out, driver_out):
+    """The images zip and per-gene image buttons the Export tab renders."""
+    calls = _served(ui_out, "parity")
+    zipped = {n: s + "\n" for n, s in driver._zip_members(calls["dl_images_zip"]["data"]).items()}
+    images = {
+        k[len("img_"):]: _image_summary(c["data"]) + "\n"
+        for k, c in calls.items() if k.startswith("img_")
+    }
+    actual = {"images_zip": zipped, "images": images}
+    expected = {"images_zip": driver_out["images_zip"], "images": driver_out["images"]}
+    assert capture.compare(actual, expected, allow=[]) == []
+    # The MIME type comes from publication_image_format, for the cached format.
+    assert {c["mime"] for k, c in calls.items() if k.startswith("img_")} == {"image/png"}
+    assert calls["dl_images_zip"]["mime"] == "application/zip"
+
+
+def test_ui_deck_equals_driver_deck(ui_out, driver_out):
+    """The deck "Generate PowerPoint" builds from the tab's own arguments."""
+    actual = {"pptx": _masked_deck(normalize_pptx((ui_out / "parity.pptx").read_bytes()))}
+    expected = {"pptx": _masked_deck(driver_out["pptx"])}
+    assert any(_SLIDE_DATE.search(t) for t in driver_out["pptx"].values()), "no slide Date: line"
+    assert capture.compare(actual, expected, allow=[]) == []
+    # The report buttons serve exactly what Generate built.
+    calls = _served(ui_out, "parity")
+    assert calls["Download PowerPoint"]["data"] == (ui_out / "parity.pptx").read_bytes()
+    assert calls["Download Excel report"]["data"] == (ui_out / "parity.xlsx").read_bytes()
+
+
 def test_mutation_sequence_equals_fresh_run(ui_out):
     mutated = _ui_xlsx(ui_out, "mutated")
     fresh = _ui_xlsx(ui_out, "fresh_final")
     assert capture.compare({"xlsx": mutated}, {"xlsx": fresh}, allow=[]) == []
-    # Not vacuous: the edits reached the workbook.
-    assert capture.compare({"xlsx": mutated}, {"xlsx": _ui_xlsx(ui_out, "parity")}, allow=[])
+    # The chart path's memo, checked the same way.
+    assert capture.compare(
+        {"figures": _ui_figures(ui_out, "mutated")}, {"figures": _ui_figures(ui_out, "fresh_final")},
+        allow=[],
+    ) == []
+    # Not vacuous: each edit reached the workbook.
+    parity = _ui_xlsx(ui_out, "parity")
+    gene, sample, well = MUTATION["exclude"]
+    assert int(_cell(mutated["sheet:QC_Report"], "Excluded Wells")) == (
+        int(_cell(parity["sheet:QC_Report"], "Excluded Wells")) + 1
+    )
+    assert f"{gene} / {sample} / well {well}" in mutated["sheet:Provenance"]
+    assert f"{gene} / {sample} / well {well}" not in parity["sheet:Provenance"]
+    assert f"SD <= {MUTATION['sd_threshold']:.2f}" in mutated["sheet:Provenance"]
+    assert "SD <= 0.30" in parity["sheet:Provenance"]
     assert MUTATION["rename"][1] in mutated["sheet:Sample_Mapping"]
+    assert MUTATION["rename"][1] not in parity["sheet:Sample_Mapping"]
 
 
 if __name__ == "__main__":

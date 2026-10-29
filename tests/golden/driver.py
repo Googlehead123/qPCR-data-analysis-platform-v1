@@ -370,8 +370,14 @@ def produce_outputs(
         }
 
 
-def ingested_state(recipe: Recipe, keys) -> dict:
-    """``keys`` of the session state right after upload ingestion, for seeding a real-Streamlit AppTest."""
+def ingested_state(
+    recipe: Recipe, keys, *, edit: Callable[[object], None] | None = None
+) -> dict:
+    """``keys`` of the session state right after upload ingestion, for seeding a real-Streamlit AppTest.
+
+    ``edit(app)`` runs after ingestion, e.g. to apply QC decisions through the
+    app's own ``exclude_well`` / ``apply_auto_qc``.
+    """
     files = _uploads(recipe)
     with pytest.MonkeyPatch.context() as mp:
         app, log = _load_app(mp)
@@ -379,6 +385,8 @@ def ingested_state(recipe: Recipe, keys) -> dict:
         _ingest(app, files)
         if state.get("data") is None:
             raise PipelineError(recipe, "no data parsed", _message_lines(log))
+        if edit is not None:
+            edit(app)
         return {k: copy.deepcopy(state[k]) for k in keys}
 
 
