@@ -2,10 +2,13 @@
 
 import importlib.metadata
 import io
+import json
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import openpyxl
+from openpyxl.chart import BarChart, Reference
 import pandas as pd
 import plotly.graph_objects as go
 from PIL import Image
@@ -13,14 +16,19 @@ from PIL import Image
 from tests.golden import env, normalize, paths
 
 
+REPO = Path(__file__).resolve().parents[1]
+
+
 def test_lock_mismatches_reports_difference(monkeypatch):
+    pins = (REPO / "requirements.txt").read_text().splitlines()
+    locked = next(ln.split("==", 1)[1].split()[0] for ln in pins if ln.startswith("numpy=="))
     real_version = importlib.metadata.version
     monkeypatch.setattr(
         importlib.metadata,
         "version",
         lambda name: "0.0.1" if name == "numpy" else real_version(name),
     )
-    assert "numpy: installed 0.0.1 != locked 2.5.2" in env.lock_mismatches()
+    assert f"numpy: installed 0.0.1 != locked {locked}" in env.lock_mismatches(REPO / "requirements.txt")
 
 
 def test_lock_mismatches_reports_missing_and_skips_foreign_markers(tmp_path):
@@ -44,8 +52,12 @@ def test_test_data_root_prefers_env(monkeypatch, tmp_path):
 
 
 def test_test_data_root_none_outside_repo(monkeypatch, tmp_path):
+    # tmp_path may itself sit inside some repository; stop git's search at it.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     monkeypatch.delenv("QPCR_TEST_DATA", raising=False)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(fresh)
     assert paths.test_data_root() is None
     assert paths.recipes_dir() is None
     assert paths.local_out("abc123") is None
@@ -192,3 +204,125 @@ def test_numpy_backed_figure_floats_rounded_and_decoded():
     assert "bdata" not in base
     assert base == ulp
     assert base != real
+
+
+def _sheet_lines(values: dict) -> list[str]:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    for coord, value in values.items():
+        ws[coord] = value
+    buf = io.BytesIO()
+    wb.save(buf)
+    return normalize.normalize_xlsx(buf.getvalue())["sheet:Data"].splitlines()
+
+
+def _raw_number_lines(stored: list[str]) -> list[str]:
+    """Sheet lines for cells whose ``<v>`` text is exactly ``stored``.
+
+    openpyxl writes 1.0 as "1", so the stored text is patched into the XML: a
+    writer that emits "1.0" loads back as a float, "1" as an int.
+    """
+    wb = openpyxl.Workbook()
+    wb.active.title = "Data"
+    for i in range(len(stored)):
+        wb.active[f"A{i + 1}"] = 1000.5 + i
+    buf = io.BytesIO()
+    wb.save(buf)
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as src, zipfile.ZipFile(out, "w") as dst:
+        for item in src.namelist():
+            data = src.read(item)
+            if item == "xl/worksheets/sheet1.xml":
+                text = data.decode()
+                for i, value in enumerate(stored):
+                    text = text.replace(f"<v>{1000.5 + i}</v>", f"<v>{value}</v>")
+                data = text.encode()
+            dst.writestr(item, data)
+    return normalize.normalize_xlsx(out.getvalue())["sheet:Data"].splitlines()
+
+
+def test_integral_float_cell_differs_from_int_cell():
+    lines = _raw_number_lines(["1", "1.0", "2.5", "1E+20"])
+    assert lines == ["A1\t1", "A2\t1.0", "A3\t2.5", "A4\t1e+20"]
+
+
+def test_negative_zero_normalizes_to_zero():
+    assert _raw_number_lines(["-0.0", "-0"]) == ["A1\t0.0", "A2\t0"]
+    assert normalize.normalize_frames({"t": pd.DataFrame({"a": [-0.0]})})["t"] == ",a\n0,0\n"
+    neg = normalize.normalize_figures({"f": go.Figure(go.Bar(y=np.array([-0.0, 1.0])))})
+    pos = normalize.normalize_figures({"f": go.Figure(go.Bar(y=np.array([0.0, 1.0])))})
+    assert neg == pos
+
+
+def test_datetime64_figure_values_render_as_iso():
+    x = np.array(["2026-01-01T09:00:00"], dtype="datetime64[ns]")
+    canon = json.loads(normalize.normalize_figures({"f": go.Figure(go.Scatter(x=x, y=[1.0]))})["f"])
+    assert canon["data"][0]["x"] == ["2026-01-01T09:00:00.000000000"]
+
+
+def test_version_mask_reaches_cells_frames_and_figures():
+    stamp = "qPCR Analysis Suite v3.1 (commit abc1234)"
+    assert _sheet_lines({"A1": f"Software: {stamp}"}) == ["A1\tSoftware: <APP_VERSION>"]
+    frame = normalize.normalize_frames({"t": pd.DataFrame({"v": [stamp]})})["t"]
+    assert "<APP_VERSION>" in frame and "v3.1" not in frame
+    fig = normalize.normalize_figures({"f": go.Figure(layout={"title": {"text": stamp}})})["f"]
+    assert "<APP_VERSION>" in fig and "v3.1" not in fig
+
+
+def test_xlsx_chart_part_is_kept_pretty_printed():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    for row in ([1], [2], [3]):
+        ws.append(row)
+    chart = BarChart()
+    chart.add_data(Reference(ws, min_col=1, min_row=1, max_row=3))
+    ws.add_chart(chart, "C1")
+    buf = io.BytesIO()
+    wb.save(buf)
+    chart_part = normalize.normalize_xlsx(buf.getvalue())["chart:xl/charts/chart1.xml"]
+    assert chart_part.startswith("<chartSpace") and "\n  <chart>" in chart_part
+
+
+def _identity_deck() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("docProps/core.xml", (
+            "<cp:coreProperties xmlns:cp='http://schemas.openxmlformats.org/package/2006/metadata/core-properties'"
+            " xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+            "<dc:title>Deck</dc:title><dc:creator>Jane Roe</dc:creator>"
+            "<cp:lastModifiedBy>John Doe</cp:lastModifiedBy></cp:coreProperties>"))
+        z.writestr("docProps/app.xml", (
+            "<Properties xmlns='http://schemas.openxmlformats.org/officeDocument/2006/extended-properties'>"
+            "<Manager>Jane Roe</Manager><Company>Acme</Company></Properties>"))
+        z.writestr("ppt/changesInfos/changesInfo1.xml", (
+            "<pc:chgInfo xmlns:pc='urn:pc'><pc:chgData name='John Doe' userId='1234-abcd-userid'"
+            " providerId='ADAL'/></pc:chgInfo>"))
+        z.writestr("ppt/commentAuthors.xml", (
+            "<p:cmAuthorLst xmlns:p='urn:p'><p:cmAuthor id='1' name='Jane Roe' initials='JR'/>"
+            "</p:cmAuthorLst>"))
+        z.writestr("ppt/authors.xml", (
+            "<p188:authorLst xmlns:p188='urn:a'><p188:author id='{A}' name='Jane Roe' initials='JR'"
+            " userId='jane@example.invalid' providerId='AD'/></p188:authorLst>"))
+        z.writestr("ppt/slides/slide1.xml", "<p:sld xmlns:p='urn:p'><p:cNvPr id='2' name='Title 1'/></p:sld>")
+    return buf.getvalue()
+
+
+def test_personal_identity_fields_masked():
+    parts = normalize.normalize_pptx(_identity_deck())
+    everything = "".join(parts.values())
+    people = ("Jane Roe", "John Doe", "JR", "1234-abcd-userid", "jane@example.invalid")
+    assert not [p for p in people if p in everything]
+    assert everything.count("<PERSON>") == 10
+    # Shape names, titles and the company are not personal and stay.
+    assert 'name="Title 1"' in parts["ppt/slides/slide1.xml"]
+    assert "<dc:title>Deck</dc:title>" in parts["docProps/core.xml"]
+    assert "<Company>Acme</Company>" in parts["docProps/app.xml"]
+
+    wb = openpyxl.Workbook()
+    wb.properties.creator, wb.properties.lastModifiedBy = "Jane Roe", "John Doe"
+    buf = io.BytesIO()
+    wb.save(buf)
+    core = normalize.normalize_xlsx(buf.getvalue())["docProps/core.xml"]
+    assert "Jane Roe" not in core and "John Doe" not in core and core.count("<PERSON>") == 2

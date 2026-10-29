@@ -1,8 +1,10 @@
 """Semantic normalizers: turn writer output into stable, diffable text parts.
 
-Only the software-version token is masked (and the OOXML created/modified
-stamps in ``docProps/core.xml``). Time is frozen by the driver, so a user
-string that looks like a date must survive normalization untouched.
+Only the software-version token is masked, plus the OOXML created/modified
+stamps in ``docProps/core.xml`` and the personal identities a template carries
+(author, last editor, reviewer names and account ids) as ``<PERSON>``. Time is
+frozen by the driver, so a user string that looks like a date must survive
+normalization untouched.
 
 Masking is applied to string leaves (cell values, XML text and attributes,
 frame cells, figure strings) rather than to serialized text, because the
@@ -38,6 +40,19 @@ _TS_TAGS = (
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp")
 _XML_SUFFIXES = (".xml", ".rels", ".vml")
 _SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+PERSON_TOKEN = "<PERSON>"
+# Elements whose text is a person, wherever they occur (core.xml, app.xml).
+_PERSON_TAGS = (
+    "{http://purl.org/dc/elements/1.1/}creator",
+    "{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}lastModifiedBy",
+    "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}Manager",
+)
+# Parts that list people: their name/initials/account-id attributes are masked.
+# Elsewhere "name" is a shape or sheet name and is kept.
+_PERSON_PARTS = re.compile(
+    r"^(ppt/changesInfos/.*|ppt/authors\.xml|ppt/commentAuthors\.xml|xl/persons/.*)$"
+)
+_PERSON_ATTRS = ("name", "initials", "userId", "displayName")
 
 
 def mask_text(text: str) -> str:
@@ -46,12 +61,17 @@ def mask_text(text: str) -> str:
 
 
 def _round_float(value: float) -> float:
-    return float(_FLOAT_FMT % value)
+    # + 0.0 turns -0.0 into 0.0. A value straddling a 12th-digit rounding
+    # boundary can still round two ways across platforms; that is accepted
+    # (Ruling 10).
+    return float(_FLOAT_FMT % value) + 0.0
 
 
 def _fmt_cell(value: Any) -> str:
     if isinstance(value, float):
-        text = _FLOAT_FMT % value
+        text = _FLOAT_FMT % (value + 0.0)
+        if text.lstrip("-").isdigit():
+            text += ".0"  # a float cell must not read like an int cell
     elif isinstance(value, dt.datetime):
         text = value.isoformat(sep=" ")
     elif isinstance(value, (dt.date, dt.time)):
@@ -61,7 +81,7 @@ def _fmt_cell(value: Any) -> str:
     return mask_text(text).replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
 
 
-def _pretty_xml(data: bytes, *, mask_timestamps: bool = False) -> str:
+def _pretty_xml(data: bytes, *, mask_timestamps: bool = False, mask_person_attrs: bool = False) -> str:
     parser = etree.XMLParser(remove_blank_text=True, resolve_entities=False)
     root = etree.fromstring(data, parser)
     for el in root.iter():
@@ -70,15 +90,22 @@ def _pretty_xml(data: bytes, *, mask_timestamps: bool = False) -> str:
         if mask_timestamps and el.tag in _TS_TAGS:
             el.text = "@@TS@@"
             continue
+        if el.tag in _PERSON_TAGS and el.text:
+            el.text = "@@PERSON@@"
         if el.text:
             el.text = mask_text(el.text)
         if el.tail:
             el.tail = mask_text(el.tail)
         for key, val in list(el.attrib.items()):
-            el.set(key, mask_text(val))
+            person = mask_person_attrs and etree.QName(key).localname in _PERSON_ATTRS
+            el.set(key, "@@PERSON@@" if person else mask_text(val))
     out = etree.tostring(root, pretty_print=True, encoding="unicode")
     # Tokens contain "<", which XML serialization escapes; restore them literally.
-    return out.replace("@@TS@@", TS_TOKEN).replace("&lt;APP_VERSION&gt;", APP_VERSION_TOKEN)
+    return (
+        out.replace("@@TS@@", TS_TOKEN)
+        .replace("@@PERSON@@", PERSON_TOKEN)
+        .replace("&lt;APP_VERSION&gt;", APP_VERSION_TOKEN)
+    )
 
 
 def _sheet_layout_xml(data: bytes) -> str:
@@ -151,7 +178,11 @@ def _package_part(name: str, raw: bytes) -> str:
     if name.lower().endswith(_IMAGE_SUFFIXES):
         return _image_summary(raw)
     if name.endswith(_XML_SUFFIXES):
-        return _pretty_xml(raw, mask_timestamps=(name == _CORE_XML))
+        return _pretty_xml(
+            raw,
+            mask_timestamps=(name == _CORE_XML),
+            mask_person_attrs=bool(_PERSON_PARTS.match(name)),
+        )
     return _binary_summary(raw)
 
 
@@ -169,7 +200,7 @@ def normalize_pptx(data: bytes) -> dict[str, str]:
 
 
 def normalize_frames(frames: dict[str, pd.DataFrame]) -> dict[str, str]:
-    """CSV per frame with 12-significant-digit floats and masked version strings."""
+    """CSV per frame with 12-significant-digit floats (-0 as 0) and masked version strings."""
     out: dict[str, str] = {}
     for name, df in frames.items():
         masked = df.copy()
@@ -178,6 +209,8 @@ def normalize_frames(frames: dict[str, pd.DataFrame]) -> dict[str, str]:
                 masked[col] = masked[col].map(
                     lambda v: mask_text(v) if isinstance(v, str) else v
                 )
+            elif masked[col].dtype.kind == "f":
+                masked[col] = masked[col] + 0.0
         out[name] = masked.to_csv(float_format=_FLOAT_FMT)
     return out
 
@@ -203,7 +236,11 @@ def _canonical(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_canonical(v) for v in obj]
     if isinstance(obj, np.ndarray):
+        if obj.dtype.kind == "M":  # .tolist() of datetime64[ns] gives epoch ints
+            return np.datetime_as_string(obj).tolist()
         return [_canonical(v) for v in obj.tolist()]
+    if isinstance(obj, np.datetime64):
+        return str(np.datetime_as_string(obj))
     if isinstance(obj, np.generic):
         return _canonical(obj.item())
     if isinstance(obj, bool) or obj is None or isinstance(obj, int):

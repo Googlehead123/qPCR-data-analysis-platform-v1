@@ -5,7 +5,7 @@ D1	Replicate_FC
 A2	COL1A1
 B2	Non-treated
 C2	A1
-D2	1
+D2	1.0
 A3	COL1A1
 B3	Non-treated
 C3	A2
