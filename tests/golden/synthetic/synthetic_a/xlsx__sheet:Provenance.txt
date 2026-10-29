@@ -18,7 +18,7 @@ A17	    - MMP1 / S2 / well A6
 A18	    - MMP1 / S3 / well B1
 A20	MIQE CHECKLIST
 A22	# MIQE-style reporting checklist (RT-qPCR)
-A23	_Generated: 2026-01-01 09:00:00 · <APP_VERSION>_
+A23	_Generated: 2026-01-01 09:00:00 · <APP_VERSION>
 A25	## Auto-documented by this analysis
 A26	Quantification method: relative quantification, single reference gene: per-well fold change 2^-ΔΔCt_i (ΔCt_i = target Ct − the condition's mean reference-gene Ct); bar = arithmetic mean of the per-well fold changes, SD/SEM over the same values
 A27	Reference (housekeeping) gene: ACTIN

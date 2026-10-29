@@ -16,7 +16,7 @@ A15	Excluded wells:       0
 A16	Auto-QC replicate trim: automatic best-2-of-3 replicate QC at SD <= 0.30: 1 group(s) trimmed, 0 still above threshold, 1 well(s) dropped. Trimming reduces replicate variance, so p-values for those groups are anti-conservative (false-positive rate above the nominal 5%).
 A18	MIQE CHECKLIST
 A20	# MIQE-style reporting checklist (RT-qPCR)
-A21	_Generated: 2026-01-01 09:00:00 · <APP_VERSION>_
+A21	_Generated: 2026-01-01 09:00:00 · <APP_VERSION>
 A23	## Auto-documented by this analysis
 A24	Quantification method: relative quantification, single reference gene: per-well fold change 2^-ΔΔCt_i (ΔCt_i = target Ct − the condition's mean reference-gene Ct); bar = arithmetic mean of the per-well fold changes, SD/SEM over the same values
 A25	Reference (housekeeping) gene: ACTIN

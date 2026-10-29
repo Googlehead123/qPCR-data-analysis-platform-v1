@@ -28,7 +28,12 @@ import plotly.graph_objects as go
 from lxml import etree
 from PIL import Image
 
-APP_VERSION_RE = re.compile(r"qPCR Analysis Suite [^\s()]+( \(commit [^)]+\))?")
+# One token for the whole version string, whether or not " (commit <describe>)"
+# is present: name, a dotted version (old "v3.1" form included), optional commit.
+# A single closing "_" (the italic marker the MIQE footer wraps it in) is part of
+# the token. It used to be swallowed only when no commit part followed, which made
+# the goldens depend on whether git was available.
+APP_VERSION_RE = re.compile(r"qPCR Analysis Suite v?\d+(?:\.\d+)*(?: \(commit [^)]+\))?_?")
 APP_VERSION_TOKEN = "<APP_VERSION>"
 TS_TOKEN = "<TS>"
 _FLOAT_FMT = "%.12g"
