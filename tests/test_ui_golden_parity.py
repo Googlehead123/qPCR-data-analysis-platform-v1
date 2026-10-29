@@ -486,7 +486,13 @@ def test_ui_deck_equals_driver_deck(ui_out, driver_out):
     assert calls["Download Excel report"]["data"] == (ui_out / "parity.xlsx").read_bytes()
 
 
-def test_mutation_sequence_equals_fresh_run(ui_out):
+def test_mutation_sequence_equals_fresh_run(ui_out, record_property):
+    # Ruling 16: which Mapping selections survived the QC edits' st.rerun().
+    # Reported (JUnit property, and stdout under -rP), never asserted: the
+    # hazard is not this test's subject.
+    survival = (ui_out / "survival.json").read_text(encoding="utf-8")
+    record_property("ruling16_mapping_selection_survived", survival)
+    print(f"ruling16_mapping_selection_survived: {survival}")
     mutated = _ui_xlsx(ui_out, "mutated")
     fresh = _ui_xlsx(ui_out, "fresh_final")
     assert capture.compare({"xlsx": mutated}, {"xlsx": fresh}, allow=[]) == []
