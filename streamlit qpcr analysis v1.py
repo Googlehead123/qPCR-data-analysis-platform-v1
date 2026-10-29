@@ -388,7 +388,7 @@ def _current_provenance():
 # write st.session_state directly.
 
 
-def parse_uploads(files) -> list:
+def parse_uploads(files) -> list[pd.DataFrame]:
     """Parse each uploaded CSV; the frames that hold rows, tagged with ``Source_File``.
 
     Reports every file's outcome (parsed, empty, failed) as it goes.
@@ -411,7 +411,7 @@ def parse_uploads(files) -> list:
     return all_data
 
 
-def ingest_frames(frames: list, state, *, file_hashes: list) -> None:
+def ingest_frames(frames: list[pd.DataFrame], state, *, file_hashes: list[str]) -> None:
     """Make ``frames`` (from ``parse_uploads``) the session's experiment.
 
     With nothing usable the previous data is cleared. Otherwise the frames are
@@ -420,9 +420,16 @@ def ingest_frames(frames: list, state, *, file_hashes: list) -> None:
     loaded upload after the reset and before auto-QC, so a file whose auto-QC
     fails is not re-parsed on every rerun.
 
-    ``state`` must be ``st.session_state``: the reset, style clearing and
-    auto-QC this runs write there, not to ``state``.
+    ``state`` must be ``st.session_state`` itself, and anything else raises
+    TypeError: the reset, style clearing and auto-QC this runs act on the
+    global session state, so another mapping would be left half-updated.
     """
+    if state is not st.session_state:
+        raise TypeError(
+            "ingest_frames needs st.session_state itself: the reset, style "
+            "clearing and auto-QC it runs act on the global session state, "
+            "so any other mapping would be left half-updated"
+        )
     if not frames:
         # Nothing usable arrived. This used to fall through leaving the
         # PREVIOUS file's data in session_state while the uploader showed
@@ -524,12 +531,12 @@ KNOWN_HK_GENES = [
 ]
 
 
-def detect_hk_genes(targets: list) -> list:
+def detect_hk_genes(targets: list[str]) -> list[str]:
     """The known housekeeping genes among ``targets``, in ``targets`` order."""
     return [g for g in targets if g.upper() in KNOWN_HK_GENES]
 
 
-def suggest_efficacy(targets: list) -> str | None:
+def suggest_efficacy(targets: list[str]) -> str | None:
     """The first efficacy category naming any of ``targets``; None if none does."""
     detected_genes = set(targets)
     # FIX-07: Case-insensitive efficacy gene matching
@@ -542,7 +549,7 @@ def suggest_efficacy(targets: list) -> str | None:
     return suggested
 
 
-def group_types_for(config: dict) -> list:
+def group_types_for(config: dict) -> list[str]:
     """The group types the Mapping tab offers for one efficacy category."""
     # Group type options
     group_types = ["Negative Control", "Positive Control", "Treatment"]
@@ -551,7 +558,7 @@ def group_types_for(config: dict) -> list:
     return group_types
 
 
-def suggest_group(name: str, config: dict, group_types: list) -> str:
+def suggest_group(name: str, config: dict, group_types: list[str]) -> str:
     """Default group for a sample named ``name`` under efficacy ``config``.
 
     Smart default group: match a new sample's name against the efficacy
@@ -596,7 +603,7 @@ def suggest_group(name: str, config: dict, group_types: list) -> str:
     return "Treatment"
 
 
-def excluded_samples_from_mapping(mapping: dict) -> set:
+def excluded_samples_from_mapping(mapping: dict) -> set[str]:
     """Samples whose include flag is off in the sample mapping."""
     return set(
         [
@@ -638,7 +645,7 @@ def build_analysis_params(state, *, now: datetime) -> dict:
     return analysis_params
 
 
-def build_export_extras(state):
+def build_export_extras(state) -> tuple[dict | None, pd.DataFrame | None, dict]:
     """Build qc_stats, replicate_stats, and excluded_wells for export.
 
     Returns ``(qc_stats | None, replicate_stats_df | None, excluded_wells)``.
@@ -667,7 +674,7 @@ def build_export_extras(state):
     return qc_stats, replicate_stats_df, excl
 
 
-def publication_image_format(img_format: str, img_width: int, img_height: int) -> tuple:
+def publication_image_format(img_format: str, img_width: int, img_height: int) -> tuple[str, str, int]:
     """``(fmt, mime, scale)`` for the Gene Images export's Format selection and size."""
     fmt = "png" if "PNG" in img_format else "svg" if "SVG" in img_format else "pdf"
     mime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[fmt]
@@ -679,7 +686,7 @@ def publication_image_format(img_format: str, img_width: int, img_height: int) -
     return fmt, mime, scale
 
 
-def publication_figure(fig: go.Figure, img_width: int, img_height: int) -> tuple:
+def publication_figure(fig: go.Figure, img_width: int, img_height: int) -> tuple[go.Figure, int]:
     """``(figure, height)`` to render one gene's publication image from.
 
     A copy of ``fig`` at ``img_width``, with black 14 pt text and a bottom margin
@@ -694,7 +701,7 @@ def publication_figure(fig: go.Figure, img_width: int, img_height: int) -> tuple
     return fig_copy, _adj_h
 
 
-def image_zip_entries(images: dict, fmt: str) -> dict:
+def image_zip_entries(images: dict, fmt: str) -> dict[str, bytes]:
     """``{member name: bytes}`` for the images zip, one member per gene.
 
     Display name, not the raw target: Excel and PPT honour the rename and only
@@ -719,7 +726,11 @@ def image_zip_entries(images: dict, fmt: str) -> dict:
 
 
 def gene_results_frame(gene: str, gene_df: pd.DataFrame) -> pd.DataFrame:
-    """The columns of ``gene``'s results the Analysis tab shows and serves as CSV."""
+    """The columns of ``gene``'s results the Analysis tab shows and serves as CSV.
+
+    ``gene`` is unused today; the interface contract reserves it so callers
+    stay stable if the table ever becomes gene-specific.
+    """
     # Display columns
     display_cols = [
         "Condition",
@@ -743,7 +754,7 @@ def gene_results_frame(gene: str, gene_df: pd.DataFrame) -> pd.DataFrame:
     return gene_df[[c for c in display_cols if c in gene_df.columns]]
 
 
-def gene_results_csv(gene: str, display_df: pd.DataFrame, *, now: datetime) -> tuple:
+def gene_results_csv(gene: str, display_df: pd.DataFrame, *, now: datetime) -> tuple[str, bytes]:
     """``(file name, payload)`` of ``gene``'s results download: UTF-8 with a BOM."""
     return (
         f"{gene}_results_{now.strftime('%Y%m%d')}.csv",
@@ -6801,7 +6812,9 @@ with tab5:
                 )
             if cached and cached.get("images"):
                 _cfmt = cached["fmt"]
-                _cmime = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}[_cfmt]
+                # Cached images are served only while _export_fp matches, and
+                # it includes the Format selection, so _cfmt is this run's fmt.
+                _cmime = mime
                 today = datetime.now().strftime("%Y%m%d")
                 _zip_entries = image_zip_entries(cached["images"], _cfmt)
                 st.download_button(
