@@ -75,14 +75,44 @@ def _clear_version_cache(spec):
     spec.app_version_string.cache_clear()
 
 
+def _fake_describe(monkeypatch, stdout):
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout, returncode=0))
+
+
+def test_app_version_string_with_a_known_commit(mock_streamlit, monkeypatch):
+    spec = _spec()
+    _fake_describe(monkeypatch, "abc1234-dirty\n")
+    _clear_version_cache(spec)
+    try:
+        assert spec.app_version_string() == "qPCR Analysis Suite 2026.10 (commit abc1234-dirty)"
+        # A tagged describe is carried through verbatim.
+        _clear_version_cache(spec)
+        _fake_describe(monkeypatch, "v1.0-3-gabc1234\n")
+        assert spec.app_version_string() == "qPCR Analysis Suite 2026.10 (commit v1.0-3-gabc1234)"
+        # An empty describe leaves no dangling commit part.
+        _clear_version_cache(spec)
+        _fake_describe(monkeypatch, "\n")
+        assert spec.app_version_string() == "qPCR Analysis Suite 2026.10"
+    finally:
+        _clear_version_cache(spec)
+
+
 def test_app_version_string_format(mock_streamlit):
+    """Whatever the real environment gives, the string has the documented shape."""
     import re
     spec = _spec()
     _clear_version_cache(spec)
-    assert re.match(
-        r"^qPCR Analysis Suite 2026\.10( \(commit [0-9a-g-]+(-dirty)?\))?$",
-        spec.app_version_string(),
-    )
+    try:
+        assert re.match(
+            r"^qPCR Analysis Suite 2026\.10( \(commit [\w.\-]+\))?$",
+            spec.app_version_string(),
+        )
+    finally:
+        _clear_version_cache(spec)
 
 
 def test_app_version_string_without_git(mock_streamlit, monkeypatch):

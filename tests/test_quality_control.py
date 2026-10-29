@@ -773,3 +773,34 @@ class TestHighCtCutoff:
                                 for t in node.targets)):
                     offenders.append(f"{path.name}:{node.lineno} CT_HIGH_WARNING")
         assert not offenders, offenders
+
+
+class TestHighCtCutoffAggregates:
+    """The 38.0 boundary at the two aggregate sites that feed the QC_Report counts."""
+
+    @staticmethod
+    def _frame(ct):
+        return pd.DataFrame({
+            "Well": ["A1", "A2", "A3"], "Sample": ["S"] * 3,
+            "Target": ["G"] * 3, "CT": [ct] * 3,
+        })
+
+    def test_triplicate_health_status_boundary(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+
+        at = QualityControl.get_triplicate_data(self._frame(38.0))
+        over = QualityControl.get_triplicate_data(self._frame(38.01))
+        assert at["Status"].tolist() == ["OK"] and at["Severity"].tolist() == ["ok"]
+        assert over["Status"].tolist() == ["High CT"]
+        assert over["Severity"].tolist() == ["warning"]
+
+    def test_summary_counts_boundary(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+
+        at = QualityControl.get_qc_summary_stats(self._frame(38.0))
+        over = QualityControl.get_qc_summary_stats(self._frame(38.01))
+        assert at["high_ct_count"] == 0 and over["high_ct_count"] == 3
+        assert (at["healthy_triplicates"], at["warning_triplicates"]) == (1, 0)
+        assert (over["healthy_triplicates"], over["warning_triplicates"]) == (0, 1)
+        assert at["error_triplicates"] == over["error_triplicates"] == 0
+        assert at["health_score"] == 100 and over["health_score"] == 0

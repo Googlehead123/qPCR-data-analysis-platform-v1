@@ -92,8 +92,8 @@ def test_stub_render_sizes_like_kaleido_and_keeps_format():
 
 
 def test_compare_allowlist_permits_only_matching_lines():
-    golden = {"xlsx": {"sheet:QC": "A1\tHigh CT Wells (>35)\nB1\t3\n"}}
-    actual = {"xlsx": {"sheet:QC": "A1\tHigh CT Wells (>38)\nB1\t4\n"}}
+    golden = {"xlsx": {"sheet:QC": "A1\tHigh CT Wells (>20)\nB1\t3\n"}}
+    actual = {"xlsx": {"sheet:QC": "A1\tHigh CT Wells (>21)\nB1\t4\n"}}
     allow = [{"part": "xlsx/sheet:QC", "line": r"^A1\tHigh CT Wells \(>\d+\)$"}]
     assert capture.compare(actual, golden, allow) == ["xlsx/sheet:QC: -B1\t3", "xlsx/sheet:QC: +B1\t4"]
     # The line regex alone is not enough: the part glob must match too.
@@ -372,3 +372,17 @@ def test_version_mask_is_one_deterministic_token():
     # A name without a version is not a version token.
     assert mask_text("qPCR Analysis Suite") == "qPCR Analysis Suite"
 
+
+def test_allowlist_side_restricts_direction():
+    golden = {"xlsx": {"p": "A1\tLow Expression\n"}}
+    actual = {"xlsx": {"p": "A1\tOK\n"}}
+    both = [{"part": "xlsx/p", "line": r"^A1\t(OK|Low Expression)$"}]
+    assert capture.compare(actual, golden, both) == []
+    directed = [
+        {"part": "xlsx/p", "side": "-", "line": r"^A1\tLow Expression$"},
+        {"part": "xlsx/p", "side": "+", "line": r"^A1\tOK$"},
+    ]
+    assert capture.compare(actual, golden, directed) == []
+    # The reverse flip (OK -> Low Expression) is not permitted.
+    assert capture.compare(golden, actual, directed) == [
+        "xlsx/p: -A1\tOK", "xlsx/p: +A1\tLow Expression"]
