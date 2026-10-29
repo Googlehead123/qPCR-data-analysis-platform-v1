@@ -24,10 +24,18 @@ def mock_streamlit():
 
     AppTest needs the REAL streamlit module and fresh app/package modules, so we
     evict the mock and any mock-tainted caches before each test here.
+
+    ``streamlit_sortables`` goes too: it binds its component to whichever
+    ``streamlit`` was loaded when it was first imported. Kept across tests it
+    still points at the copy evicted here. Streamlit 1.53 tolerated that, but
+    1.66 reads each run's state from a per-copy context variable that the
+    stale copy never initialises, so ``sort_items`` raises
+    ``FragmentThreadState not initialized`` on the Mapping tab.
     """
     for name in [
         k for k in list(sys.modules)
         if k == "streamlit" or k.startswith("streamlit.")
+        or k == "streamlit_sortables" or k.startswith("streamlit_sortables.")
         or k.startswith("qpcr") or k == "streamlit qpcr analysis v1"
     ]:
         del sys.modules[name]
