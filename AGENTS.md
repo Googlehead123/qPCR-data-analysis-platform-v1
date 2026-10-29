@@ -63,7 +63,7 @@ No linter or formatter is configured (no config file, nothing in CI).
                                  # constants, export_utils, utils, auto/
   tests/                         # 22 modules
   requirements.in                # Direct dependencies -- EDIT THIS ONE
-  requirements.txt               # GENERATED lock (all 52 pins); Cloud reads it
+  requirements.txt               # GENERATED lock (all 51 pins); Cloud reads it
   CLAUDE.md                      # Authoritative project instructions
   AGENTS.md                      # This file
 ```
