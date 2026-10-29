@@ -89,9 +89,16 @@ def load_golden(src: Path) -> dict[str, dict[str, str]]:
 # ---- comparison -------------------------------------------------------------------
 
 
-def _allowed(name: str, line: str, allow: list[dict]) -> bool:
+def _allowed(name: str, line: str, allow: list[dict], side: str = "") -> bool:
+    """``side`` is "-" for a line only the golden has, "+" for one only the run has.
+
+    An entry with a ``side`` key applies to that side only; without one it
+    applies to both.
+    """
     return any(
-        fnmatch.fnmatchcase(name, entry["part"]) and re.search(entry["line"], line)
+        fnmatch.fnmatchcase(name, entry["part"])
+        and entry.get("side", side) == side
+        and re.search(entry["line"], line)
         for entry in allow
     )
 
@@ -101,7 +108,7 @@ def compare(actual, golden, allow: list[dict]) -> list[str]:
 
     An entry ``{"part": "<glob>", "line": "<regex>"}`` permits a removed or added
     line only when the glob matches ``<key>/<part>`` and the regex matches the
-    line. A part that appears or disappears is always a violation.
+    line (and, if the entry has ``"side": "-"|"+"``, only on that side). A part that appears or disappears is always a violation.
     """
     violations = []
     for key in sorted(set(actual) | set(golden)):
@@ -122,10 +129,10 @@ def compare(actual, golden, allow: list[dict]) -> list[str]:
                 if tag == "equal":
                     continue
                 for line in g_lines[i1:i2]:
-                    if not _allowed(name, line, allow):
+                    if not _allowed(name, line, allow, "-"):
                         violations.append(f"{name}: -{line}")
                 for line in a_lines[j1:j2]:
-                    if not _allowed(name, line, allow):
+                    if not _allowed(name, line, allow, "+"):
                         violations.append(f"{name}: +{line}")
     return violations
 
@@ -340,8 +347,11 @@ def _load_allow(files: list[str]) -> list[dict]:
     for f in files:
         entries = json.loads(Path(f).read_text(encoding="utf-8"))
         for e in entries:
-            if not {"part", "line"} <= set(e) <= {"part", "line", "note"}:
-                raise ValueError(f"{f}: allowlist entries are {{part, line[, note]}}: {e}")
+            if not {"part", "line"} <= set(e) <= {"part", "line", "side", "note"}:
+                raise ValueError(
+                    f"{f}: allowlist entries are {{part, line[, side][, note]}}: {e}")
+            if e.get("side", "-") not in ("-", "+"):
+                raise ValueError(f"{f}: side must be '-' or '+': {e}")
             re.compile(e["line"])
         allow.extend(entries)
     return allow

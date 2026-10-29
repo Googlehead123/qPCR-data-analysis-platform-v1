@@ -712,3 +712,95 @@ class TestAutoSelectReplicates:
         excl, audit = QualityControl.auto_select_replicates(df, sd_threshold=0.3)
         assert excl == {("G1", "S1"): {"A1"}}
         assert set(audit[0]["kept_wells"]) == {"A2", "A3"}
+
+
+class TestHighCtCutoff:
+    """The high-Ct flag cut-off is 38, defined once, strict (Ct > 38)."""
+
+    def test_ct_high_default_is_38(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+
+        assert QualityControl.CT_HIGH_THRESHOLD == 38.0
+        assert QualityControl.resolve_thresholds()["ct_high"] == 38.0
+
+    def test_ct_exactly_38_is_not_flagged(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+
+        def frame(ct):
+            return pd.DataFrame({
+                "Well": ["A1", "A2", "A3"], "Sample": ["S"] * 3,
+                "Target": ["G"] * 3, "CT": [ct] * 3,
+            })
+
+        # Triplicate-mean level.
+        at = QualityControl.get_replicate_stats(frame(38.0))
+        over = QualityControl.get_replicate_stats(frame(38.01))
+        assert at["Status"].tolist() == ["OK"]
+        assert over["Status"].tolist() == ["Low Expression"]
+
+        # Well level.
+        at_w = QualityControl.get_wells_for_triplicate(frame(38.0), "S", "G")
+        over_w = QualityControl.get_wells_for_triplicate(frame(38.01), "S", "G")
+        assert not at_w["Well_Status"].str.contains("High CT").any()
+        assert over_w["Well_Status"].str.contains("High CT").all()
+
+    def test_no_second_high_ct_definition(self):
+        """No literal 35 comparison and no CT_HIGH_WARNING in the app or the package."""
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        files = [root / "streamlit qpcr analysis v1.py",
+                 *sorted((root / "qpcr").rglob("*.py"))]
+        assert len(files) > 5
+        offenders = []
+        for path in files:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Compare):
+                    for operand in [node.left, *node.comparators]:
+                        if (isinstance(operand, ast.Constant)
+                                and isinstance(operand.value, (int, float))
+                                and not isinstance(operand.value, bool)
+                                and operand.value == 35):
+                            offenders.append(f"{path.name}:{node.lineno} compares to 35")
+                name = (node.id if isinstance(node, ast.Name)
+                        else node.attr if isinstance(node, ast.Attribute) else None)
+                if name == "CT_HIGH_WARNING":
+                    offenders.append(f"{path.name}:{node.lineno} CT_HIGH_WARNING")
+                if (isinstance(node, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == "CT_HIGH_WARNING"
+                                for t in node.targets)):
+                    offenders.append(f"{path.name}:{node.lineno} CT_HIGH_WARNING")
+        assert not offenders, offenders
+
+
+class TestHighCtCutoffAggregates:
+    """The 38.0 boundary at the two aggregate sites that feed the QC_Report counts."""
+
+    @staticmethod
+    def _frame(ct):
+        return pd.DataFrame({
+            "Well": ["A1", "A2", "A3"], "Sample": ["S"] * 3,
+            "Target": ["G"] * 3, "CT": [ct] * 3,
+        })
+
+    def test_triplicate_health_status_boundary(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+
+        at = QualityControl.get_triplicate_data(self._frame(38.0))
+        over = QualityControl.get_triplicate_data(self._frame(38.01))
+        assert at["Status"].tolist() == ["OK"] and at["Severity"].tolist() == ["ok"]
+        assert over["Status"].tolist() == ["High CT"]
+        assert over["Severity"].tolist() == ["warning"]
+
+    def test_summary_counts_boundary(self, mock_streamlit):
+        from qpcr.quality_control import QualityControl
+
+        at = QualityControl.get_qc_summary_stats(self._frame(38.0))
+        over = QualityControl.get_qc_summary_stats(self._frame(38.01))
+        assert at["high_ct_count"] == 0 and over["high_ct_count"] == 3
+        assert (at["healthy_triplicates"], at["warning_triplicates"]) == (1, 0)
+        assert (over["healthy_triplicates"], over["warning_triplicates"]) == (0, 1)
+        assert at["error_triplicates"] == over["error_triplicates"] == 0
+        assert at["health_score"] == 100 and over["health_score"] == 0

@@ -12,7 +12,7 @@ A6	CT SD
 B6	3.46
 A7	CT Range
 B7	17.4-26.1
-A8	High CT Wells (>35)
+A8	High CT Wells (>38)
 B8	0
 A9	Low CT Wells (<10)
 B9	0

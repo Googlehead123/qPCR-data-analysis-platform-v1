@@ -9,7 +9,7 @@ A8	Reference gene:       ACTIN
 A9	Reference condition:  Non-treated
 A10	Comparison(s):        Non-treated, Active A, Active B
 A11	Statistical test:     Student t-test (two-tailed) on per-well fold change, n = technical replicate wells pooled per condition
-A12	Genes analysed:       3
+A12	Genes analysed:       2
 A13	Samples:              6
 A14	Excluded samples:     S6
 A15	Excluded wells:       2
@@ -27,7 +27,7 @@ A29	Comparison condition(s): Non-treated, Active A, Active B
 A30	Statistical test: Student t-test (two-tailed) on per-well fold change, n = technical replicate wells pooled per condition
 A31	Replicate unit for the test: technical wells (pooled across samples per condition)
 A32	Multiple-testing correction: none applied to the reported markers — significance shown on charts, slides and summary sheets is the uncorrected p-value. Benjamini-Hochberg q-values are computed and included per gene in the Excel export (p_value_fdr / significance_fdr).
-A33	Genes analysed: 3; distinct samples on the plate: 6
+A33	Genes analysed: 2; distinct samples on the plate: 6
 A34	Excluded wells (QC): 2 (itemised in the provenance record)
 A35	Automatic replicate trim: automatic best-2-of-3 replicate QC at SD <= 0.30: 1 group(s) trimmed, 0 still above threshold, 1 well(s) dropped. Trimming reduces replicate variance, so p-values for those groups are anti-conservative (false-positive rate above the nominal 5%).
 A37	## To complete (assay / wet-lab details not captured by this tool)

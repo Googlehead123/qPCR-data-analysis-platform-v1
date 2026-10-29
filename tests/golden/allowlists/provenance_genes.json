@@ -1,0 +1,4 @@
+[
+  {"part": "xlsx/sheet:Provenance", "line": "^A\\d+\\tGenes analysed: +\\d+$", "note": "Provenance block gene count"},
+  {"part": "xlsx/sheet:Provenance", "line": "^A\\d+\\tGenes analysed: \\d+; distinct samples on the plate: \\d+$", "note": "MIQE block gene count"}
+]

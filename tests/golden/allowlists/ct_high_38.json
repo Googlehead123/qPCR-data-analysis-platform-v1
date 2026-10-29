@@ -1,0 +1,13 @@
+[
+  {"part": "xlsx/sheet:QC_Report", "side": "-", "line": "^A8\\tHigh CT Wells \\(>35\\)$", "note": "High CT Wells label, old cut-off"},
+  {"part": "xlsx/sheet:QC_Report", "side": "+", "line": "^A8\\tHigh CT Wells \\(>38\\)$", "note": "High CT Wells label, new cut-off"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B8\\t\\d+$", "note": "High CT Wells value (it can only fall)"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B11\\t\\d+$", "note": "Healthy Triplicates"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B12\\t\\d+$", "note": "Warning Triplicates"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B13\\t\\d+$", "note": "Error Triplicates"},
+  {"part": "xlsx/sheet:QC_Report", "line": "^B16\\t[\\d.]+$", "note": "Health Score (%)"},
+  {"part": "xlsx/sheet:QC_Report", "side": "-", "line": "^G\\d+\\tLow Expression$", "note": "replicate Status: only Low Expression can leave..."},
+  {"part": "xlsx/sheet:QC_Report", "side": "+", "line": "^G\\d+\\tOK$", "note": "...and only for OK (Ct between 35 and 38)"},
+  {"part": "messages/log", "side": "-", "line": "^warning: .* \\d+ CT values > 35 detected \\(possible low expression or failed reactions\\)$", "note": "run_full_analysis high-Ct warning at the old cut-off, removed or recounted"},
+  {"part": "messages/log", "side": "+", "line": "^warning: .* \\d+ CT values > 38 detected \\(possible low expression or failed reactions\\)$", "note": "the same warning at the new cut-off"}
+]

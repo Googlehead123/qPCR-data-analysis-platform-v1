@@ -21,7 +21,7 @@ Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/derma
 ## How to Run
 ```bash
 streamlit run "streamlit qpcr analysis v1.py"    # http://localhost:8501
-pytest tests/                                      # 461 tests
+pytest tests/                                      # 534 tests
 ```
 
 ## Key Files
@@ -39,7 +39,7 @@ pytest tests/                                      # 461 tests
   `auto/` (screening, test advice, MIQE).
   **Do not re-declare any of these in the monolith** — that dual-copy hazard is
   documented in `tasks/lessons.md` and has bitten this project repeatedly.
-- `tests/` — 24 modules, 461 tests. Note `conftest.py` replaces `streamlit` with
+- `tests/` — 28 modules, 534 tests. Note `conftest.py` replaces `streamlit` with
   a MagicMock, so widget behaviour is invisible to most of the suite; the tests
   that need real Streamlit drive the app through `AppTest` **in a subprocess**
   (see `tests/test_gene_editor_state.py`).
@@ -71,6 +71,13 @@ Each entry carries `genes` (with spelling variants), `cell`, `treatment_time`,
 Repository: Googlehead123/qPCR-data-analysis-platform-v1
 
 ## Notes
+- **High-Ct flag cut-off is 38 (Min, 2026-10-29).** Strict (`Ct > 38`), flag-only,
+  defined once as `QualityControl.CT_HIGH_THRESHOLD`; the app reads it through
+  `qc_thresholds()["ct_high"]`. The low-Ct cut-off stays 10.
+- **Version string:** `qPCR Analysis Suite 2026.10` (`qpcr.constants.APP_NAME` /
+  `APP_VERSION`), plus ` (commit <git describe>)` at runtime via
+  `app_version_string()`. The provenance "Genes analysed" count excludes the
+  reference gene (`provenance_gene_count`).
 - **Architecture:** partially modularized. The computational layer lives in
   `qpcr/`; the app file keeps the UI plus the report/export writers. Remaining
   refactor target is those writers.

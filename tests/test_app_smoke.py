@@ -178,3 +178,36 @@ def test_overview_measures_from_the_reference_mean_not_from_one():
     metrics = {m.label: m.value for m in at.metric}
     assert metrics.get("Median % of benchmark") == "50%"
     assert metrics.get("Markers as expected") == "1/1"
+
+
+def _validation_messages(ct_target):
+    """Warnings and successes the Upload tab's Data Validation block shows."""
+    from streamlit.testing.v1 import AppTest
+
+    rows = []
+    for sample in ("Non-treated", "Active"):
+        rows += _triplicate(sample, "ACTIN", 18.0)
+        rows += _triplicate(sample, "COL1A1", ct_target)
+    at = AppTest.from_file(SCRIPT, default_timeout=90)
+    at.session_state["data"] = pd.DataFrame(rows)
+    at.session_state["hk_gene"] = "ACTIN"
+    at.session_state["selected_efficacy"] = "광노화"
+    at.run()
+    assert not at.exception, at.exception
+    return [w.value for w in at.warning], [s.value for s in at.success]
+
+
+def test_upload_validation_high_ct_uses_the_38_cutoff():
+    """Ct 35-38 is no longer a validation warning; Ct above 38 is, naming 38.
+
+    The block is inline tab code, so the smallest reliable check is the real
+    script under AppTest (the golden harness never executes it).
+    """
+    warnings, successes = _validation_messages(37.0)
+    assert not [w for w in warnings if "High CT Values" in w], warnings
+    assert any("Data validation passed" in s for s in successes), successes
+
+    warnings, successes = _validation_messages(38.5)
+    high = [w for w in warnings if "High CT Values" in w]
+    assert len(high) == 1 and "6 wells" in high[0] and "CT > 38 " in high[0], warnings
+    assert not any("Data validation passed" in s for s in successes)
