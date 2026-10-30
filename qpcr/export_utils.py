@@ -296,8 +296,13 @@ def _render(fig, kwargs: dict) -> bytes:
     ignored. Only the default HTTP headers are dropped, for remote fetches the
     app never makes, so the output is unchanged. The filter is scoped to this
     call and to that one message and category.
+
+    ``catch_warnings`` swaps process-global state and is not thread-safe, so
+    the whole filtered render holds ``_export_lock`` (non-reentrant: no caller
+    holds it while rendering; the setup blocks release it first). Renders from
+    concurrent sessions are therefore serialised.
     """
-    with warnings.catch_warnings():
+    with _export_lock, warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore", message="The kopts argument is ignored if using a server",
             category=UserWarning)
