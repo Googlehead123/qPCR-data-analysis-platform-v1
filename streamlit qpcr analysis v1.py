@@ -1379,10 +1379,25 @@ def _clear_non_gene_widget_state() -> None:
             st.session_state.pop(key, None)
 
 
+_UNSAFE_STEM_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+_WINDOWS_RESERVED_STEM = re.compile(r"(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?", re.I)
+
+
+def _clean_stem(name: str) -> str:
+    """Path-safe on Windows too: no reserved characters or control characters,
+    and a reserved device name (CON, NUL, COM1, "CON.txt"...) gets a "_" prefix
+    because such a member cannot be extracted there. Unaffected names pass
+    through unchanged."""
+    name = _UNSAFE_STEM_CHARS.sub("_", name).strip()
+    if _WINDOWS_RESERVED_STEM.fullmatch(name):
+        name = "_" + name
+    return name
+
+
 def _safe_image_stem(gene: str) -> str:
     """Filename stem for an exported gene image: display name, path-safe."""
     name = str(st.session_state.get("gene_display_names", {}).get(gene, gene))
-    return re.sub(r'[\\/:*?"<>|\x00]+', "_", name).strip() or str(gene)
+    return _clean_stem(name) or _clean_stem(str(gene)) or "image"
 
 
 def _push_qc_history() -> None:
