@@ -1379,7 +1379,7 @@ def _clear_non_gene_widget_state() -> None:
 def _safe_image_stem(gene: str) -> str:
     """Filename stem for an exported gene image: display name, path-safe."""
     name = str(st.session_state.get("gene_display_names", {}).get(gene, gene))
-    return re.sub(r'[\\/:*?"<>|]+', "_", name).strip() or str(gene)
+    return re.sub(r'[\\/:*?"<>|\x00]+', "_", name).strip() or str(gene)
 
 
 def _push_qc_history() -> None:

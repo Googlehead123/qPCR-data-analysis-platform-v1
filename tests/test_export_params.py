@@ -211,3 +211,16 @@ def test_image_zip_entries_names_are_unique_when_a_suffix_collides(
     # a stem's first occurrence keeps its plain name
     for stem in expected_plain:
         assert f"{stem}.png" in entries
+
+
+def test_image_zip_members_survive_a_nul_in_the_gene_name(mock_streamlit):
+    """Python's zip writer truncates a member name at NUL, so two stems that
+    differed only after a NUL became duplicate members."""
+    import io
+    import zipfile
+
+    app = _app()
+    images = {"A\x00x": b"1", "A\x00y": b"2"}
+    blob = app.build_zip(app.image_zip_entries(images, "png"))
+    names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
+    assert len(names) == len(set(names)) == len(images)
