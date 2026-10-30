@@ -318,3 +318,43 @@ def test_real_export_succeeds_if_browser_available():
     except RuntimeError as e:
         pytest.skip(f"browser present but could not launch headless: {e}")
     assert isinstance(out, bytes) and out[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# ---- kaleido's no-op warning ---------------------------------------------
+
+def test_render_emits_no_kopts_warning():
+    """Plotly passes its default HTTP headers as ``kopts`` on every render and
+    Kaleido, running as a server, warns they are ignored. The warning has no
+    effect on output (the app fetches nothing remote) and was noise in every
+    run, so the render path must swallow exactly that one."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = export_utils.export_figure_to_bytes(_fig(), "png", 1, 200, 200)
+    assert out[:8] == b"\x89PNG\r\n\x1a\n"
+    assert not [w for w in caught if "kopts" in str(w.message)], \
+        [str(w.message) for w in caught]
+
+
+def test_kopts_filter_does_not_hide_other_warnings():
+    """The suppression is scoped: an unrelated warning raised inside the render
+    path must still reach the caller."""
+    import warnings
+
+    fig = _fig()
+
+    def noisy(**kwargs):
+        warnings.warn("something else", UserWarning)
+        warnings.warn("The kopts argument is ignored if using a server.",
+                      RuntimeWarning)
+        return b"x"
+
+    fig.to_image = noisy
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        export_utils.export_figure_to_bytes(fig, "png", 1)
+    msgs = [str(w.message) for w in caught]
+    assert "something else" in msgs
+    # same text, different category: not the warning we target
+    assert any("kopts" in m for m in msgs)
