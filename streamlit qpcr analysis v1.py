@@ -759,13 +759,19 @@ def image_zip_entries(images: dict, fmt: str) -> dict[str, bytes]:
     button still worked. _sanitize_sheet_name already takes a used-names set
     for exactly this reason on the Excel side.
     """
+    # Each name is checked against the FINAL names already allocated, not just
+    # earlier stems: stems A, A, A_2 gave A, A_2, A_2 and the last member
+    # overwrote the second. Non-colliding names are unchanged.
     _zip_entries = {}
     _used_stems: dict = {}
     for _g, _b in images.items():
         _stem = _safe_image_stem(_g)
         _n = _used_stems.get(_stem, 0) + 1
-        _used_stems[_stem] = _n
         _name = _stem if _n == 1 else f"{_stem}_{_n}"
+        while f"{_name}.{fmt}" in _zip_entries:
+            _n += 1
+            _name = f"{_stem}_{_n}"
+        _used_stems[_stem] = _n
         _zip_entries[f"{_name}.{fmt}"] = _b
     return _zip_entries
 

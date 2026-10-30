@@ -191,3 +191,23 @@ def test_image_zip_entries_keep_colliding_names(mock_streamlit):
     assert "/" not in stem
     assert entries == {f"{stem}.png": b"1", f"{stem}_2.png": b"2", "C.png": b"3"}
     assert app.image_zip_entries({}, "svg") == {}
+
+
+@pytest.mark.parametrize("keys, expected_plain", [
+    (["A", "A ", "A_2"], ["A", "A_2"]),
+    (["A", "A ", "A  ", "A_2", "A_3"], ["A", "A_2", "A_3"]),
+    (["A_2", "A", "A "], ["A_2", "A"]),
+])
+def test_image_zip_entries_names_are_unique_when_a_suffix_collides(
+        mock_streamlit, keys, expected_plain):
+    """A stem that already looks like ``X_2`` must not reuse a name allocated
+    to a duplicate of ``X``: the later member overwrote the earlier one.
+    Keys differ only by trailing spaces, which the stem strips."""
+    app = _app()
+    images = {k: str(i).encode() for i, k in enumerate(keys)}
+    entries = app.image_zip_entries(images, "png")
+    assert len(entries) == len(images)
+    assert sorted(entries.values()) == sorted(images.values())
+    # a stem's first occurrence keeps its plain name
+    for stem in expected_plain:
+        assert f"{stem}.png" in entries
