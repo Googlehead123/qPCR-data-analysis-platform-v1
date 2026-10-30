@@ -30,6 +30,7 @@ import io
 import os
 import shutil
 import threading
+import warnings
 import zipfile
 from collections import OrderedDict
 
@@ -287,6 +288,27 @@ def _stop_kaleido_server_quietly(stop) -> None:
         pass
 
 
+def _render(fig, kwargs: dict) -> bytes:
+    """``fig.to_image`` with Kaleido's no-op ``kopts`` warning filtered out.
+
+    Plotly builds ``kopts`` only from ``pio.defaults.plotlyjs``, ``mathjax``
+    and ``headers``; with Kaleido running as a server it warns that they are
+    ignored. Only the default HTTP headers are dropped, for remote fetches the
+    app never makes, so the output is unchanged. The filter is scoped to this
+    call and to that one message and category.
+
+    ``catch_warnings`` swaps process-global state and is not thread-safe, so
+    the whole filtered render holds ``_export_lock`` (non-reentrant: no caller
+    holds it while rendering; the setup blocks release it first). Renders from
+    concurrent sessions are therefore serialised.
+    """
+    with _export_lock, warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="The kopts argument is ignored if using a server",
+            category=UserWarning)
+        return fig.to_image(**kwargs)
+
+
 def export_figure_to_bytes(fig, fmt: str = "png", scale: int = 2,
                            width: int | None = None, height: int | None = None) -> bytes:
     """Render a Plotly figure to image bytes, robust across environments.
@@ -322,7 +344,7 @@ def export_figure_to_bytes(fig, fmt: str = "png", scale: int = 2,
         _ensure_kaleido_server()
 
     try:
-        out = fig.to_image(**kwargs)
+        out = _render(fig, kwargs)
         _render_cache_put(cache_key, out)
         return out
     except Exception as first_err:  # noqa: BLE001 — need broad catch to classify
@@ -333,7 +355,7 @@ def export_figure_to_bytes(fig, fmt: str = "png", scale: int = 2,
             with _export_lock:
                 chrome = _download_fallback_chrome()
                 os.environ["BROWSER_PATH"] = chrome
-            out = fig.to_image(**kwargs)
+            out = _render(fig, kwargs)
             _render_cache_put(cache_key, out)
             return out
         except Exception as second_err:  # noqa: BLE001

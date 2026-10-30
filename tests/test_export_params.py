@@ -191,3 +191,82 @@ def test_image_zip_entries_keep_colliding_names(mock_streamlit):
     assert "/" not in stem
     assert entries == {f"{stem}.png": b"1", f"{stem}_2.png": b"2", "C.png": b"3"}
     assert app.image_zip_entries({}, "svg") == {}
+
+
+@pytest.mark.parametrize("keys, expected_plain", [
+    (["A", "A ", "A_2"], ["A", "A_2"]),
+    (["A", "A ", "A  ", "A_2", "A_3"], ["A", "A_2", "A_3"]),
+    (["A_2", "A", "A "], ["A_2", "A"]),
+])
+def test_image_zip_entries_names_are_unique_when_a_suffix_collides(
+        mock_streamlit, keys, expected_plain):
+    """A stem that already looks like ``X_2`` must not reuse a name allocated
+    to a duplicate of ``X``: the later member overwrote the earlier one.
+    Keys differ only by trailing spaces, which the stem strips."""
+    app = _app()
+    images = {k: str(i).encode() for i, k in enumerate(keys)}
+    entries = app.image_zip_entries(images, "png")
+    assert len(entries) == len(images)
+    assert sorted(entries.values()) == sorted(images.values())
+    # a stem's first occurrence keeps its plain name
+    for stem in expected_plain:
+        assert f"{stem}.png" in entries
+
+
+def test_image_zip_members_survive_a_nul_in_the_gene_name(mock_streamlit):
+    """Python's zip writer truncates a member name at NUL, so two stems that
+    differed only after a NUL became duplicate members."""
+    import io
+    import zipfile
+
+    app = _app()
+    images = {"A\x00x": b"1", "A\x00y": b"2"}
+    blob = app.build_zip(app.image_zip_entries(images, "png"))
+    names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
+    assert len(names) == len(set(names)) == len(images)
+
+
+@pytest.mark.parametrize("keys", [["A", "a"], ["A", "a", "A_2"], ["a", "A", "a_2", "A_2"]])
+def test_image_zip_names_are_unique_case_insensitively(mock_streamlit, keys):
+    """A.png and a.png overwrite each other when extracted on Windows/macOS."""
+    app = _app()
+    images = {k: str(i).encode() for i, k in enumerate(keys)}
+    entries = app.image_zip_entries(images, "png")
+    assert len(entries) == len(images)
+    assert len({n.casefold() for n in entries}) == len(images)
+    # the first occurrence keeps its name unchanged
+    assert f"{keys[0]}.png" in entries
+
+
+def test_image_zip_names_unique_case_insensitively_stay_unchanged(mock_streamlit):
+    app = _app()
+    entries = app.image_zip_entries({"Abc": b"1", "abd": b"2", "ABE": b"3"}, "png")
+    assert list(entries) == ["Abc.png", "abd.png", "ABE.png"]
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("CON", "_CON"), ("con", "_con"), ("Nul", "_Nul"), ("COM1", "_COM1"),
+    ("lpt9", "_lpt9"), ("CON.txt", "_CON.txt"), ("AUX.x.y", "_AUX.x.y"),
+    ("A\x01B", "A_B"), ("A\x1fB", "A_B"), ("A\tB", "A_B"),
+    # unaffected: byte-identical
+    ("CONSOLE", "CONSOLE"), ("COM10", "COM10"), ("COM0", "COM0"),
+    ("ACTB", "ACTB"), ("IL-1B", "IL-1B"), ("col1a1", "col1a1"),
+])
+def test_safe_image_stem_windows_safe(mock_streamlit, name, expected):
+    app = _app()
+    assert app._safe_image_stem(name) == expected
+
+
+def test_safe_image_stem_fallback_is_sanitised(mock_streamlit):
+    """A blank display name falls back to the gene key, which must be cleaned
+    too: it used to come back raw (with "/" or NUL)."""
+    app = _app()
+    app.st.session_state["gene_display_names"] = {"A/B\x00": "   ", "  ": " "}
+    assert app._safe_image_stem("A/B\x00") == "A_B_"
+    assert app._safe_image_stem("  ") == "image"
+
+
+def test_image_zip_exact_names_for_one_collision_ordering(mock_streamlit):
+    app = _app()
+    entries = app.image_zip_entries({"A_2": b"0", "A": b"1", "A ": b"2"}, "png")
+    assert list(entries) == ["A_2.png", "A.png", "A_3.png"]

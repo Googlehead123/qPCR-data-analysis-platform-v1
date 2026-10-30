@@ -318,3 +318,59 @@ def test_real_export_succeeds_if_browser_available():
     except RuntimeError as e:
         pytest.skip(f"browser present but could not launch headless: {e}")
     assert isinstance(out, bytes) and out[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# ---- kaleido's no-op warning ---------------------------------------------
+
+_KOPTS = "The kopts argument is ignored if using a server."
+
+
+def test_render_filters_only_the_exact_kopts_user_warning():
+    """Deterministic (no Chrome): the exact UserWarning is dropped; a
+    RuntimeWarning with the same text and an unrelated UserWarning survive."""
+    import warnings
+
+    class _Fig:
+        def to_image(self, **kwargs):
+            warnings.warn(_KOPTS, UserWarning)
+            warnings.warn(_KOPTS, RuntimeWarning)
+            warnings.warn("something else", UserWarning)
+            return b"x"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert export_utils._render(_Fig(), {}) == b"x"
+    got = [(w.category, str(w.message)) for w in caught]
+    assert got == [(RuntimeWarning, _KOPTS), (UserWarning, "something else")]
+
+
+def test_render_holds_the_export_lock_while_filtering():
+    """catch_warnings swaps process-global state; concurrent renders must not
+    interleave their save/restore."""
+    seen = {}
+
+    class _Fig:
+        def to_image(self, **kwargs):
+            seen["locked"] = export_utils._export_lock.locked()
+            return b"x"
+
+    export_utils._render(_Fig(), {})
+    assert seen == {"locked": True}
+    assert not export_utils._export_lock.locked()
+
+
+def test_real_render_emits_no_kopts_warning():
+    """With a real Kaleido render, no kopts warning reaches the caller."""
+    import warnings
+
+    if export_utils._find_system_browser() is None:
+        pytest.skip("no system browser available")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            out = export_utils.export_figure_to_bytes(_fig(), "png", 1, 200, 200)
+        except RuntimeError as e:
+            pytest.skip(f"browser present but could not launch headless: {e}")
+    assert out[:8] == b"\x89PNG\r\n\x1a\n"
+    assert not [w for w in caught if "kopts" in str(w.message)], \
+        [str(w.message) for w in caught]

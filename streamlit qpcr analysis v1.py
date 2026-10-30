@@ -759,13 +759,22 @@ def image_zip_entries(images: dict, fmt: str) -> dict[str, bytes]:
     button still worked. _sanitize_sheet_name already takes a used-names set
     for exactly this reason on the Excel side.
     """
+    # Each name is checked against the FINAL names already allocated, not just
+    # earlier stems: stems A, A, A_2 gave A, A_2, A_2 and the last member
+    # overwrote the second. Non-colliding names are unchanged.
     _zip_entries = {}
     _used_stems: dict = {}
+    _folded: set = set()
     for _g, _b in images.items():
         _stem = _safe_image_stem(_g)
         _n = _used_stems.get(_stem, 0) + 1
-        _used_stems[_stem] = _n
         _name = _stem if _n == 1 else f"{_stem}_{_n}"
+        # casefold: A.png and a.png overwrite each other on Windows/macOS.
+        while f"{_name}.{fmt}".casefold() in _folded:
+            _n += 1
+            _name = f"{_stem}_{_n}"
+        _used_stems[_stem] = _n
+        _folded.add(f"{_name}.{fmt}".casefold())
         _zip_entries[f"{_name}.{fmt}"] = _b
     return _zip_entries
 
@@ -1370,10 +1379,25 @@ def _clear_non_gene_widget_state() -> None:
             st.session_state.pop(key, None)
 
 
+_UNSAFE_STEM_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+_WINDOWS_RESERVED_STEM = re.compile(r"(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?", re.I)
+
+
+def _clean_stem(name: str) -> str:
+    """Path-safe on Windows too: no reserved characters or control characters,
+    and a reserved device name (CON, NUL, COM1, "CON.txt"...) gets a "_" prefix
+    because such a member cannot be extracted there. Unaffected names pass
+    through unchanged."""
+    name = _UNSAFE_STEM_CHARS.sub("_", name).strip()
+    if _WINDOWS_RESERVED_STEM.fullmatch(name):
+        name = "_" + name
+    return name
+
+
 def _safe_image_stem(gene: str) -> str:
     """Filename stem for an exported gene image: display name, path-safe."""
     name = str(st.session_state.get("gene_display_names", {}).get(gene, gene))
-    return re.sub(r'[\\/:*?"<>|]+', "_", name).strip() or str(gene)
+    return _clean_stem(name) or _clean_stem(str(gene)) or "image"
 
 
 def _push_qc_history() -> None:
