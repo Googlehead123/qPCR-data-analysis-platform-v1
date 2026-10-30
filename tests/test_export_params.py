@@ -224,3 +224,21 @@ def test_image_zip_members_survive_a_nul_in_the_gene_name(mock_streamlit):
     blob = app.build_zip(app.image_zip_entries(images, "png"))
     names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
     assert len(names) == len(set(names)) == len(images)
+
+
+@pytest.mark.parametrize("keys", [["A", "a"], ["A", "a", "A_2"], ["a", "A", "a_2", "A_2"]])
+def test_image_zip_names_are_unique_case_insensitively(mock_streamlit, keys):
+    """A.png and a.png overwrite each other when extracted on Windows/macOS."""
+    app = _app()
+    images = {k: str(i).encode() for i, k in enumerate(keys)}
+    entries = app.image_zip_entries(images, "png")
+    assert len(entries) == len(images)
+    assert len({n.casefold() for n in entries}) == len(images)
+    # the first occurrence keeps its name unchanged
+    assert f"{keys[0]}.png" in entries
+
+
+def test_image_zip_names_unique_case_insensitively_stay_unchanged(mock_streamlit):
+    app = _app()
+    entries = app.image_zip_entries({"Abc": b"1", "abd": b"2", "ABE": b"3"}, "png")
+    assert list(entries) == ["Abc.png", "abd.png", "ABE.png"]

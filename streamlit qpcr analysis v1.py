@@ -764,14 +764,17 @@ def image_zip_entries(images: dict, fmt: str) -> dict[str, bytes]:
     # overwrote the second. Non-colliding names are unchanged.
     _zip_entries = {}
     _used_stems: dict = {}
+    _folded: set = set()
     for _g, _b in images.items():
         _stem = _safe_image_stem(_g)
         _n = _used_stems.get(_stem, 0) + 1
         _name = _stem if _n == 1 else f"{_stem}_{_n}"
-        while f"{_name}.{fmt}" in _zip_entries:
+        # casefold: A.png and a.png overwrite each other on Windows/macOS.
+        while f"{_name}.{fmt}".casefold() in _folded:
             _n += 1
             _name = f"{_stem}_{_n}"
         _used_stems[_stem] = _n
+        _folded.add(f"{_name}.{fmt}".casefold())
         _zip_entries[f"{_name}.{fmt}"] = _b
     return _zip_entries
 
