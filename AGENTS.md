@@ -61,7 +61,7 @@ No linter or formatter is configured (no config file, nothing in CI).
   qpcr/                          # Computational core -- the single definition
                                  # of parser, quality_control, analysis, graph,
                                  # constants, export_utils, utils, auto/
-  tests/                         # 22 modules
+  tests/                         # 28 modules
   requirements.in                # Direct dependencies -- EDIT THIS ONE
   requirements.txt               # GENERATED lock (all 51 pins); Cloud reads it
   CLAUDE.md                      # Authoritative project instructions
