@@ -7,7 +7,10 @@ Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/derma
 - **Framework:** Streamlit 1.66.0, pinned in `requirements.in` (upgraded from
   1.53.1 on 2026-10-29). Since 1.57 the server is Starlette + uvicorn, not
   Tornado. Since 1.61 `AppTest.from_file` resolves a relative path against the
-  calling file, not the working directory — pass it an absolute path.
+  calling file, not the working directory — pass it an absolute path. Since
+  1.66 `st.tabs` renders with React Aria, not BaseWeb, so the theme CSS must
+  select Streamlit elements by `data-testid` or ARIA role, never
+  `data-baseweb` (guarded by `tests/test_utils.py`).
 - **Language:** Python — dev 3.12, Streamlit Cloud 3.13. The Cloud version is set
   in the deploy dialog's Advanced settings, **not** by a file in the repo.
   `runtime.txt` was deleted 2026-08-24: it is a Heroku convention, Streamlit
@@ -24,7 +27,7 @@ Comprehensive qPCR (quantitative PCR) data analysis platform for cosmetics/derma
 ## How to Run
 ```bash
 streamlit run "streamlit qpcr analysis v1.py"    # http://localhost:8501
-pytest tests/                                      # 534 tests
+pytest tests/                                      # 536 tests
 ```
 
 ## Key Files
@@ -42,7 +45,7 @@ pytest tests/                                      # 534 tests
   `auto/` (screening, test advice, MIQE).
   **Do not re-declare any of these in the monolith** — that dual-copy hazard is
   documented in `tasks/lessons.md` and has bitten this project repeatedly.
-- `tests/` — 28 modules, 534 tests. Note `conftest.py` replaces `streamlit` with
+- `tests/` — 28 modules, 536 tests. Note `conftest.py` replaces `streamlit` with
   a MagicMock, so widget behaviour is invisible to most of the suite; the tests
   that need real Streamlit drive the app through `AppTest` **in a subprocess**
   (see `tests/test_gene_editor_state.py`).
