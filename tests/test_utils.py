@@ -155,3 +155,31 @@ class TestNaturalSortKey:
         
         result = natural_sort_key(None)
         assert isinstance(result, list)
+
+
+class TestAppCssTargetsStableHooks:
+    """The theme CSS must select Streamlit elements by data-testid or ARIA role.
+
+    Streamlit 1.66 swapped its BaseWeb tabs for React Aria, so the
+    ``.stTabs [data-baseweb="tab"]`` rules matched nothing and the tab bar lost
+    its padding, grey labels and divider with no error anywhere. BaseWeb
+    attributes are an implementation detail Streamlit keeps replacing; the
+    test ids and roles are what it keeps stable.
+    """
+
+    @staticmethod
+    def _app_css() -> str:
+        import re
+
+        src = (REPO / "streamlit qpcr analysis v1.py").read_text(encoding="utf-8")
+        blocks = re.findall(r"<style>(.*?)</style>", src, flags=re.S)
+        assert blocks, "no <style> block found in the app"
+        return re.sub(r"/\*.*?\*/", "", "\n".join(blocks), flags=re.S)
+
+    def test_no_selector_depends_on_baseweb_internals(self):
+        assert "data-baseweb" not in self._app_css()
+
+    def test_tab_bar_is_styled_by_role(self):
+        css = self._app_css()
+        assert '.stTabs [role="tablist"]' in css
+        assert '.stTabs [role="tab"]' in css

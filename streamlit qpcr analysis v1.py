@@ -2336,13 +2336,16 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-weight: 600; color: var(--ink); }
     [data-testid="stMetricLabel"] { color: var(--ink-faint); font-weight: 500; font-size: 0.85rem; }
 
-    /* Tabs — active tab gets the Cosmax-red underline */
-    .stTabs [data-baseweb="tab-list"] {
+    /* Tabs — active tab gets the Cosmax-red underline.
+       Matched by ARIA role, not [data-baseweb="tab"]: Streamlit 1.66 renders
+       tabs with React Aria, which has no data-baseweb attribute, so those
+       selectors matched nothing and the tab bar lost this styling. */
+    .stTabs [role="tablist"] {
         gap: 0;
         border-bottom: 1px solid var(--line);
         background: transparent;
     }
-    .stTabs [data-baseweb="tab"] {
+    .stTabs [role="tab"] {
         padding: 12px 22px;
         font-weight: 500;
         font-size: 0.9rem;

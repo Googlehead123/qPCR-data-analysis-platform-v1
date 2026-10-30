@@ -368,3 +368,17 @@ even see the change.
 the output — a tall three-line stack squashing bars until the effect is
 unreadable. If that appears, the first step is **adding a significance dimension
 to the render matrix**, not editing `graph.py`.
+
+## 2026-10-30: Streamlit upgrades — grep app CSS for `data-baseweb`, not just removed APIs
+
+**What went wrong:** The removed-API grep for the 1.53.1 → 1.66.0 upgrade came
+back empty, yet the theme CSS selected `.stTabs [data-baseweb="tab"]` and
+`[data-baseweb="tab-list"]`. Streamlit 1.66 renders tabs with React Aria and no
+longer emits those attributes, so every tab bar silently lost its styling (no
+error, no failing test). Only the screenshot comparison against 1.53 caught it.
+
+**Rule:** for any Streamlit upgrade, also grep the app CSS for `data-baseweb`
+and other internal DOM hooks (hashed `css-*` classes, `.stTabs` internals), and
+style by ARIA role or `data-testid` instead. The guard is
+`TestAppCssTargetsStableHooks` in `tests/test_utils.py`. Keep the screenshot
+comparison in the upgrade checklist; it is the only check that sees this class.

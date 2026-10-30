@@ -16,7 +16,7 @@
 #   /tmp/v312/bin/python -m pytest tests/
 #   (repeat with --python 3.13)
 
-streamlit==1.53.1
+streamlit==1.66.0
 pandas==2.3.3
 numpy==2.5.2
 scipy==1.18.1
